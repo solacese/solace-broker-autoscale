@@ -1,0 +1,359 @@
+{
+  "schema_version": "1",
+  "model_version": "synthetic-v0",
+  "WARNING": "synthetic placeholder data, not measured, do not use for planning",
+  "synthetic": true,
+  "provenance": {
+    "source_filename": "SYNTHETIC (no workbook)",
+    "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "compiled_at": "1970-01-01T00:00:00Z",
+    "compiler_version": "1",
+    "row_count": 0,
+    "platform": "synthetic",
+    "measured_range": {
+      "msg_size_bytes": [
+        100,
+        100000
+      ],
+      "fanout": [
+        1,
+        1
+      ]
+    },
+    "notes": [
+      "Fabricated round numbers. Replace with a compiled model before planning."
+    ]
+  },
+  "service_classes": {
+    "enterprise-250": {
+      "service_class_id": "ENTERPRISE_250_HIGHAVAILABILITY",
+      "connections_max": 250,
+      "spool_bytes_max": 25000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 100000.0,
+              "byte_rate": 10000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 10000.0,
+              "byte_rate": 10000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 1000.0,
+              "byte_rate": 10000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 100.0,
+              "byte_rate": 10000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 10000.0,
+              "byte_rate": 1000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 1000.0,
+              "byte_rate": 1000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 100.0,
+              "byte_rate": 1000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 100.0,
+              "byte_rate": 10000000.0
+            }
+          ]
+        }
+      }
+    },
+    "enterprise-1k": {
+      "service_class_id": "ENTERPRISE_1K_HIGHAVAILABILITY",
+      "connections_max": 1000,
+      "spool_bytes_max": 100000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 200000.0,
+              "byte_rate": 20000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 20000.0,
+              "byte_rate": 20000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 2000.0,
+              "byte_rate": 20000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 200.0,
+              "byte_rate": 20000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 20000.0,
+              "byte_rate": 2000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 2000.0,
+              "byte_rate": 2000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 200.0,
+              "byte_rate": 2000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 100.0,
+              "byte_rate": 10000000.0
+            }
+          ]
+        }
+      }
+    },
+    "enterprise-5k": {
+      "service_class_id": "ENTERPRISE_5K_HIGHAVAILABILITY",
+      "connections_max": 5000,
+      "spool_bytes_max": 250000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 400000.0,
+              "byte_rate": 40000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 40000.0,
+              "byte_rate": 40000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 4000.0,
+              "byte_rate": 40000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 400.0,
+              "byte_rate": 40000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 40000.0,
+              "byte_rate": 4000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 4000.0,
+              "byte_rate": 4000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 400.0,
+              "byte_rate": 4000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 100.0,
+              "byte_rate": 10000000.0
+            }
+          ]
+        }
+      }
+    },
+    "enterprise-10k": {
+      "service_class_id": "ENTERPRISE_10K_HIGHAVAILABILITY",
+      "connections_max": 10000,
+      "spool_bytes_max": 500000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 800000.0,
+              "byte_rate": 80000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 80000.0,
+              "byte_rate": 80000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 8000.0,
+              "byte_rate": 80000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 800.0,
+              "byte_rate": 80000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 80000.0,
+              "byte_rate": 8000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 8000.0,
+              "byte_rate": 8000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 800.0,
+              "byte_rate": 8000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 100.0,
+              "byte_rate": 10000000.0
+            }
+          ]
+        }
+      }
+    },
+    "enterprise-50k": {
+      "service_class_id": "ENTERPRISE_50K_HIGHAVAILABILITY",
+      "connections_max": 50000,
+      "spool_bytes_max": 1000000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 1600000.0,
+              "byte_rate": 160000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 160000.0,
+              "byte_rate": 160000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 16000.0,
+              "byte_rate": 160000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 1600.0,
+              "byte_rate": 160000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 160000.0,
+              "byte_rate": 16000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 16000.0,
+              "byte_rate": 16000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 1600.0,
+              "byte_rate": 16000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 200.0,
+              "byte_rate": 20000000.0
+            }
+          ]
+        }
+      }
+    },
+    "enterprise-100k": {
+      "service_class_id": "ENTERPRISE_100K_HIGHAVAILABILITY",
+      "connections_max": 100000,
+      "spool_bytes_max": 1500000000000,
+      "delivery": {
+        "direct": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 3200000.0,
+              "byte_rate": 320000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 320000.0,
+              "byte_rate": 320000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 32000.0,
+              "byte_rate": 320000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 3200.0,
+              "byte_rate": 320000000.0
+            }
+          ]
+        },
+        "guaranteed": {
+          "size_buckets": [
+            {
+              "msg_size_bytes": 100,
+              "msg_rate": 320000.0,
+              "byte_rate": 32000000.0
+            },
+            {
+              "msg_size_bytes": 1000,
+              "msg_rate": 32000.0,
+              "byte_rate": 32000000.0
+            },
+            {
+              "msg_size_bytes": 10000,
+              "msg_rate": 3200.0,
+              "byte_rate": 32000000.0
+            },
+            {
+              "msg_size_bytes": 100000,
+              "msg_rate": 300.0,
+              "byte_rate": 30000000.0
+            }
+          ]
+        }
+      }
+    }
+  }
+}

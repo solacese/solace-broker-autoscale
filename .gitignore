@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Accuracy store — customer data, never commit (section 7, 12)
+accuracy.db
+*.accuracy.db
+
+# Compiled capacity models built from REAL customer data must never be committed.
+# The synthetic placeholder model (models/synthetic-v0.json) IS committed on purpose.
+models/*.json
+!models/synthetic-v0.json
+
+# Local performance workbooks and any raw measured inputs (section 12)
+performance.xlsx
+*.xlsx
+resources/
+
+# Local runtime / secrets
+*.halt
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# build spec (internal)
+prompt.md

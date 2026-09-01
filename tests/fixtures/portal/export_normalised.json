@@ -1,0 +1,18 @@
+{
+  "_note": "Fictional Event Portal export (normalised form). Fictional names only (§12).",
+  "applications": [
+    {"id": "app-orders-svc", "name": "OrdersService"},
+    {"id": "app-orders-ui", "name": "OrdersUI"},
+    {"id": "app-billing", "name": "BillingService"},
+    {"id": "app-telemetry-ingest", "name": "TelemetryIngest"},
+    {"id": "app-telemetry-dash", "name": "TelemetryDashboard"},
+    {"id": "app-audit", "name": "AuditBridge"}
+  ],
+  "events": [
+    {"id": "ev-order-created", "topic": "acme/orders/created", "producer_app_ids": ["app-orders-svc"], "consumer_app_ids": ["app-orders-ui", "app-billing"]},
+    {"id": "ev-order-shipped", "topic": "acme/orders/shipped", "producer_app_ids": ["app-orders-svc"], "consumer_app_ids": ["app-orders-ui"]},
+    {"id": "ev-invoice", "topic": "acme/orders/invoice", "producer_app_ids": ["app-billing"], "consumer_app_ids": ["app-orders-ui"]},
+    {"id": "ev-telemetry-raw", "topic": "acme/telemetry/raw", "producer_app_ids": ["app-telemetry-ingest"], "consumer_app_ids": ["app-telemetry-dash"]},
+    {"id": "ev-telemetry-agg", "topic": "acme/telemetry/agg", "producer_app_ids": ["app-telemetry-ingest"], "consumer_app_ids": ["app-telemetry-dash"]}
+  ]
+}

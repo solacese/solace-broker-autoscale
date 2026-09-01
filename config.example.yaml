@@ -1,0 +1,73 @@
+# solace-autoscale example configuration (§4).
+# Every unresolved design question is a setting with a conservative default. Unknown keys are
+# rejected. Durations accept 30s / 3m / 45m / 1h forms.
+
+fleet:
+  provider: solace-cloud
+  service_class: enterprise-10k
+  min_brokers: 1
+  max_brokers: 8
+
+topology:
+  mode: sharded            # sharded | mesh | hybrid
+  shard_key: "{domain}"
+  shards:
+    - name: domain-a
+      match: "acme/orders/>"
+    - name: domain-b
+      match: "acme/telemetry/>"
+
+workload:
+  delivery: guaranteed     # direct | guaranteed | mixed
+  bottleneck: auto         # auto | bytes | messages | spool | connections
+
+protocols:                 # enabled per shard; ports read from broker config, never hardcoded
+  smf:   { enabled: true }
+  amqp:  { enabled: true }
+  mqtt:  { enabled: false }
+  rest:  { enabled: true }
+
+integration:
+  dns:
+    enabled: false         # tier 0, zero client change
+    zone: brokers.example.com
+    ttl: 30s
+
+metrics:
+  source: static           # prometheus | cloud-api | semp | static
+  scrape_interval: 30s
+  staleness_limit: 3m      # refuse to decide on data older than this
+  # static_path: ./metrics-sample.json   # required when source: static
+  # endpoint: https://broker.example.com:943   # SEMP base URL when source: semp
+
+policy:
+  headroom:
+    mode: derived          # derived | fixed
+    messages: 0.75
+    bytes: 0.75
+    spool: 0.60
+    connections: 0.85
+    safety_factor: 1.5
+  scale_down_at: 0.40
+  scale_up_window: auto    # auto | duration
+  scale_down_window: 45m
+  cooldown: 15m
+  warm_pool: 1
+
+billing:
+  model: committed         # committed | elastic
+
+actuation:
+  mode: recommend          # recommend | scale-up-only | full   (default recommend; do not change casually)
+  dry_run: true
+  require_confirmation: true
+  max_ops_in_flight: 1
+  max_ops_per_hour: 4
+  kill_switch_file: /var/run/solace-autoscale.halt
+
+capacity:
+  model: models/synthetic-v0.json
+
+accuracy:
+  record: true
+  store: ./accuracy.db
