@@ -38,3 +38,8 @@ resources/
 
 # build spec (internal)
 prompt.md
+
+# actuator + assignment runtime artifacts
+actuator-audit.jsonl
+assignment.db
+*.jsonl
