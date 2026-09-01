@@ -1,4 +1,10 @@
-<title>Broker Capacity Reading</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>solace-autoscale</title>
+<meta name="description" content="Tells an operator how many Solace PubSub+ Cloud brokers a workload needs, and scales the fleet to match. Community project, not a supported product.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Spline+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -59,6 +65,8 @@
   }
 
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   body {
     margin: 0;
     background: var(--ground);
@@ -68,39 +76,61 @@
     -webkit-font-smoothing: antialiased;
   }
   .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); }
+
+  /* ---- top nav ---- */
+  .nav {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: saturate(1.4) blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    max-width: var(--maxw); margin: 0 auto; padding: 12px 24px;
+    display: flex; align-items: center; gap: 18px;
+  }
+  .brand {
+    font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+  }
+  .brand .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--accent); }
+  .nav-links { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .nav-links a {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-soft); text-decoration: none;
+    padding: 6px 10px; border-radius: 6px;
+  }
+  .nav-links a:hover { background: var(--panel-sunk); color: var(--ink); }
+  .nav-links a.primary { background: var(--accent); color: var(--ground); }
+  .nav-links a.primary:hover { filter: brightness(1.06); }
+  .theme-btn {
+    background: var(--panel-sunk); border: 1px solid var(--line); color: var(--ink-soft);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer; font-family: var(--mono); font-size: 12px;
+  }
+  .theme-btn:hover { color: var(--ink); }
+  .theme-btn:focus-visible, .nav-links a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* ---- masthead ---- */
-  header {
-    border-bottom: 1px solid var(--line);
-    padding: 56px 0 40px;
-  }
+  header { border-bottom: 1px solid var(--line); padding: 60px 0 44px; }
   .eyebrow {
-    font-family: var(--mono);
-    font-size: 12px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin: 0 0 18px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 18px;
   }
   h1 {
-    font-family: var(--display);
-    font-weight: 600;
-    font-size: clamp(2.2rem, 5.5vw, 3.6rem);
-    line-height: 1.02;
-    letter-spacing: -0.02em;
-    margin: 0 0 20px;
-    text-wrap: balance;
-    max-width: 16ch;
+    font-family: var(--display); font-weight: 600;
+    font-size: clamp(2.2rem, 5.5vw, 3.7rem); line-height: 1.02; letter-spacing: -0.02em;
+    margin: 0 0 20px; text-wrap: balance; max-width: 17ch;
   }
-  .standfirst {
-    font-size: 1.12rem;
-    color: var(--ink-soft);
-    max-width: 62ch;
-    margin: 0;
+  .standfirst { font-size: 1.12rem; color: var(--ink-soft); max-width: 62ch; margin: 0; }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn {
+    font-family: var(--mono); font-size: 13px; text-decoration: none; padding: 11px 18px;
+    border-radius: 8px; border: 1px solid var(--line-strong); color: var(--ink);
   }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--ground); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn:hover { background: var(--panel-sunk); }
   .meta-row {
-    display: flex; flex-wrap: wrap; gap: 8px 20px;
-    margin-top: 28px;
+    display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 30px;
     font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
   }
   .meta-row b { color: var(--ink-soft); font-weight: 500; }
@@ -111,21 +141,30 @@
     text-transform: uppercase; color: var(--ink-faint);
     display: flex; align-items: center; gap: 12px; margin: 0 0 8px;
   }
-  .section-label::before {
-    content: ""; width: 26px; height: 2px; background: var(--accent);
-  }
+  .section-label::before { content: ""; width: 26px; height: 2px; background: var(--accent); }
   h2 {
     font-family: var(--display); font-weight: 600;
     font-size: clamp(1.5rem, 3vw, 2rem); letter-spacing: -0.01em;
-    margin: 0 0 14px; text-wrap: balance;
+    margin: 0 0 14px; text-wrap: balance; scroll-margin-top: 70px;
   }
   .lede { color: var(--ink-soft); max-width: 64ch; margin: 0 0 32px; }
+
+  /* ---- how it works: three steps ---- */
+  .steps { display: grid; grid-template-columns: 1fr; gap: 18px; }
+  @media (min-width: 720px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+  .step {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
+  }
+  .step .n {
+    font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: 0.1em;
+  }
+  .step h3 { font-family: var(--display); font-size: 1.1rem; margin: 8px 0 8px; }
+  .step p { color: var(--ink-soft); font-size: 0.95rem; margin: 0; }
 
   /* ---- capacity curve ---- */
   .curve-panel {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 28px; display: grid;
-    grid-template-columns: 1fr; gap: 26px;
+    border-radius: 10px; padding: 28px; display: grid; grid-template-columns: 1fr; gap: 26px;
   }
   @media (min-width: 760px) { .curve-panel { grid-template-columns: 1.4fr 1fr; } }
   figure { margin: 0; }
@@ -139,20 +178,14 @@
     color: var(--ink); line-height: 1; letter-spacing: -0.02em;
   }
   .curve-read .big span { color: var(--accent); }
-  .collapse {
-    border-left: 2px solid var(--warn); padding-left: 14px; color: var(--ink-soft);
-  }
+  .collapse { border-left: 2px solid var(--warn); padding-left: 14px; color: var(--ink-soft); }
 
   /* ---- scenario cards ---- */
   .scenarios { display: flex; flex-direction: column; gap: 22px; }
-  .scn {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; overflow: hidden;
-  }
+  .scn { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .scn-head {
     display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px;
-    padding: 20px 24px; border-bottom: 1px solid var(--line);
-    background: var(--panel-sunk);
+    padding: 20px 24px; border-bottom: 1px solid var(--line); background: var(--panel-sunk);
   }
   .scn-tag {
     font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em;
@@ -171,9 +204,7 @@
   .verdict .action.up { color: var(--accent); }
   .verdict .action.hold { color: var(--ink); }
   .verdict .action.stop { color: var(--crit); }
-  .verdict .brokers {
-    font-family: var(--mono); font-size: 13px; color: var(--ink-soft);
-  }
+  .verdict .brokers { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); }
   .verdict .brokers b { color: var(--ink); font-weight: 600; }
   .verdict .why { color: var(--ink-soft); font-size: 0.95rem; margin-top: 4px; }
   .badge {
@@ -196,25 +227,23 @@
   .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px 0 0 3px; }
   .fill.ok { background: color-mix(in srgb, var(--accent) 55%, transparent); }
   .fill.over { background: color-mix(in srgb, var(--crit) 62%, transparent); }
-  .thresh {
-    position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--warn);
+  .thresh { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--warn); }
+  .axis-val {
+    font-family: var(--mono); font-size: 12px; text-align: right; color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
   }
-  .axis-val { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .axis-val.over { color: var(--crit); font-weight: 600; }
   .track-key {
     font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
-    display: flex; gap: 16px; margin-top: 4px;
+    display: flex; flex-wrap: wrap; gap: 16px; margin-top: 4px;
   }
   .track-key span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 18px; height: 3px; display: inline-block; }
 
-  /* ---- cost + whatif ---- */
+  /* ---- cards / grids / code ---- */
   .grid2 { display: grid; grid-template-columns: 1fr; gap: 22px; }
   @media (min-width: 720px) { .grid2 { grid-template-columns: 1fr 1fr; } }
-  .card {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 24px;
-  }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
   .card h3 { font-family: var(--display); font-weight: 600; font-size: 1.1rem; margin: 0 0 16px; }
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
   th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
@@ -223,30 +252,101 @@
   tbody tr:last-child td { border-bottom: none; font-weight: 600; color: var(--ink); }
   td .delta-up { color: var(--crit); }
   .ceil { color: var(--crit); }
+  .note { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); margin: 14px 0 0; }
 
-  footer { padding: 40px 0 64px; color: var(--ink-faint); font-family: var(--mono); font-size: 12px; }
+  pre {
+    background: var(--panel-sunk); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; overflow-x: auto; margin: 0;
+  }
+  pre code { font-family: var(--mono); font-size: 13px; color: var(--ink); line-height: 1.7; }
+  .cmt { color: var(--ink-faint); }
+  .kw { color: var(--accent); }
+
+  .customize { display: grid; grid-template-columns: 1fr; gap: 18px; }
+  @media (min-width: 720px) { .customize { grid-template-columns: repeat(2, 1fr); } }
+  .knob { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+  .knob code { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .knob h3 { font-family: var(--display); font-size: 1.02rem; margin: 0 0 6px; }
+  .knob p { color: var(--ink-soft); font-size: 0.93rem; margin: 6px 0 0; }
+
+  footer { padding: 44px 0 72px; color: var(--ink-faint); font-family: var(--mono); font-size: 12px; }
   footer p { margin: 4px 0; }
-  a { color: var(--accent); }
+  footer a { color: var(--ink-soft); }
 </style>
+</head>
+<body>
 
-<header>
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top"><span class="dot"></span> solace-autoscale</a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#readings">Readings</a>
+      <a href="#start">Quickstart</a>
+      <a href="#customize">Customize</a>
+      <button class="theme-btn" id="themeToggle" type="button" aria-label="Toggle color theme">theme</button>
+      <a class="primary" href="https://github.com/solacese/solace-autoscale">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header id="top">
   <div class="wrap">
-    <p class="eyebrow">solace-autoscale &middot; capacity reading</p>
+    <p class="eyebrow">horizontal scaling for solace pubsub+ cloud</p>
     <h1>How many brokers does this workload actually need?</h1>
     <p class="standfirst">
       Vertical scaling on Solace Cloud has a ceiling. When message sizes or adoption keep growing,
       the question stops being "which bigger service class" and becomes "how many brokers, and
-      when." This is that decision, worked three ways against a real compiled capacity model &mdash; with
-      the reasoning shown, not hidden behind a number.
+      when." <b>solace-autoscale</b> answers it from a broker capacity model you compile yourself,
+      with a pure, deterministic decision engine &mdash; and shows the reasoning instead of hiding it
+      behind a number.
     </p>
+    <div class="cta-row">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn" href="https://github.com/solacese/solace-autoscale">View on GitHub</a>
+      <a class="btn" href="#readings">See it decide</a>
+    </div>
     <div class="meta-row">
-      <span><b>Model</b> db6749ba40f9&hellip;+cs1</span>
-      <span><b>Class</b> enterprise-10k &middot; HA</span>
-      <span><b>Source</b> AWS r6in, guaranteed messaging</span>
-      <span><b>Engine</b> pure &middot; deterministic</span>
+      <span><b>Apache 2.0</b></span>
+      <span><b>Python</b> 3.11+</span>
+      <span><b>Engine</b> pure &middot; no I/O &middot; deterministic</span>
+      <span><b>Actuation</b> off by default</span>
     </div>
   </div>
 </header>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="wrap">
+    <p class="section-label">how it works</p>
+    <h2>Compile a model, read the workload, get a defensible recommendation</h2>
+    <p class="lede">
+      Nothing is guessed and nothing is hidden. Capacity comes from measured numbers you compile to a
+      versioned model; the decision is a pure function of that model plus live metrics; the report
+      carries its provenance so a recommendation is still reproducible six weeks later.
+    </p>
+    <div class="steps">
+      <div class="step">
+        <span class="n">01 / compile</span>
+        <h3>Your numbers, versioned</h3>
+        <p>A build step turns a performance workbook into versioned JSON. The runtime never reads a
+          spreadsheet, and every decision records the model version that produced it.</p>
+      </div>
+      <div class="step">
+        <span class="n">02 / decide</span>
+        <h3>Pure &amp; explainable</h3>
+        <p>Four capacity axes &mdash; messages, bytes, connections, spool &mdash; each with its own
+          threshold. The engine reports the binding one, so you see <em>why</em>, not just how many.</p>
+      </div>
+      <div class="step">
+        <span class="n">03 / act (optional)</span>
+        <h3>Recommend by default</h3>
+        <p>Ships in recommend mode &mdash; the actuator isn't even constructed. Turn on scaling
+          deliberately, behind a safety layer that refuses anything unsafe.</p>
+      </div>
+    </div>
+  </div>
+</section>
 
 <!-- THESIS: the capacity curve -->
 <section>
@@ -276,7 +376,7 @@
 </section>
 
 <!-- THREE READINGS -->
-<section>
+<section id="readings">
   <div class="wrap">
     <p class="section-label">three readings</p>
     <h2>The same engine, three workloads</h2>
@@ -314,10 +414,8 @@
             <tr><td>fleet + warm pool</td><td>+1 idle</td><td>25,200</td><td><span class="delta-up">+21,000</span></td></tr>
           </tbody>
         </table>
-        <p style="font-family:var(--mono);font-size:12px;color:var(--ink-faint);margin:14px 0 0;">
-          Warm pool is billed idle capacity &mdash; under committed billing there is no offsetting saving.
-          Prices are the operator's own; none ship with the tool.
-        </p>
+        <p class="note">Warm pool is billed idle capacity &mdash; under committed billing there is no
+          offsetting saving. Prices are the operator's own; none ship with the tool.</p>
       </div>
       <div class="card">
         <h3>What-if &mdash; required brokers under load &times;</h3>
@@ -330,10 +428,86 @@
             <tr><td>8&times;</td><td>8</td><td>bytes</td><td class="ceil">hit</td></tr>
           </tbody>
         </table>
-        <p style="font-family:var(--mono);font-size:12px;color:var(--ink-faint);margin:14px 0 0;">
-          At 2&times; this workload already exhausts the 8-broker ceiling. That is a re-shard or
-          claim-check conversation now, not a surprise in a quarter.
-        </p>
+        <p class="note">At 2&times; this workload already exhausts the 8-broker ceiling. That is a
+          re-shard or claim-check conversation now, not a surprise in a quarter.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- QUICKSTART -->
+<section id="start">
+  <div class="wrap">
+    <p class="section-label">quickstart</p>
+    <h2>Running in three commands</h2>
+    <p class="lede">
+      Until you compile your own model, everything runs against a clearly-labelled synthetic model
+      that is blocked from any real action. Install, get a recommendation, project ahead.
+    </p>
+    <pre><code><span class="cmt"># install (Python 3.11+)</span>
+python -m venv .venv &amp;&amp; . .venv/bin/activate
+pip install -e <span class="kw">'.[dev]'</span>
+
+<span class="cmt"># 1. compile your measured workbook into a versioned model (runs in CI too)</span>
+solace-autoscale compile --workbook performance.xlsx \
+    --service-classes models/service-classes.json --out models/mymodel.json
+
+<span class="cmt"># 2. get a recommendation, with the reasoning and cost</span>
+solace-autoscale recommend --config config.example.yaml --metrics metrics.json
+
+<span class="cmt"># 3. project the fleet under 2x / 4x load</span>
+solace-autoscale whatif --config config.example.yaml --metrics metrics.json --multipliers 1,2,4</code></pre>
+    <p class="note">Other commands: <b>simulate</b> (validate the model across the full size &times; fanout
+      matrix), <b>monitor</b> (scrape SEMP continuously and accrue accuracy history), <b>accuracy</b>
+      (predicted vs actual), <b>shard-advise</b> (propose shard boundaries from an Event Portal
+      export), <b>serve</b> (the assignment service).</p>
+  </div>
+</section>
+
+<!-- CUSTOMIZE -->
+<section id="customize">
+  <div class="wrap">
+    <p class="section-label">customize</p>
+    <h2>Every unresolved decision is a setting with a safe default</h2>
+    <p class="lede">
+      Configuration is one validated YAML file; unknown keys are rejected. The defaults are
+      conservative, and each knob is documented. A few of the ones you will reach for first:
+    </p>
+    <div class="customize">
+      <div class="knob">
+        <h3>Fleet bounds</h3>
+        <code>fleet.min_brokers / max_brokers</code>
+        <p>Clamp every recommendation. Hitting the ceiling is reported, never silently absorbed.</p>
+      </div>
+      <div class="knob">
+        <h3>Topology</h3>
+        <code>topology.mode: sharded | mesh | hybrid</code>
+        <p>Mesh adds inter-broker link cost to the bytes and spool axes &mdash; deliberately, so large
+          payloads make mesh look as expensive as it is.</p>
+      </div>
+      <div class="knob">
+        <h3>Headroom</h3>
+        <code>policy.headroom.mode: derived | fixed</code>
+        <p>Derived headroom tightens the threshold to leave room for growth that arrives while a
+          broker provisions. Your configured value is a ceiling, never a floor.</p>
+      </div>
+      <div class="knob">
+        <h3>Billing &amp; cost</h3>
+        <code>billing.model &middot; per_broker_monthly</code>
+        <p>Committed billing suppresses scale-down. Add your own price table to turn broker counts
+          into monthly dollars; no pricing ships with the tool.</p>
+      </div>
+      <div class="knob">
+        <h3>Metrics source</h3>
+        <code>metrics.source: semp | prometheus | cloud-api | static</code>
+        <p>SEMPv2 field names are verified against a live broker; sources without a captured sample
+          are documented stubs rather than guesses.</p>
+      </div>
+      <div class="knob">
+        <h3>Actuation</h3>
+        <code>actuation.mode: recommend | scale-up-only | full</code>
+        <p>Defaults to recommend, and stays there. Turning on scaling is a deliberate edit, behind a
+          kill switch, rate limits, and pre-delete safety checks.</p>
       </div>
     </div>
   </div>
@@ -341,13 +515,30 @@
 
 <footer>
   <div class="wrap">
-    <p>Community project. Not a supported Solace product. No warranty.</p>
+    <p>Community project. Not a supported Solace product. No warranty. Apache&nbsp;2.0.</p>
     <p>The decision engine is a pure function: state in, target state out &mdash; no I/O, no clock, no
       logging. Every figure here carries its model version and provenance.</p>
+    <p><a href="https://github.com/solacese/solace-autoscale">github.com/solacese/solace-autoscale</a></p>
   </div>
 </footer>
 
 <script>
+  // ---- theme toggle (persisted) ----
+  (function () {
+    const root = document.documentElement;
+    const btn = document.getElementById("themeToggle");
+    let stored = null;
+    try { stored = localStorage.getItem("sa-theme"); } catch (e) { /* private mode */ }
+    if (stored === "dark" || stored === "light") root.setAttribute("data-theme", stored);
+    btn.addEventListener("click", () => {
+      const dark = getComputedStyle(root).getPropertyValue("--ground").trim() === "#0e1116";
+      const next = dark ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("sa-theme", next); } catch (e) { /* ignore */ }
+      drawCurve();
+    });
+  })();
+
   const CURVE = [
     {size: 512, rate: 50842}, {size: 1024, rate: 44192}, {size: 2048, rate: 29057},
     {size: 8192, rate: 8328}, {size: 65536, rate: 1284}, {size: 204800, rate: 439}
@@ -396,47 +587,50 @@
   ];
 
   // ---- render scenario cards ----
-  const host = document.getElementById("scenarios");
-  const MAX = 3.6; // bar scale ceiling (ratio units)
-  for (const s of SCENARIOS) {
-    const card = document.createElement("div");
-    card.className = "scn";
-    const badge = s.badge ? `<span class="badge ${s.badge.cls}">${s.badge.text}</span>` : "";
-    const axes = s.axes.map(a => {
-      const over = a.ratio > 1;
-      const pct = Math.min(100, (a.ratio / MAX) * 100);
-      const thrPct = Math.min(100, (a.thr / MAX) * 100);
-      const val = a.ratio.toFixed(2) + "&times;";
-      return `<div class="axis-row">
-        <span class="axis-name ${a.bind ? "bind" : ""}">${a.name}${a.bind ? " &#9666;" : ""}</span>
-        <span class="track">
-          <span class="fill ${over ? "over" : "ok"}" style="width:${pct}%"></span>
-          <span class="thresh" style="left:${thrPct}%"></span>
-        </span>
-        <span class="axis-val ${over ? "over" : ""}">${val}</span>
-      </div>`;
-    }).join("");
-    card.innerHTML = `
-      <div class="scn-head">
-        <span class="scn-tag">${s.tag}</span>
-        <h3 class="scn-title">${s.title}</h3>
-        <span class="scn-input">${s.input}</span>
-      </div>
-      <div class="scn-body">
-        <div class="verdict">
-          <span class="action ${s.cls}">${s.action}</span>
-          <span class="brokers">brokers <b>${s.from} &rarr; ${s.to}</b> &middot; binding axis <b>bytes</b></span>
-          <span class="why">${s.why}</span>
-          ${badge}
-        </div>
-        <div class="axes">${axes}</div>
-      </div>`;
-    host.appendChild(card);
-  }
-
-  // ---- capacity curve (log-log, endpoint emphasized) ----
   (function () {
+    const host = document.getElementById("scenarios");
+    const MAX = 3.6; // bar scale ceiling (ratio units)
+    for (const s of SCENARIOS) {
+      const card = document.createElement("div");
+      card.className = "scn";
+      const badge = s.badge ? `<span class="badge ${s.badge.cls}">${s.badge.text}</span>` : "";
+      const axes = s.axes.map(a => {
+        const over = a.ratio > 1;
+        const pct = Math.min(100, (a.ratio / MAX) * 100);
+        const thrPct = Math.min(100, (a.thr / MAX) * 100);
+        const val = a.ratio.toFixed(2) + "&times;";
+        return `<div class="axis-row">
+          <span class="axis-name ${a.bind ? "bind" : ""}">${a.name}${a.bind ? " &#9666;" : ""}</span>
+          <span class="track">
+            <span class="fill ${over ? "over" : "ok"}" style="width:${pct}%"></span>
+            <span class="thresh" style="left:${thrPct}%"></span>
+          </span>
+          <span class="axis-val ${over ? "over" : ""}">${val}</span>
+        </div>`;
+      }).join("");
+      card.innerHTML = `
+        <div class="scn-head">
+          <span class="scn-tag">${s.tag}</span>
+          <h3 class="scn-title">${s.title}</h3>
+          <span class="scn-input">${s.input}</span>
+        </div>
+        <div class="scn-body">
+          <div class="verdict">
+            <span class="action ${s.cls}">${s.action}</span>
+            <span class="brokers">brokers <b>${s.from} &rarr; ${s.to}</b> &middot; binding axis <b>bytes</b></span>
+            <span class="why">${s.why}</span>
+            ${badge}
+          </div>
+          <div class="axes">${axes}</div>
+        </div>`;
+      host.appendChild(card);
+    }
+  })();
+
+  // ---- capacity curve (log-log, endpoint emphasized) -- redrawn on theme change ----
+  function drawCurve() {
     const cv = document.getElementById("curve");
+    if (!cv) return;
     const ctx = cv.getContext("2d");
     const css = getComputedStyle(document.documentElement);
     const trace = css.getPropertyValue("--trace").trim();
@@ -456,7 +650,6 @@
     ctx.font = "11px 'IBM Plex Mono', monospace";
     ctx.textBaseline = "middle";
 
-    // gridlines: message rate decades
     ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1;
     [1000, 10000, 100000].forEach(r => {
       if (r < Math.pow(10, ymin) || r > Math.pow(10, ymax)) return;
@@ -465,14 +658,12 @@
       ctx.globalAlpha = 1; ctx.textAlign = "right";
       ctx.fillText((r / 1000) + "k", x0 - 8, y);
     });
-    // x labels
     ctx.textAlign = "center";
     CURVE.forEach(d => {
       const lbl = d.size >= 1024 ? (d.size / 1024) + "K" : d.size + "B";
       ctx.fillText(lbl, px(d.size), y0 + 16);
     });
 
-    // area under trace
     const grad = ctx.createLinearGradient(0, y1, 0, y0);
     grad.addColorStop(0, trace + "44"); grad.addColorStop(1, trace + "00");
     ctx.beginPath(); ctx.moveTo(px(CURVE[0].size), y0);
@@ -480,23 +671,25 @@
     ctx.lineTo(px(CURVE[CURVE.length - 1].size), y0); ctx.closePath();
     ctx.fillStyle = grad; ctx.fill();
 
-    // trace
     ctx.beginPath();
     CURVE.forEach((d, i) => i ? ctx.lineTo(px(d.size), py(d.rate)) : ctx.moveTo(px(d.size), py(d.rate)));
     ctx.strokeStyle = trace; ctx.lineWidth = 2.5; ctx.stroke();
 
-    // points, endpoints emphasized
     CURVE.forEach((d, i) => {
       const emph = i === 0 || i === CURVE.length - 1;
       ctx.beginPath(); ctx.arc(px(d.size), py(d.rate), emph ? 5 : 3, 0, Math.PI * 2);
       ctx.fillStyle = emph ? warn : trace; ctx.fill();
       ctx.strokeStyle = css.getPropertyValue("--panel").trim(); ctx.lineWidth = 2; ctx.stroke();
     });
-    // endpoint labels
     ctx.fillStyle = css.getPropertyValue("--ink").trim();
     ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "left";
     ctx.fillText("44k @1KB", px(CURVE[1].size) + 8, py(CURVE[1].rate) - 4);
     ctx.textAlign = "right";
     ctx.fillText("439 @200KB", px(CURVE[5].size) - 8, py(CURVE[5].rate) - 10);
-  })();
+  }
+  drawCurve();
+  // redraw when the OS theme changes (system mode)
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawCurve);
 </script>
+</body>
+</html>
