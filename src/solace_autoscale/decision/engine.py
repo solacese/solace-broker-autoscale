@@ -8,6 +8,7 @@ sample timestamps. The engine never calls a clock.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..capacity.model import CapacityPoint, lookup
@@ -151,10 +152,10 @@ def decide(req: DecisionRequest) -> ShardDecision:
         derived_inputs: dict[str, float] = {}
         effective = configured
         if cfg.policy.headroom.mode == "derived":
-            growth = hr.peak_growth_rate_per_min(
-                shard.samples,
-                lambda s, a=axis: _axis_raw_demand(a, s, shard.subscribing_brokers, mesh),
-            )
+            def _axis_demand(s: MetricSample, a: Axis = axis) -> float:
+                return _axis_raw_demand(a, s, shard.subscribing_brokers, mesh)
+
+            growth = hr.peak_growth_rate_per_min(shard.samples, _axis_demand)
             dh = hr.derive_headroom(
                 growth, minutes_to_cap, cfg.policy.headroom.safety_factor, minutes_is_assumption
             )
@@ -344,7 +345,7 @@ def _held_condition(
     mesh: bool,
     window_secs: float,
     per_broker_cap: float,
-    predicate,
+    predicate: Callable[[float], bool],
 ) -> bool:
     """True iff ``predicate(demand_ratio)`` holds for every sample within ``window_secs`` of latest.
 

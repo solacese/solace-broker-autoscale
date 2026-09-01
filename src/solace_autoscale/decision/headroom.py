@@ -6,6 +6,7 @@ while capacity is being added.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .types import MetricSample
@@ -35,7 +36,7 @@ def _percentile(sorted_vals: list[float], p: float) -> float:
 
 def peak_growth_rate_per_min(
     samples: list[MetricSample],
-    axis_value: callable,  # type: ignore[valid-type]
+    axis_value: Callable[[MetricSample], float],
 ) -> float:
     """95th percentile of one-minute-over-one-minute fractional growth in the binding axis (§5.7).
 

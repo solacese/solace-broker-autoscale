@@ -14,6 +14,7 @@ Two uses:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..capacity.model import lookup
 from ..capacity.schema import CapacityModel
@@ -79,7 +80,8 @@ def build_window(
     return out
 
 
-def run_cell(config: Config, model: CapacityModel, cell: WorkloadCell, **window_kw) -> SweepResult:
+def run_cell(config: Config, model: CapacityModel, cell: WorkloadCell,
+             **window_kw: Any) -> SweepResult:
     samples = build_window(model, cell, **window_kw)
     cfg = config.model_copy(deep=True)
     # align config to the cell's delivery so the engine looks up the right curve
@@ -152,7 +154,7 @@ def validate_model(config: Config, model: CapacityModel) -> ValidationReport:
     failures: list[str] = []
     # Use fixed headroom for arithmetic determinism in validation.
     cfg = config.model_copy(deep=True)
-    cfg.policy.headroom.mode = "fixed"  # type: ignore[assignment]
+    cfg.policy.headroom.mode = "fixed"
     cfg.fleet.min_brokers = 1
     cfg.fleet.max_brokers = 64  # generous so invariant C isn't masked by clamping
 
@@ -160,7 +162,7 @@ def validate_model(config: Config, model: CapacityModel) -> ValidationReport:
     total = len(results)
 
     # group by (class, delivery, size, fanout) → sort by utilisation
-    groups: dict[tuple, list[SweepResult]] = {}
+    groups: dict[tuple[str, str, int, int], list[SweepResult]] = {}
     for r in results:
         k = (r.cell.service_class, r.cell.delivery, r.cell.msg_size_bytes, r.cell.fanout)
         groups.setdefault(k, []).append(r)

@@ -139,7 +139,9 @@ def advise(doc: dict[str, Any]) -> AdviceResult:
     # Union-Find over nodes tagged ("app", id) and ("topic", topic).
     parent: dict[tuple[str, str], tuple[str, str]] = {}
 
-    def find(x):
+    Node = tuple[str, str]
+
+    def find(x: Node) -> Node:
         parent.setdefault(x, x)
         root = x
         while parent[root] != root:
@@ -148,7 +150,7 @@ def advise(doc: dict[str, Any]) -> AdviceResult:
             parent[x], x = root, parent[x]
         return root
 
-    def union(a, b):
+    def union(a: Node, b: Node) -> None:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[ra] = rb

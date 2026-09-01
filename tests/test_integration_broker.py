@@ -36,8 +36,9 @@ pytestmark = pytest.mark.integration
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "adapters" / "python"))
 
-from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState  # noqa: E402
 from solace_autoscale_client.resolver import Resolver  # noqa: E402
+
+from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState  # noqa: E402
 
 HOST = os.environ.get("SOLACE_HOST", "127.0.0.1")
 SMF_PORT = int(os.environ.get("SOLACE_SMF_PORT", "55556"))
@@ -148,9 +149,9 @@ def test_amqp_send(tmp_path):
 # ---- SMF (Solace messaging API) --------------------------------------------------------------
 
 def test_smf_guaranteed_publish(tmp_path):
+    from solace.messaging.config.transport_security_strategy import TLS  # noqa: F401
     from solace.messaging.messaging_service import MessagingService
     from solace.messaging.resources.topic import Topic
-    from solace.messaging.config.transport_security_strategy import TLS  # noqa: F401
     from solace_autoscale_client.adapters import smf_host
 
     r = _resolver(_store(tmp_path))

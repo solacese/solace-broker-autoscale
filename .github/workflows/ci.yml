@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "build/**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check src/ tests/ adapters/python/ dns/
+      - name: Type check
+        run: mypy src/solace_autoscale
+      - name: Test (unit only; integration needs a live broker)
+        run: pytest -m "not integration" -q
+
+  compile-synthetic-model:
+    # §6: the compiler runs in CI. Here it recompiles the synthetic placeholder from its generator
+    # and asserts the committed model is byte-identical, so a compiler change that would alter the
+    # model can't slip in unnoticed. Real customer workbooks are never in CI (§12).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: Regenerate synthetic model and check it is committed unchanged
+        run: |
+          python scripts/make_synthetic_model.py
+          git diff --exit-code models/synthetic-v0.json
+      - name: Validate the synthetic model across the full matrix
+        run: |
+          cat > /tmp/ci.yaml <<'YAML'
+          capacity: {model: models/synthetic-v0.json}
+          metrics: {source: static}
+          YAML
+          solace-autoscale simulate --config /tmp/ci.yaml
+
+  integration:
+    # Live-broker protocol integration tests (§9.3 gate). Runs a real Solace broker as a service.
+    runs-on: ubuntu-latest
+    services:
+      solace:
+        image: solace/solace-pubsub-standard:latest
+        ports:
+          - 8080:8080
+          - 55555:55555
+          - 5672:5672
+          - 1883:1883
+          - 9000:9000
+        env:
+          username_admin_globalaccesslevel: admin
+          username_admin_password: admin
+        options: >-
+          --shm-size=1g
+          --ulimit core=-1
+          --ulimit nofile=1048576:1048576
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with integration protocol clients)
+        run: pip install -e '.[dev,integration]'
+      - name: Wait for broker SEMP + enable services
+        run: |
+          for i in $(seq 1 60); do
+            curl -s -u admin:admin http://localhost:8080/SEMP/v2/monitor/about/api | grep -q sempVersion && break
+            sleep 3
+          done
+          B=http://localhost:8080/SEMP/v2/config
+          curl -s -u admin:admin -X PATCH "$B/msgVpns/default/clientUsernames/default" -H 'Content-Type: application/json' -d '{"enabled":true,"password":"default"}'
+          curl -s -u admin:admin -X PATCH "$B/msgVpns/default" -H 'Content-Type: application/json' -d '{"authenticationBasicEnabled":true,"authenticationBasicType":"internal","serviceAmqpPlainTextEnabled":true,"serviceMqttPlainTextEnabled":true,"serviceRestIncomingPlainTextEnabled":true,"maxMsgSpoolUsage":1500}'
+          curl -s -u admin:admin -X POST "$B/msgVpns/default/queues" -H 'Content-Type: application/json' -d '{"queueName":"q.test","accessType":"exclusive","permission":"consume","ingressEnabled":true,"egressEnabled":true}'
+          curl -s -u admin:admin -X POST "$B/msgVpns/default/queues/q.test/subscriptions" -H 'Content-Type: application/json' -d '{"subscriptionTopic":"test/guaranteed/>"}'
+      - name: Integration tests (CI broker uses default 55555/5672/1883/9000)
+        env:
+          SOLACE_SMF_PORT: "55555"
+          SOLACE_AMQP_PORT: "5672"
+          SOLACE_MQTT_PORT: "1883"
+          SOLACE_REST_PORT: "9000"
+        run: pytest -m integration -q

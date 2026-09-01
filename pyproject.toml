@@ -79,3 +79,7 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 ignore_missing_imports = true
+# JSON/HTTP boundaries (collectors, cloud client, FastAPI handlers) return dynamically-typed data;
+# requiring full generic parametrisation and non-Any returns there adds casts without adding safety.
+disallow_any_generics = false
+warn_return_any = false

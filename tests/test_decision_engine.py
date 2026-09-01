@@ -333,3 +333,38 @@ def test_determinism_same_input_same_output():
     d1 = run(cfg, model, shard)
     d2 = run(cfg, model, shard)
     assert d1 == d2
+
+
+# ---- mixed delivery + purity guard ----------------------------------------------------------
+
+def test_mixed_delivery_uses_conservative_curve():
+    from solace_autoscale.capacity.model import lookup
+    model = make_test_model()
+    # guaranteed msg_rate (8000 @1KB) < direct (10000) → mixed must pick the lower (guaranteed)
+    cap = lookup(model, "enterprise-10k", 1000, "mixed")
+    assert cap.msg_rate == 8000.0
+
+
+def test_mixed_delivery_engine_path():
+    cfg = default_config(workload={"delivery": "mixed", "bottleneck": "messages"},
+                         policy={"headroom": {"mode": "fixed"}})
+    model = make_test_model()
+    shard = ShardInput("s", window(n=20, ingress_msg_rate=12000, avg_msg_size=1000))
+    d = run(cfg, model, shard)
+    # required = ceil(12000 / (0.75 * 8000)) = ceil(2.0) = 2  (uses guaranteed=8000, the conservative)
+    assert d.recommended_brokers == 2
+
+
+def test_decision_engine_is_pure_no_forbidden_imports():
+    import ast
+    from pathlib import Path
+    forbidden = {"httpx", "requests", "logging", "sqlite3", "socket", "urllib"}
+    for name in ("engine.py", "headroom.py", "types.py"):
+        src = Path(__file__).resolve().parents[1] / "src" / "solace_autoscale" / "decision" / name
+        tree = ast.parse(src.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    assert a.name.split(".")[0] not in forbidden, f"{name} imports {a.name}"
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert node.module.split(".")[0] not in forbidden, f"{name} imports {node.module}"
