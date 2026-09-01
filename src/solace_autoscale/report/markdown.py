@@ -11,8 +11,45 @@ from __future__ import annotations
 from ..capacity.schema import CapacityModel
 from ..config import Config
 from ..decision.types import ShardDecision
+from .cost import fleet_cost_summary
 
 _AXIS_ORDER = ("messages", "bytes", "connections", "spool")
+
+
+def _render_cost(config: Config, decisions: list[ShardDecision]) -> list[str]:
+    summary = fleet_cost_summary(config, decisions)
+    out: list[str] = ["## Cost"]
+    cur = config.billing.currency
+    if not summary["priced"]:
+        out.append(
+            "- No price table configured (`billing.per_broker_monthly`), so only broker counts are "
+            "shown. Add your own rates to see monthly cost and deltas."
+        )
+        total_cur = sum(d.current_brokers for d in decisions)
+        total_rec = sum(d.recommended_brokers for d in decisions)
+        out.append(f"- Fleet brokers: **{total_cur} → {total_rec}** across {len(decisions)} shard(s).")
+        out.append("")
+        return out
+
+    out.append(f"| Shard | Brokers (cur→rec) | Monthly {cur} (cur→rec) | Δ / month |")
+    out.append("|---|---|---|---|")
+    for c in summary["per_shard"]:
+        out.append(
+            f"| {c['shard']} | {c['current_brokers']}→{c['recommended_brokers']} | "
+            f"{c['current_monthly']:.0f}→{c['recommended_monthly']:.0f} | "
+            f"{c['delta_monthly']:+.0f} |"
+        )
+    out.append(
+        f"| **fleet** | | **{summary['total_current_monthly']:.0f}→"
+        f"{summary['total_recommended_monthly']:.0f}** | "
+        f"**{summary['total_delta_monthly']:+.0f}** |"
+    )
+    if summary["warm_pool_monthly"] is not None:
+        out.append("")
+        note = summary["warm_pool_note"] or "billed idle capacity"
+        out.append(f"- **Warm pool:** {summary['warm_pool_monthly']:.0f} {cur}/month — {note}.")
+    out.append("")
+    return out
 
 
 def render(config: Config, model: CapacityModel, decisions: list[ShardDecision]) -> str:
@@ -41,6 +78,8 @@ def render(config: Config, model: CapacityModel, decisions: list[ShardDecision])
     for d in decisions:
         lines.extend(_render_shard(d))
         lines.append("")
+
+    lines.extend(_render_cost(config, decisions))
 
     lines.append("---")
     prov = model.provenance

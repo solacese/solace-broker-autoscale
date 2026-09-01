@@ -18,10 +18,14 @@ import json as _json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .decision.types import ShardInput
 
 
 @click.group()
@@ -53,6 +57,24 @@ def compile(workbook: str, service_classes: str, out: str, platform: str | None)
         click.echo(f"  {len(res.notes)} provenance note(s)")
 
 
+def _load_static_shards(static_path: str) -> list[ShardInput]:
+    """Build ShardInput per shard from a static metrics file, carrying subscribing_brokers and
+    key_subdividable so mesh amplification (§5.3) and hot-shard (§5.6) actually fire from the CLI."""
+    from .decision.types import ShardInput
+    from .metrics.static import StaticCollector
+
+    collector = StaticCollector(static_path)
+    shards = []
+    for name in collector.shard_names():
+        shards.append(ShardInput(
+            shard_name=name,
+            samples=collector.window(name),
+            subscribing_brokers=collector.subscribing_brokers(name),
+            key_subdividable=collector.key_subdividable(name),
+        ))
+    return shards
+
+
 @main.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 @click.option("--metrics", "metrics_path", default=None, type=click.Path(exists=True),
@@ -64,8 +86,6 @@ def recommend(config_path: str, metrics_path: str | None, fmt: str, now: float |
     from .capacity.model import load_model
     from .config import load_config
     from .decision.engine import DecisionRequest, decide
-    from .decision.types import ShardInput
-    from .metrics.static import StaticCollector
     from .report import json as jr
     from .report import markdown as mr
 
@@ -76,25 +96,51 @@ def recommend(config_path: str, metrics_path: str | None, fmt: str, now: float |
     static_path = metrics_path or (cfg.metrics.static_path if cfg.metrics.source == "static" else None)
     if static_path is None:
         click.echo(
-            "recommend currently reads metrics from a static JSON window. Pass --metrics PATH or "
-            "set metrics.source: static with metrics.static_path. Live SEMP collection is wired via "
-            "the SempCollector but not yet exposed as a --metrics-source flag.",
+            "recommend reads a static metrics window here. Pass --metrics PATH or set "
+            "metrics.source: static with metrics.static_path. For live collection use "
+            "'solace-autoscale monitor' (SEMP).",
             err=True,
         )
         sys.exit(2)
 
-    collector = StaticCollector(static_path)
-    decisions = []
-    shard_names = list(collector._doc["shards"].keys())  # noqa: SLF001 (CLI plumbing)
-    for name in shard_names:
-        samples = collector.window(name)
-        shard = ShardInput(shard_name=name, samples=samples)
-        decisions.append(decide(DecisionRequest(config=cfg, model=model, shard=shard, now=eval_now)))
+    shards = _load_static_shards(static_path)
+    decisions = [decide(DecisionRequest(config=cfg, model=model, shard=s, now=eval_now))
+                 for s in shards]
 
     if fmt == "json":
         click.echo(_json.dumps(jr.build_report(cfg, model, decisions), indent=2))
     else:
         click.echo(mr.render(cfg, model, decisions))
+
+
+@main.command()
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--metrics", "metrics_path", required=True, type=click.Path(exists=True))
+@click.option("--multipliers", default="1,2,4", help="comma-separated load multipliers")
+@click.option("--now", type=float, default=None)
+def whatif(config_path: str, metrics_path: str, multipliers: str, now: float | None) -> None:
+    """Project required brokers per shard under load multipliers (§ what-if)."""
+    from .capacity.model import load_model
+    from .config import load_config
+    from .simulator.what_if import project
+
+    cfg = load_config(config_path)
+    model = load_model(cfg.capacity.model)
+    eval_now = now if now is not None else datetime.now(UTC).timestamp()
+    mults = tuple(float(x) for x in multipliers.split(","))
+
+    shards = _load_static_shards(metrics_path)
+    click.echo(f"# What-if projection (model {model.model_version})\n")
+    for shard in shards:
+        projs = project(cfg, model, shard, eval_now, multipliers=mults)
+        click.echo(f"## Shard `{shard.shard_name}`")
+        click.echo("| Load × | Rec. brokers | Binding | Action | Ceiling hit |")
+        click.echo("|---|---|---|---|---|")
+        for p in projs:
+            ceil = "⚠️ yes" if p.hit_ceiling else "no"
+            click.echo(f"| {p.multiplier:g}× | {p.recommended_brokers} | {p.binding_axis} | "
+                       f"{p.action} | {ceil} |")
+        click.echo("")
 
 
 @main.command()
@@ -157,6 +203,83 @@ def serve(config_path: str, host: str, port: int) -> None:
     from .assignment.service import run_server
 
     run_server(config_path, host=host, port=port)
+
+
+@main.command()
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--broker-url", default=None, help="SEMP base URL (metrics.source: semp)")
+@click.option("--user", default="admin")
+@click.option("--password", default="admin")
+@click.option("--vpn", default="default", help="Message VPN to monitor")
+@click.option("--shard", "shard_name", default="default", help="shard name for this VPN")
+@click.option("--current-brokers", default=1, type=int, help="brokers currently serving the shard")
+@click.option("--once", is_flag=True, help="scrape once and exit (for testing / cron)")
+@click.option("--iterations", default=0, type=int, help="stop after N ticks (0 = run forever)")
+def monitor(config_path: str, broker_url: str | None, user: str, password: str, vpn: str,
+            shard_name: str, current_brokers: int, once: bool, iterations: int) -> None:
+    """Continuously scrape SEMP, accumulate a rolling window, decide, and record accuracy (§7).
+
+    Unlike one-shot `recommend`, this accrues real history over time so derived headroom (§5.7) and
+    the evaluation window (§5.8) have data. Emits a one-line status each tick and an alert when the
+    action changes.
+    """
+    import time as _time
+
+    from .accuracy.join import record_observed_capacity
+    from .accuracy.recorder import AccuracyRecorder
+    from .capacity.model import load_model
+    from .config import load_config
+    from .decision.engine import DecisionRequest, decide
+    from .decision.types import ShardInput
+    from .metrics.history import RollingHistory
+    from .metrics.semp import SempCollector
+
+    cfg = load_config(config_path)
+    model = load_model(cfg.capacity.model)
+    if broker_url is None:
+        broker_url = cfg.metrics.endpoint
+    if broker_url is None:
+        click.echo("monitor needs a SEMP base URL: pass --broker-url or set metrics.endpoint", err=True)
+        sys.exit(2)
+
+    # window retention: cover the scale-down window plus margin so hysteresis has history.
+    retention = max(cfg.policy.scale_down_window, 3600.0) + cfg.metrics.scrape_interval
+    history = RollingHistory(retention_seconds=retention)
+    recorder = AccuracyRecorder(cfg.accuracy.store) if cfg.accuracy.record else None
+    collector = SempCollector(broker_url, user, password, verify=False)
+
+    last_action: str | None = None
+    tick = 0
+    try:
+        while True:
+            tick += 1
+            now = datetime.now(UTC).timestamp()
+            try:
+                sample = collector.collect(shard_name, vpn, now, current_brokers)
+            except Exception as e:  # network hiccup: log and continue, never crash the loop
+                click.echo(f"[tick {tick}] scrape failed: {e}", err=True)
+            else:
+                history.add(shard_name, sample)
+                shard = ShardInput(shard_name=shard_name, samples=history.window(shard_name))
+                d = decide(DecisionRequest(config=cfg, model=model, shard=shard, now=now))
+                if recorder is not None:
+                    recorder.record_recommendation(d, cfg.config_hash(), ts=now)
+                    record_observed_capacity(recorder, model, cfg.fleet.service_class,
+                                             cfg.workload.delivery, shard_name, sample, ts=now)
+                axis = d.binding_axis.value if d.binding_axis else "-"
+                click.echo(f"[tick {tick}] {shard_name}: {d.action.value} "
+                           f"cur={d.current_brokers} rec={d.recommended_brokers} binding={axis} "
+                           f"samples={len(shard.samples)}")
+                if d.action.value != last_action and last_action is not None:
+                    click.echo(f"  ALERT: action changed {last_action} → {d.action.value}")
+                last_action = d.action.value
+            if once or (iterations and tick >= iterations):
+                break
+            _time.sleep(cfg.metrics.scrape_interval)
+    finally:
+        collector.close()
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

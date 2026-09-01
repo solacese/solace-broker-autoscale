@@ -56,6 +56,11 @@ policy:
 
 billing:
   model: committed         # committed | elastic
+  currency: USD
+  # Optional: your own monthly price per broker, keyed by service_class. No pricing is shipped.
+  # When set, the report shows monthly cost and deltas; when absent, only broker counts.
+  # per_broker_monthly:
+  #   enterprise-10k: 4200
 
 actuation:
   mode: recommend          # recommend | scale-up-only | full   (default recommend; do not change casually)

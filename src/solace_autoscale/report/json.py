@@ -62,6 +62,8 @@ def build_report(
     model: CapacityModel,
     decisions: list[ShardDecision],
 ) -> dict[str, Any]:
+    from .cost import fleet_cost_summary
+
     return {
         "model_version": model.model_version,
         "synthetic_model": model.synthetic,
@@ -71,5 +73,6 @@ def build_report(
         "billing_model": config.billing.model,
         "topology_mode": config.topology.mode,
         "warm_pool_cost": warm_pool_cost_note(config),
+        "cost": fleet_cost_summary(config, decisions),
         "shards": [decision_to_dict(d) for d in decisions],
     }

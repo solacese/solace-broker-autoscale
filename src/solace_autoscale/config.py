@@ -148,6 +148,11 @@ class PolicyConfig(_Base):
 
 class BillingConfig(_Base):
     model: Literal["committed", "elastic"] = "committed"
+    #: Optional monthly price per broker, keyed by service_class (e.g. {"enterprise-10k": 4200}).
+    #: No secrets and no Solace-published pricing is shipped; the operator supplies their own rates.
+    #: When absent, the report shows broker COUNTS only and omits dollar figures.
+    per_broker_monthly: dict[str, float] = Field(default_factory=dict)
+    currency: str = "USD"
 
 
 class ActuationConfig(_Base):

@@ -43,3 +43,6 @@ prompt.md
 actuator-audit.jsonl
 assignment.db
 *.jsonl
+
+# browser automation scratch
+.playwright-mcp/
