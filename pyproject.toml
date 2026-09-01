@@ -38,6 +38,13 @@ dev = [
   "uvicorn>=0.29",
   "httpx>=0.27",
 ]
+# Protocol clients for the live-broker integration tests (pytest -m integration).
+integration = [
+  "paho-mqtt>=2",
+  "python-qpid-proton>=0.39",
+  "solace-pubsubplus>=1.8",
+  "requests>=2.31",
+]
 
 [project.scripts]
 solace-autoscale = "solace_autoscale.cli:main"
