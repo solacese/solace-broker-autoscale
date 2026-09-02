@@ -314,8 +314,8 @@
       It shows you the recommendation <em>and</em> the reason behind it - never just a number.
     </p>
     <figure class="flow-fig">
-      <canvas id="flow" class="flow" width="960" height="300"
-              aria-label="Animation: a publisher sends each message through a single broker to a subscriber; as the message rate and size rise the broker fills past its limit, then a second and third broker appear alongside it and each message takes one of them, sharing the load"></canvas>
+      <canvas id="flow" class="flow" width="960" height="380"
+              aria-label="Animation of horizontal scaling: a publisher at the top sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom. As the message rate and size rise past one broker's limit, an autoscaler on the left signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
       <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
     </figure>
     <div class="cta-row">
@@ -710,7 +710,8 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
   // redraw when the OS theme changes (system mode)
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawCurve);
 
-  // ---- hero flow animation: publisher -> broker(s) -> subscriber, load rising, brokers added ----
+  // ---- hero: horizontal scaling. Publisher (top) -> brokers in a Solace Cloud box that grows
+  //      sideways -> subscriber (bottom); an autoscaler on the left signals each new broker. ----
   (function () {
     const cv = document.getElementById("flow");
     if (!cv) return;
@@ -719,14 +720,13 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // Logical drawing size; the backing store is scaled to the element's real pixels for crispness.
-    const W = 960, H = 300;
+    const W = 960, H = 380;
     function fit() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const cssW = cv.clientWidth || W;
       const cssH = Math.round(cssW * H / W);
       cv.width = Math.round(cssW * dpr);
       cv.height = Math.round(cssH * dpr);
-      // map logical WxH onto the (scaled) backing store
       ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
     }
     fit();
@@ -744,37 +744,35 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
 
     // brokers/load/size/rate are end-of-phase targets; each phase eases from the previous phase.
     const PHASES = [
-      { cap: "One broker, light load",                 dur: 3.0, brokers: 1, load: 0.30, size: 0.25, rate: 1.0 },
-      { cap: "Message rate and size climbing...",      dur: 3.4, brokers: 1, load: 1.03, size: 0.95, rate: 2.6 },
-      { cap: "Over one broker's limit - add a second", dur: 3.0, brokers: 2, load: 0.62, size: 0.95, rate: 2.6 },
-      { cap: "Load keeps rising...",                   dur: 2.6, brokers: 2, load: 0.99, size: 1.0,  rate: 3.4 },
-      { cap: "Three brokers share the load, safely",   dur: 4.2, brokers: 3, load: 0.66, size: 1.0,  rate: 3.4 },
+      { cap: "One broker, light load",                    dur: 3.0, brokers: 1, load: 0.30, size: 0.25, rate: 1.0 },
+      { cap: "Message rate and size climbing...",         dur: 3.4, brokers: 1, load: 1.03, size: 0.95, rate: 2.6 },
+      { cap: "Autoscaler adds a second broker",           dur: 3.0, brokers: 2, load: 0.62, size: 0.95, rate: 2.6 },
+      { cap: "Load keeps rising...",                      dur: 2.6, brokers: 2, load: 0.99, size: 1.0,  rate: 3.4 },
+      { cap: "Scaled out to three - load shared, safely", dur: 4.2, brokers: 3, load: 0.66, size: 1.0,  rate: 3.4 },
     ];
-    const RESET = 0.9;                       // gentle fade back to the start after the last phase
-    const TOTAL = PHASES.reduce((a, p) => a + p.dur, 0) + RESET;
+    // After the last phase, HOLD three brokers briefly then fade the whole scene out and loop back
+    // to one broker. Scaling only ever goes UP; the loop is a fade, never a scale-down.
+    const HOLD = 1.2;                        // hold the settled 3-broker state
+    const FADE = 1.0;                        // fade the scene out before restarting
+    const TOTAL = PHASES.reduce((a, p) => a + p.dur, 0) + HOLD + FADE;
+    // wall-clock start time of each phase, for timing the autoscaler signal to the scale-out moment
+    const PHASE_START = []; { let a = 0; for (const p of PHASES) { PHASE_START.push(a); a += p.dur; } }
 
     const lerp = (a, b, t) => a + (b - a) * t;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const ease = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
-    const pubX = 88, subX = W - 88, midY = 120;
-    const brokerColX = W / 2;               // all brokers share one column: they are PARALLEL, not a chain
-    const LANE_GAP = 66;                    // vertical spacing between stacked brokers
-    // Each broker sits on its own vertical lane, centred on midY. A message goes pub -> ONE lane's
-    // broker -> sub, so it never appears to pass through more than one broker.
-    function brokerYs(n) {
-      const out = [];
-      for (let i = 0; i < n; i++) out.push(midY + (i - (n - 1) / 2) * LANE_GAP);
-      return out;
-    }
+    // vertical layout: publisher row, broker row (in the cloud box), subscriber row
+    const pubY = 52, brokerY = 190, subY = 330;
+    const cx = W / 2;
+    const BW = 96, BH = 66, BGAP = 30;       // broker box size + horizontal gap between brokers
+    const ascX = 96;                          // autoscaler column (left of the cloud box)
 
-    function node(x, y, r, fill, stroke, label, c) {
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = fill; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = stroke; ctx.stroke();
-      if (label) {
-        ctx.fillStyle = c.soft; ctx.font = "12px 'IBM Plex Mono', monospace";
-        ctx.textAlign = "center"; ctx.fillText(label, x, y + r + 18);
-      }
+    function brokerXs(n) {
+      const span = (n - 1) * (BW + BGAP);
+      const out = [];
+      for (let i = 0; i < n; i++) out.push(cx - span / 2 + i * (BW + BGAP));
+      return out;
     }
 
     function rr(x, y, w, h, r) {
@@ -783,138 +781,179 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       else ctx.rect(x, y, w, h);
     }
 
-    function brokerBox(x, y, load, c) {
-      const w = 84, h = 56;
-      rr(x - w / 2, y - h / 2, w, h, 10);
-      ctx.fillStyle = c.panel; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = c.line; ctx.stroke();
-      const over = load > 1;
-      const bx = x - w / 2 + 10, by = y + h / 2 - 16, bw = w - 20, bh = 8;
-      rr(bx, by, bw, bh, 4); ctx.fillStyle = c.sunk; ctx.fill();
-      rr(bx, by, Math.min(1, load) * bw, bh, 4);
-      ctx.fillStyle = over ? c.crit : (load > 0.82 ? c.warn : c.accent); ctx.fill();
-      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace";
-      ctx.textAlign = "center"; ctx.fillText("broker", x, y - 6);
+    function node(x, y, r, fill, stroke, label, c, below) {
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = fill; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = stroke; ctx.stroke();
+      if (label) {
+        ctx.fillStyle = c.soft; ctx.font = "13px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
+        ctx.fillText(label, x, y + (below ? r + 20 : -(r + 12)));
+      }
     }
 
-    let dots = [];
-    let lastSpawn = 0, lastElapsed = 0;
+    function brokerBox(x, y, load, alpha, c) {
+      ctx.globalAlpha = alpha;
+      rr(x - BW / 2, y - BH / 2, BW, BH, 10);
+      ctx.fillStyle = c.panel; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = c.line; ctx.stroke();
+      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
+      ctx.fillText("broker", x, y - 8);
+      const over = load > 1;
+      const mx = x - BW / 2 + 12, my = y + BH / 2 - 18, mw = BW - 24, mh = 9;
+      rr(mx, my, mw, mh, 4); ctx.fillStyle = c.sunk; ctx.fill();
+      rr(mx, my, Math.min(1, load) * mw, mh, 4);
+      ctx.fillStyle = over ? c.crit : (load > 0.82 ? c.warn : c.accent); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
-    // state at a given time, easing from the previous phase; the RESET tail eases phase 5 -> phase 1
+    let dots = [], signals = [];
+    let lastSpawn = 0, lastElapsed = 0, firedFor = -1, rr_i = 0;   // rr_i: round-robin broker index
+
     function stateAt(t) {
       let acc = 0;
       for (let i = 0; i < PHASES.length; i++) {
         if (t < acc + PHASES[i].dur) {
           const local = (t - acc) / PHASES[i].dur, e = ease(local);
           const prev = i === 0 ? PHASES[0] : PHASES[i - 1];
+          // fade IN over the first ~0.6s of the loop so the restart is a fade, not a pop
+          const fadeIn = i === 0 ? clamp((t) / 0.6, 0, 1) : 1;
           return {
-            cap: PHASES[i].cap, brokers: PHASES[i].brokers, prevBrokers: prev.brokers,
+            idx: i, cap: PHASES[i].cap, brokers: PHASES[i].brokers, prevBrokers: prev.brokers,
             grow: local, load: lerp(prev.load, PHASES[i].load, e),
             size: lerp(prev.size, PHASES[i].size, e), rate: lerp(prev.rate, PHASES[i].rate, e),
+            fade: fadeIn,
           };
         }
         acc += PHASES[i].dur;
       }
-      // RESET tail: hold 3 brokers, ease everything back down toward the opening state
-      const e = ease((t - acc) / RESET), last = PHASES[PHASES.length - 1], first = PHASES[0];
+      // HOLD then FADE OUT the settled three-broker scene (no scale-down); the loop wrap restarts it
+      const last = PHASES[PHASES.length - 1];
+      const tail = t - acc;
+      const fade = tail < HOLD ? 1 : 1 - ease(clamp((tail - HOLD) / FADE, 0, 1));
       return {
-        cap: last.cap, brokers: 3, prevBrokers: 3, grow: 1,
-        load: lerp(last.load, first.load, e), size: lerp(last.size, first.size, e),
-        rate: lerp(last.rate, first.rate, e),
+        idx: PHASES.length, cap: last.cap, brokers: last.brokers, prevBrokers: last.brokers,
+        grow: 1, load: last.load, size: last.size, rate: last.rate, fade,
       };
+    }
+
+    // message path: publisher (top) -> its broker (middle) -> subscriber (bottom), curved in x
+    function pathPoint(bx, p) {
+      const topX = cx, botX = cx;
+      if (p < 0.5) {                          // publisher -> broker
+        const tt = ease(p / 0.5), y = lerp(pubY + 16, brokerY, tt);
+        const qx = lerp(topX, bx, ease(clamp(p / 0.4, 0, 1)));
+        return { x: qx, y };
+      } else {                                // broker -> subscriber
+        const tt = ease((p - 0.5) / 0.5), y = lerp(brokerY, subY - 16, tt);
+        const qx = lerp(bx, botX, ease(clamp((p - 0.55) / 0.4, 0, 1)));
+        return { x: qx, y };
+      }
     }
 
     function draw(elapsed) {
       const c = C();
       const t = ((elapsed % TOTAL) + TOTAL) % TOTAL;
-      if (t < lastElapsed) dots = [];        // new loop: clear in-flight dots for a clean restart
+      if (t < lastElapsed) { dots = []; signals = []; firedFor = -1; rr_i = 0; }  // clean loop restart
       lastElapsed = t;
       ctx.clearRect(0, 0, W, H);
 
       const st = stateAt(t);
-      const ys = brokerYs(st.brokers);
-      const bw = 84;                          // broker box width (matches brokerBox)
-      const inX = brokerColX - bw / 2, outX = brokerColX + bw / 2;   // left/right edges of the broker column
-      const appear = st.brokers > st.prevBrokers ? ease(Math.min(1, st.grow * 1.7)) : 1;
+      const xs = brokerXs(st.brokers);
+      const appear = st.brokers > st.prevBrokers ? ease(clamp(st.grow * 1.8, 0, 1)) : 1;
       const alphaFor = i => (i >= st.prevBrokers && st.brokers > st.prevBrokers) ? appear : 1;
 
-      // A message's path: publisher -> its broker's lane -> subscriber. Curved so the fan-out to a
-      // single broker is obvious. Returns {x,y} for progress p in 0..1 across the whole journey.
-      function pathPoint(by, p) {
-        const pubPt = { x: pubX + 18, y: midY };
-        const subPt = { x: subX - 18, y: midY };
-        const inPt = { x: inX, y: by }, outPt = { x: outX, y: by };
-        if (p < 0.44) {                       // publisher -> broker (curve into the lane)
-          const tt = ease(p / 0.44);
-          const cx = (pubPt.x + inPt.x) / 2;
-          return {
-            x: (1 - tt) ** 2 * pubPt.x + 2 * (1 - tt) * tt * cx + tt * tt * inPt.x,
-            y: (1 - tt) ** 2 * pubPt.y + 2 * (1 - tt) * tt * pubPt.y + tt * tt * inPt.y,
-          };
-        } else if (p < 0.56) {                // straight through the broker box
-          const tt = (p - 0.44) / 0.12;
-          return { x: lerp(inX, outX, tt), y: by };
-        } else {                              // broker -> subscriber (curve back to centre)
-          const tt = ease((p - 0.56) / 0.44);
-          const cx = (outPt.x + subPt.x) / 2;
-          return {
-            x: (1 - tt) ** 2 * outPt.x + 2 * (1 - tt) * tt * cx + tt * tt * subPt.x,
-            y: (1 - tt) ** 2 * outPt.y + 2 * (1 - tt) * tt * subPt.y + tt * tt * subPt.y,
-          };
-        }
-      }
+      // ---- Solace Cloud box around the brokers (grows sideways as brokers are added) ----
+      const halfSpan = ((st.brokers - 1) * (BW + BGAP)) / 2;
+      const boxL = cx - halfSpan - BW / 2 - 22, boxR = cx + halfSpan + BW / 2 + 22;
+      const boxT = brokerY - BH / 2 - 30, boxB = brokerY + BH / 2 + 16;
+      rr(boxL, boxT, boxR - boxL, boxB - boxT, 14);
+      ctx.fillStyle = c.sunk; ctx.globalAlpha = 0.5; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]); ctx.strokeStyle = c.line; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = c.faint; ctx.font = "11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left";
+      ctx.fillText("SOLACE CLOUD", boxL + 12, boxT + 16);
 
-      // connecting lines: one curved path per broker lane, drawn by sampling pathPoint
+      // ---- autoscaler (left) + signal it fires just before each scale-out ----
+      // fire a signal when we enter a phase that adds a broker
+      if (!reduce && (st.idx === 2 || st.idx === 4) && firedFor !== st.idx && st.grow < 0.15) {
+        firedFor = st.idx;
+        signals.push({ t: 0, targetX: boxL });
+      }
+      signals.forEach(s => { if (!reduce) s.t += 0.9 * Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed))); });
+      signals = signals.filter(s => s.t < 1.2);
+
+      const ascY = brokerY;
+      const ascActive = signals.some(s => s.t < 0.9);
+      rr(ascX - 42, ascY - 30, 84, 60, 10);
+      ctx.fillStyle = c.panel; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = ascActive ? c.accent : c.line; ctx.stroke();
+      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
+      ctx.fillText("auto", ascX, ascY - 4);
+      ctx.fillText("scaler", ascX, ascY + 12);
+      // signal pulses travelling from the autoscaler to the cloud box
+      signals.forEach(s => {
+        const p = clamp(s.t, 0, 1), x = lerp(ascX + 44, s.targetX - 2, ease(p));
+        ctx.globalAlpha = (1 - p) * 0.9;
+        ctx.beginPath(); ctx.arc(x, ascY, 5, 0, Math.PI * 2); ctx.fillStyle = c.accent; ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+
+      // ---- connecting lines: publisher -> each broker -> subscriber ----
       ctx.lineWidth = 1.5; ctx.strokeStyle = c.line;
-      ys.forEach((by, i) => {
-        ctx.globalAlpha = 0.45 * alphaFor(i);
+      xs.forEach((bx, i) => {
+        ctx.globalAlpha = 0.4 * alphaFor(i);
         ctx.beginPath();
-        for (let k = 0; k <= 40; k++) {
-          const pt = pathPoint(by, k / 40);
-          k === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y);
-        }
+        for (let k = 0; k <= 40; k++) { const pt = pathPoint(bx, k / 40); k ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y); }
         ctx.stroke();
       });
       ctx.globalAlpha = 1;
 
-      // spawn + advance dots (frame-rate independent via dt). Each dot is bound to ONE broker lane.
+      // ---- messages: each bound to ONE broker, flowing top -> broker -> bottom ----
       if (!reduce) {
         const dt = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
         draw._last = elapsed;
         const interval = 0.4 / st.rate;
         if (elapsed - lastSpawn > interval) {
           lastSpawn = elapsed;
-          dots.push({ t: 0, broker: Math.floor(Math.random() * st.brokers), r: lerp(2.5, 7, st.size) });
+          // round-robin so messages are spread EVENLY across the brokers, not clumped
+          const broker = rr_i % st.brokers; rr_i++;
+          dots.push({ t: 0, broker, r: lerp(2.5, 7, st.size) });
         }
-        dots.forEach(d => { d.t += 0.5 * dt; });   // t is 0..1 across the whole journey
+        dots.forEach(d => { d.t += 0.5 * dt; });
         dots = dots.filter(d => d.t < 1);
       }
       dots.forEach(d => {
         if (d.broker >= st.brokers) d.broker = st.brokers - 1;
-        const pt = pathPoint(ys[d.broker], Math.min(1, d.t));
+        const pt = pathPoint(xs[d.broker], Math.min(1, d.t));
         ctx.beginPath(); ctx.arc(pt.x, pt.y, d.r, 0, Math.PI * 2);
         ctx.fillStyle = c.accent; ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
       });
 
-      // nodes
-      node(pubX, midY, 19, c.accent, c.accent, "publisher", c);
-      node(subX, midY, 19, c.panel, c.line, "subscriber", c);
-      ys.forEach((by, i) => { ctx.globalAlpha = alphaFor(i); brokerBox(brokerColX, by, st.load, c); ctx.globalAlpha = 1; });
+      // ---- nodes ----
+      node(cx, pubY, 20, c.accent, c.accent, "publisher", c, false);
+      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true);
+      xs.forEach((bx, i) => brokerBox(bx, brokerY, st.load, alphaFor(i), c));
 
-      // HUD
+      // ---- HUD ----
       ctx.textAlign = "left"; ctx.font = "12px 'IBM Plex Mono', monospace"; ctx.fillStyle = c.faint;
       const msgs = Math.round(lerp(8, 95, (st.rate - 1) / 2.4));
       const kb = Math.round(lerp(1, 200, st.size));
       ctx.fillText("rate ~" + msgs + "k msg/s", 22, H - 24);
       ctx.fillText("size ~" + kb + " KB", 22, H - 9);
 
+      // ---- scene fade-out before the loop restarts (fade toward the card background) ----
+      if (st.fade < 1) {
+        ctx.globalAlpha = 1 - st.fade;
+        ctx.fillStyle = c.panel;
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalAlpha = 1;
+      }
+
       if (cap && cap.textContent !== st.cap) cap.textContent = st.cap;
     }
 
     if (reduce) {
-      // static representative frame: three brokers sharing the load
-      let acc = 0; for (let i = 0; i < PHASES.length - 1; i++) acc += PHASES[i].dur;
-      draw(acc + PHASES[PHASES.length - 1].dur * 0.6);
+      draw(PHASE_START[PHASES.length - 1] + PHASES[PHASES.length - 1].dur * 0.6);  // static: 3 brokers
     } else {
       let start = null;
       requestAnimationFrame(function frame(ts) {
