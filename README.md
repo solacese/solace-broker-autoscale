@@ -59,6 +59,32 @@ guessed; nothing acts on fake data.
 | `shard-advise` | Propose shard boundaries from an Event Portal export (connected components of the app↔topic graph). |
 | `serve` | Run the assignment service that maps clients to brokers (per-protocol endpoints, sticky durable placement). |
 
+## You may not need this tool
+
+Adding brokers is the most expensive way to get more capacity, and it is rarely the first thing that
+should change. Before reaching for horizontal broker scaling, rule these out — honestly, most
+workloads are solved by one of them:
+
+- **Consumer lag or backlog? Scale consumers, not brokers.** The
+  [KEDA Solace scaler](https://keda.sh/docs/2.20/scalers/solace-pub-sub/) scales *consumer
+  instances* off queue depth, spool usage, and receive rate. It scales a Kubernetes Deployment; it
+  never touches the broker. If your symptom is a growing queue or rising consumer lag, that is the
+  right tool and this one is unnecessary. There is a direct-messaging variant too,
+  [`solace-pub-sub-dm`](https://keda.sh/docs/2.20/scalers/solace-pub-sub/). This tool watches the
+  *broker* ceiling, which is a different problem.
+- **Throughput-bound within one broker? Use partitioned queues.** Partitioned queues scale consumer
+  throughput across partitions on a single broker. Exhaust this before adding brokers — a second
+  broker is far more operationally costly than more partitions.
+- **Byte-bound on large payloads? Use the claim-check pattern.** Put the payload in object storage
+  and publish a reference; consumers fetch the body out of band. For byte-bound workloads this is
+  often an order of magnitude cheaper than adding brokers. The decision engine already raises this
+  as a warning when the binding axis is bytes on large messages — the advice is the same here.
+
+**This tool is for the remaining case:** a workload that has genuinely exhausted vertical scaling on
+the largest practical service class, where the ceiling is *broker* capacity, not consumer capacity,
+and the only path left is more brokers with traffic steered across them. If you are not there yet,
+one of the above is the cheaper, simpler fix.
+
 ## Why the design holds up
 
 - **The decision engine is a pure function** — state in, target state out. No I/O, no network, no
@@ -79,6 +105,13 @@ guessed; nothing acts on fake data.
 - A synthetic capacity model, or stale metrics, **hard-blocks** all actuation.
 - The actuator writes an audit record *before* every call, honours a kill switch and rate limits,
   and refuses to delete a broker that still has queues, consumers, flows, or spooled messages.
+- `actuation.require_confirmation` (on by default) is **enforced**: a real (non-dry-run) operation
+  is refused, and audited as `refused`, unless the caller explicitly confirmed it. The gate never
+  prompts — it stays deterministic — so a caller collects the operator's confirmation and passes it
+  in.
+- **TLS verification is on by default** everywhere the tool connects to a broker. `monitor` accepts
+  an explicit `--insecure` flag to disable certificate verification; it must be passed deliberately
+  and prints a stderr warning naming the host it applies to.
 
 See [`docs/safety.md`](docs/safety.md).
 
@@ -123,10 +156,27 @@ Full reference: [`docs/configuration.md`](docs/configuration.md).
 ## Develop
 
 ```bash
-pytest -m "not integration"      # fast unit suite
-pytest -m integration            # live-broker protocol tests (needs a local Solace broker)
+pytest                           # fast unit suite (integration tests are deselected by default)
 ruff check . && mypy src/solace_autoscale
 ```
 
-CI runs lint, types, unit tests, the compiler (against the synthetic model), and the live-broker
-protocol integration tests. Contributions welcome — keep the decision engine pure.
+A bare `pytest` is green out of the box: `[tool.pytest.ini_options]` sets
+`addopts = '-m "not integration"'`, so the live-broker tests never run unless you ask for them.
+
+To run the integration tests you need the optional protocol clients and a local broker:
+
+```bash
+pip install -e '.[dev,integration]'   # adds paho-mqtt, qpid-proton, solace-pubsubplus, requests
+
+# start a local Solace PubSub+ broker (ports match tests/test_integration_broker.py defaults)
+docker run -d --name solace-dev --shm-size=1g --ulimit nofile=1048576:1048576 \
+  -p 8081:8080 -p 55556:55555 -p 5673:5672 -p 1884:1883 -p 9001:9000 \
+  -e username_admin_globalaccesslevel=admin -e username_admin_password=admin \
+  solace/solace-pubsub-standard
+
+pytest -m integration                 # live-broker protocol tests
+```
+
+CI runs lint, types, unit tests, the compiler (against the synthetic model), and — in a separate
+job with a real broker service — the live-broker protocol integration tests. Contributions welcome —
+keep the decision engine pure.

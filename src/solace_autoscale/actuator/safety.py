@@ -15,6 +15,8 @@ Guardrails:
   8. Write the audit record BEFORE issuing the call, including decision id, model version, config
      hash, and the full request body.
   9. Idempotency keys on every Cloud API call (constructed by the caller; safety verifies presence).
+ 10. When require_confirmation is set, refuse a real (non-dry-run) operation the caller did not
+     confirm (op.approved). The CLI collects confirmation and passes it in; the gate never prompts.
 """
 
 from __future__ import annotations
@@ -139,6 +141,23 @@ class SafetyGate:
         if not op.idempotency_key:
             raise ActuationRefused("operation has no idempotency key (§10)")
 
+    def _check_confirmation(self, op: Operation) -> None:
+        """Refuse a real (non-dry-run) operation unless the operator confirmed it.
+
+        Confirmation is per-operation and collected by the caller (the CLI prompts and sets
+        ``op.approved``); the gate never prompts, so it stays deterministic. Dry-run is exempt —
+        it issues nothing, so it needs no approval. Disabled when ``require_confirmation`` is false.
+        """
+        if not self._cfg.actuation.require_confirmation:
+            return
+        if self._cfg.actuation.dry_run:
+            return
+        if not op.approved:
+            raise ActuationRefused(
+                "actuation.require_confirmation is set and this operation was not confirmed; "
+                "the caller must obtain operator approval and set Operation.approved=True"
+            )
+
     def _check_safe_to_delete(self, op: Operation) -> None:
         """Refuse to delete a broker with non-zero queue depth, bound consumers, active flows, or
         spooled messages. Checked immediately before the call (live), not from cached state."""
@@ -174,6 +193,7 @@ class SafetyGate:
         try:
             self._check_mode_allows(op)
             self._check_idempotency_key(op)
+            self._check_confirmation(op)
             self._check_kill_switch()
             self._check_model_not_synthetic()
             self._check_metrics_fresh(state)

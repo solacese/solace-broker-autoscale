@@ -33,6 +33,11 @@ class Operation:
     #: for delete: the broker/service id being removed
     target_service_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Operator confirmation for THIS operation. When ``actuation.require_confirmation`` is set, the
+    #: gate refuses unless this is True. It is collected by the caller (e.g. the CLI prompts the
+    #: operator) and passed in explicitly — the gate never prompts, so it stays deterministic and
+    #: testable. Ignored when ``require_confirmation`` is false.
+    approved: bool = False
 
 
 @dataclass

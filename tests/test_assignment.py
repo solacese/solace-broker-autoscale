@@ -2,6 +2,13 @@
 
 Gate: a durable guaranteed placement survives service restart, and survives a broker entering and
 leaving DRAINING.
+
+FastAPI is in the ``dev`` extra, so it is always present in CI (which installs ``.[dev]``). These
+tests therefore RUN in CI rather than skipping — a safety-relevant test that silently skips is not a
+test. The contract is enforced by ``test_dev_extra_contract.py``, which lives OUTSIDE this module's
+``importorskip`` and fails hard if fastapi is missing while the ``dev`` extra is installed; the
+module-level ``importorskip`` here remains only so a bare local checkout without the dev extra
+degrades gracefully rather than erroring on import.
 """
 
 from __future__ import annotations

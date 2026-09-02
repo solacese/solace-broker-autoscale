@@ -26,9 +26,20 @@ away.
 | 7 | Check `kill_switch_file` before every operation; if present, halt and log | `_check_kill_switch` |
 | 8 | Write the audit record BEFORE issuing (decision id, model version, config hash, full request body) | `AuditLog` + intent phase |
 | 9 | Idempotency key on every Cloud API call so a retry cannot double-provision | `_check_idempotency_key` + client header |
+| 10 | When `require_confirmation` is set, refuse a real (non-dry-run) operation the caller did not confirm (`Operation.approved`) | `_check_confirmation` |
 
 Mode is also checked: `scale-up-only` refuses deletes; `recommend` should never reach the gate at
 all (no actuator exists).
+
+`require_confirmation` (rule 10) keeps the gate deterministic: it never prompts. The caller collects
+the operator's confirmation out of band and passes it in as `Operation.approved`; a missing
+confirmation is refused and audited exactly like any other guardrail. Dry-run operations issue
+nothing and are exempt.
+
+TLS certificate verification is **on by default** wherever the tool connects to a broker
+(`SempCollector(..., verify=True)`). The `monitor` CLI exposes an explicit `--insecure` flag to
+disable it for a broker with a self-signed certificate you trust; using it prints a stderr warning
+naming the host.
 
 ## Drain state machine
 

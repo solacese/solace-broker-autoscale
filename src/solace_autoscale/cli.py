@@ -19,6 +19,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import click
 
@@ -215,8 +216,12 @@ def serve(config_path: str, host: str, port: int) -> None:
 @click.option("--current-brokers", default=1, type=int, help="brokers currently serving the shard")
 @click.option("--once", is_flag=True, help="scrape once and exit (for testing / cron)")
 @click.option("--iterations", default=0, type=int, help="stop after N ticks (0 = run forever)")
+@click.option("--insecure", is_flag=True,
+              help="disable TLS certificate verification for the SEMP connection (DANGEROUS; "
+                   "only for a broker with a self-signed cert you trust)")
 def monitor(config_path: str, broker_url: str | None, user: str, password: str, vpn: str,
-            shard_name: str, current_brokers: int, once: bool, iterations: int) -> None:
+            shard_name: str, current_brokers: int, once: bool, iterations: int,
+            insecure: bool) -> None:
     """Continuously scrape SEMP, accumulate a rolling window, decide, and record accuracy (§7).
 
     Unlike one-shot `recommend`, this accrues real history over time so derived headroom (§5.7) and
@@ -246,7 +251,15 @@ def monitor(config_path: str, broker_url: str | None, user: str, password: str, 
     retention = max(cfg.policy.scale_down_window, 3600.0) + cfg.metrics.scrape_interval
     history = RollingHistory(retention_seconds=retention)
     recorder = AccuracyRecorder(cfg.accuracy.store) if cfg.accuracy.record else None
-    collector = SempCollector(broker_url, user, password, verify=False)
+    if insecure:
+        host = urlparse(broker_url).hostname or broker_url
+        click.echo(
+            f"WARNING: TLS certificate verification DISABLED for SEMP connection to {host!r}; "
+            "traffic is exposed to man-in-the-middle attacks. Use only with a broker whose "
+            "self-signed certificate you trust.",
+            err=True,
+        )
+    collector = SempCollector(broker_url, user, password, verify=not insecure)
 
     last_action: str | None = None
     tick = 0

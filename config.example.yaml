@@ -65,7 +65,7 @@ billing:
 actuation:
   mode: recommend          # recommend | scale-up-only | full   (default recommend; do not change casually)
   dry_run: true
-  require_confirmation: true
+  require_confirmation: true   # enforced: a real (non-dry-run) op is refused unless the caller confirms it
   max_ops_in_flight: 1
   max_ops_per_hour: 4
   kill_switch_file: /var/run/solace-autoscale.halt

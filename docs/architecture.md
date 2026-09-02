@@ -45,3 +45,38 @@ This is enforced by review and by the test that asserts identical output for ide
 
 The actuator is the **only** component permitted to call the Solace Cloud REST API. In `recommend`
 mode it is never constructed.
+
+## Interaction with a consumer autoscaler (KEDA)
+
+This tool scales **brokers**. A consumer autoscaler such as the
+[KEDA Solace scaler](https://keda.sh/docs/2.20/scalers/solace-pub-sub/) scales **consumers**. In a
+system that runs both, they are two independent control loops observing overlapping signals with no
+awareness of each other — the classic setup for oscillation.
+
+**The coupling.** KEDA scaling consumers *up* (because a queue is backing up) increases egress load
+on the broker, which pushes broker utilisation toward the ceiling this tool watches. This tool then
+adds a broker. Adding a broker changes the queue distribution — the very signal KEDA is measuring —
+so KEDA re-evaluates, and the cycle can repeat. Neither loop knows the other exists.
+
+**Symptoms.** Broker count and consumer replica count that ratchet up together and never settle;
+scale actions that each look locally correct but chase each other; a fleet that grows under a load
+that a stable configuration would have absorbed.
+
+**Mitigations** — the goal is to make the two loops operate on clearly separated timescales so the
+slower one (brokers) cannot chase the faster one (consumers):
+
+- **Asymmetric windows.** Scale *up* deliberately and scale *down* slowly. This tool already derives
+  `scale_up_window` from provisioning time and holds a long `scale_down_window` before removing a
+  broker, so a transient consumer-driven spike does not immediately add a broker, and a dip does not
+  immediately remove one.
+- **Cooldowns.** `policy.cooldown` suppresses a second broker action for a fixed period after one
+  fires, giving the consumer loop time to converge before this tool reacts again.
+- **Order the timescales explicitly.** Set this tool's `scale_up_window` **longer than** the KEDA
+  `cooldownPeriod`. The broker loop must be the slower of the two: consumers should reach a stable
+  count for the current broker fleet *before* this tool concludes the broker itself is the ceiling.
+  If the broker loop reacts faster than the consumer loop settles, it will add brokers in response
+  to load that the consumer loop was already resolving.
+
+A simulator scenario (`simulator/workload.py::consumer_reaction_window`) models a consumer count
+rising in response to backlog and asserts the decision engine does not oscillate under it; see
+`tests/test_simulator.py`.

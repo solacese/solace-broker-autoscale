@@ -131,6 +131,94 @@ def sweep_matrix(
 
 
 @dataclass
+class OscillationResult:
+    """One evaluation step of the consumer-reaction scenario."""
+
+    step: int
+    consumer_count: int
+    egress_msg_rate: float
+    action: str
+    recommended_brokers: int
+
+
+def consumer_reaction_window(
+    config: Config,
+    model: CapacityModel,
+    *,
+    service_class: str = "enterprise-10k",
+    delivery: str = "guaranteed",
+    msg_size_bytes: int = 1000,
+    base_ingress_util: float = 0.5,
+    # Ramp consumers, then a plateau long enough for the rolling window to flush the ramp samples
+    # and converge — a converged steady state is what "does not oscillate" must be measured against.
+    consumer_counts: tuple[int, ...] = (1, 2, 4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8),
+    n_per_step: int = 30,
+    cadence: float = 30.0,
+    t0: float = 1_000_000.0,
+) -> list[OscillationResult]:
+    """Model a consumer autoscaler reacting to backlog and check the broker loop does not oscillate.
+
+    A consumer autoscaler (e.g. KEDA) raises the consumer replica count when a queue backs up, which
+    raises **egress** load on the broker — the signal this tool's broker loop watches. We hold
+    ingress steady and ramp the consumer count (and therefore egress), then let it plateau, exactly
+    as a converging consumer loop would. See ``docs/architecture.md`` (two-loop interaction).
+
+    We feed a single growing rolling window (not independent per-step windows) so the engine sees the
+    real trend, and evaluate the decision at each step. Pure and deterministic: ``now`` is derived
+    from the sample timestamps, never a clock.
+
+    Returns one :class:`OscillationResult` per step. The invariant a caller should assert is that the
+    recommended broker count is **monotonic non-decreasing** across the scenario and **converges to a
+    stable value** on the plateau (the tail steps are constant). It may keep rising for a few steps
+    after the consumer count plateaus while the rolling window flushes the lower-egress ramp samples,
+    but it must climb toward the steady state and hold — never reverse downward chasing the faster
+    consumer loop.
+    """
+    cfg = config.model_copy(deep=True)
+    cfg.workload.delivery = delivery  # type: ignore[assignment]
+    cfg.fleet.service_class = service_class
+    # Fixed headroom keeps the arithmetic deterministic so "oscillation" means a real reversal,
+    # not derived-headroom noise from a changing growth estimate.
+    cfg.policy.headroom.mode = "fixed"
+
+    cap = lookup(model, service_class, msg_size_bytes, delivery)
+    current_brokers = cfg.fleet.min_brokers
+    # Ingress held steady at a modest utilisation; egress scales with the consumer count.
+    ingress = cap.msg_rate * current_brokers * base_ingress_util
+
+    samples: list[MetricSample] = []
+    results: list[OscillationResult] = []
+    t = t0
+    for step, consumers in enumerate(consumer_counts):
+        egress = ingress * consumers  # more consumers → more egress (fanout-like amplification)
+        for _ in range(n_per_step):
+            samples.append(MetricSample(
+                timestamp=t,
+                ingress_msg_rate=ingress,
+                egress_msg_rate=egress,
+                ingress_byte_rate=ingress * msg_size_bytes,
+                egress_byte_rate=egress * msg_size_bytes,
+                avg_msg_size=float(msg_size_bytes),
+                connection_count=100 + consumers,
+                spool_used=cap.spool_bytes * current_brokers * 0.1,
+                current_brokers=current_brokers,
+            ))
+            t += cadence
+        shard = ShardInput(shard_name="consumer-reaction", samples=list(samples),
+                           subscribing_brokers=max(1, consumers))
+        now = samples[-1].timestamp + 1
+        d = decide(DecisionRequest(config=cfg, model=model, shard=shard, now=now))
+        results.append(OscillationResult(
+            step=step,
+            consumer_count=consumers,
+            egress_msg_rate=egress,
+            action=d.action.value,
+            recommended_brokers=d.recommended_brokers,
+        ))
+    return results
+
+
+@dataclass
 class ValidationReport:
     total_cells: int
     failures: list[str] = field(default_factory=list)

@@ -33,11 +33,15 @@ def create_app(store: AssignmentStore, *, clock: Callable[[], float] = _now,
                lease_seconds: int = DEFAULT_LEASE_SECONDS) -> FastAPI:
     app = FastAPI(title="solace-autoscale assignment service", version="1")
 
-    @app.get("/healthz")
+    # FastAPI's route decorators are typed to return the *decorated function unchanged* only on
+    # recent releases; older FastAPI/mypy pairs treat @app.get(...) as an untyped decorator under
+    # --strict. The `unused-ignore` code keeps this clean on toolchains where the primary code does
+    # not fire, so the same line passes across versions without weakening the module config.
+    @app.get("/healthz")  # type: ignore[untyped-decorator, unused-ignore]
     def healthz() -> dict:
         return {"status": "ok"}
 
-    @app.get("/readyz")
+    @app.get("/readyz")  # type: ignore[untyped-decorator, unused-ignore]
     def readyz() -> dict:
         # ready if the store is reachable
         try:
@@ -46,7 +50,7 @@ def create_app(store: AssignmentStore, *, clock: Callable[[], float] = _now,
             raise HTTPException(status_code=503, detail=f"store not ready: {e}") from e
         return {"status": "ready"}
 
-    @app.get("/assignment")
+    @app.get("/assignment")  # type: ignore[untyped-decorator, unused-ignore]
     def assignment(
         shard: str = Query(...),
         client_id: str = Query(...),

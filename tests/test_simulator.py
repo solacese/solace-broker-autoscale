@@ -11,7 +11,11 @@ import pytest
 
 from solace_autoscale.capacity.model import load_model
 from solace_autoscale.config import Config
-from solace_autoscale.simulator.workload import sweep_matrix, validate_model
+from solace_autoscale.simulator.workload import (
+    consumer_reaction_window,
+    sweep_matrix,
+    validate_model,
+)
 
 from .conftest import REPO
 
@@ -47,6 +51,31 @@ def test_validate_synthetic_model_invariants(synthetic):
     report = validate_model(Config(), synthetic)
     assert report.total_cells > 0
     assert report.ok, "synthetic model validation failures:\n" + "\n".join(report.failures[:20])
+
+
+def test_consumer_reaction_does_not_oscillate(synthetic):
+    """P1.5 two-loop interaction: a consumer autoscaler ramping egress in response to backlog must
+    not make the broker loop oscillate. The recommendation must be monotonic non-decreasing across
+    the scenario and converge to a stable value on the plateau — never reverse downward chasing the
+    faster consumer loop."""
+    results = consumer_reaction_window(Config(), synthetic)
+    assert len(results) > 3
+
+    recs = [r.recommended_brokers for r in results]
+    # 1. Monotonic non-decreasing across the whole scenario: the broker loop never scales down in
+    #    reaction to a still-rising or freshly-plateaued consumer count (that is the oscillation).
+    for prev, cur in zip(recs, recs[1:], strict=False):
+        assert cur >= prev, f"broker recommendation reversed downward: {recs} — loop oscillating"
+
+    # 2. The recommendation CONVERGES: the tail of the run is constant (the window has flushed the
+    #    ramp and the steady state holds). No perpetual creep, no reversal.
+    tail = recs[-4:]
+    assert len(set(tail)) == 1, f"recommendation did not settle on the plateau: tail={tail}, all={recs}"
+
+    # 3. No scale-down action is emitted while consumers ramp or hold high — a scale-down here would
+    #    be the broker loop chasing the faster consumer loop back down.
+    assert all(r.action != "scale-down" for r in results), \
+        f"scale-down emitted under a rising/held consumer load: {[(r.step, r.action) for r in results]}"
 
 
 def test_validate_real_model_invariants(real_model):

@@ -55,10 +55,12 @@ def _cfg(**over):
 
 
 def _op(op_type=OperationType.CREATE_SERVICE, **kw):
+    # approved=True by default so guardrail-isolation tests exercise the rule they target rather
+    # than tripping the confirmation check first. Confirmation tests pass approved=False explicitly.
     defaults = dict(
         op_type=op_type, shard="shard-a", decision_id="dec-1", model_version="test-v1",
         config_hash="cfg1", request_body={"name": "svc", "serviceClassId": "ENTERPRISE_10K_HIGHAVAILABILITY"},
-        idempotency_key="idem-123",
+        idempotency_key="idem-123", approved=True,
     )
     defaults.update(kw)
     return Operation(**defaults)
@@ -207,6 +209,51 @@ def test_refuse_missing_idempotency_key(tmp_path):
     gate = _gate(cfg, cloud, tmp_path)
     r = gate.approve_and_issue(_op(idempotency_key=""), _state(), now=100.0)
     assert not r.issued and "idempotency" in r.refused_reason
+
+
+# ---- require_confirmation (P0.1) -------------------------------------------------------------
+
+def test_refuse_unconfirmed_operation(tmp_path):
+    """A real op that was not confirmed is refused and audited when require_confirmation is set."""
+    cfg = _cfg(actuation={"mode": "full", "dry_run": False, "require_confirmation": True})
+    cloud = FakeCloud()
+    audit_path = tmp_path / "audit.jsonl"
+    gate = SafetyGate(cfg, make_test_model(), AuditLog(audit_path), cloud)
+    r = gate.approve_and_issue(_op(approved=False), _state(current=2), now=100.0)
+    assert not r.issued and "confirm" in r.refused_reason
+    assert cloud.calls == []  # never issued
+    # refused like every other guardrail: intent then refused, no issue
+    records = AuditLog(audit_path).read_all()
+    assert records[0]["phase"] == "intent"
+    assert any(rec["phase"] == "refused" for rec in records)
+
+
+def test_confirmed_operation_issues(tmp_path):
+    """The same op issues once the caller confirms it."""
+    cfg = _cfg(actuation={"mode": "full", "dry_run": False, "require_confirmation": True})
+    cloud = FakeCloud()
+    gate = _gate(cfg, cloud, tmp_path)
+    r = gate.approve_and_issue(_op(approved=True), _state(current=2), now=100.0)
+    assert r.issued and cloud.calls[0][0] == "create"
+
+
+def test_confirmation_not_required_when_disabled(tmp_path):
+    """With require_confirmation false, an unconfirmed op issues normally."""
+    cfg = _cfg(actuation={"mode": "full", "dry_run": False, "require_confirmation": False})
+    cloud = FakeCloud()
+    gate = _gate(cfg, cloud, tmp_path)
+    r = gate.approve_and_issue(_op(approved=False), _state(current=2), now=100.0)
+    assert r.issued and cloud.calls[0][0] == "create"
+
+
+def test_dry_run_exempt_from_confirmation(tmp_path):
+    """Dry-run issues nothing, so it needs no confirmation even when require_confirmation is set."""
+    cfg = _cfg(actuation={"mode": "full", "dry_run": True, "require_confirmation": True})
+    cloud = FakeCloud()
+    gate = _gate(cfg, cloud, tmp_path)
+    r = gate.approve_and_issue(_op(approved=False), _state(current=2), now=100.0)
+    assert r.dry_run is True and r.issued is False
+    assert cloud.calls == []
 
 
 # ---- happy path issues (against FakeCloud, still no network) ---------------------------------

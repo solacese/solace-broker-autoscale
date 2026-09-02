@@ -61,7 +61,9 @@ pythonpath = ["src"]
 markers = [
   "integration: requires a live broker (deselect with -m 'not integration')",
 ]
-addopts = "-ra"
+# A contributor's first bare `pytest` must not go red on integration tests that need a live broker
+# and optional protocol clients. CI opts back in with `-m integration` (see the integration job).
+addopts = '-ra -m "not integration"'
 
 [tool.ruff]
 line-length = 110
