@@ -47,7 +47,7 @@ def _render_cost(config: Config, decisions: list[ShardDecision]) -> list[str]:
     if summary["warm_pool_monthly"] is not None:
         out.append("")
         note = summary["warm_pool_note"] or "billed idle capacity"
-        out.append(f"- **Warm pool:** {summary['warm_pool_monthly']:.0f} {cur}/month — {note}.")
+        out.append(f"- **Warm pool:** {summary['warm_pool_monthly']:.0f} {cur}/month - {note}.")
     out.append("")
     return out
 
@@ -58,7 +58,7 @@ def render(config: Config, model: CapacityModel, decisions: list[ShardDecision])
     lines.append("")
 
     if model.synthetic:
-        lines.append("> ⚠️ **SYNTHETIC CAPACITY MODEL** — "
+        lines.append("> ⚠️ **SYNTHETIC CAPACITY MODEL** - "
                      f"{model.warning}")
         lines.append("> Recommendations below are illustrative only. Actuation is hard-blocked.")
         lines.append("")
@@ -68,7 +68,7 @@ def render(config: Config, model: CapacityModel, decisions: list[ShardDecision])
     lines.append(f"- **Billing model:** {config.billing.model}")
     lines.append(f"- **Topology:** {config.topology.mode}")
     if config.billing.model == "committed":
-        lines.append("- **Note:** committed billing — scale-down recommendations are suppressed; "
+        lines.append("- **Note:** committed billing - scale-down recommendations are suppressed; "
                      "a warm pool is billed idle capacity with no offsetting saving.")
     wp = config.policy.warm_pool
     if wp > 0:
@@ -103,7 +103,7 @@ def _render_shard(d: ShardDecision) -> list[str]:
         "scale-down": f"**Scale down** to **{d.recommended_brokers}** brokers "
                       f"(from {d.current_brokers}).",
         "hold": f"**Hold** at **{d.current_brokers}** brokers.",
-        "no-decision": "**No decision** — refusing to recommend on this data.",
+        "no-decision": "**No decision** - refusing to recommend on this data.",
     }[d.action.value]
     out.append(f"> {verb}")
     if d.reason:
@@ -120,7 +120,7 @@ def _render_shard(d: ShardDecision) -> list[str]:
             ar = d.axes.get(name)
             if ar is None:
                 continue
-            derived = "—" if ar.derived_threshold is None else f"{ar.derived_threshold:.2f}"
+            derived = "-" if ar.derived_threshold is None else f"{ar.derived_threshold:.2f}"
             marker = " ⟵ binding" if d.binding_axis and d.binding_axis.value == name else ""
             out.append(
                 f"| {name}{marker} | {ar.demand_ratio:.2f} | {ar.effective_threshold:.2f} | "

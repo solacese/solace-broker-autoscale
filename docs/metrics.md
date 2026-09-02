@@ -1,7 +1,7 @@
 # Metrics field mapping
 
 The decision engine consumes a **normalised** `MetricSample` (§5.1). Collectors map a broker metrics
-source onto it. Field names below are **not guessed** — they were captured from a live Solace
+source onto it. Field names below are **not guessed** - they were captured from a live Solace
 PubSub+ broker (`solace/solace-pubsub-standard`, SEMP version `broker/10.26.x`) and are saved as
 fixtures under `tests/fixtures/semp/`.
 
@@ -36,7 +36,7 @@ per-service `service*MaxConnectionCount`). The live count is read from the clien
 `GET /SEMP/v2/monitor/msgVpns/{vpn}/clients?count=1` → `meta.count`.
 
 `current_brokers` is supplied by the fleet inventory (the assignment store / actuator), not the
-broker — a single broker does not know how many peers serve its shard.
+broker - a single broker does not know how many peers serve its shard.
 
 ### Absent fields → open questions, never invented
 

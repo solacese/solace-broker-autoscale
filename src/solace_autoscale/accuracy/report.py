@@ -1,6 +1,6 @@
 """Accuracy report (§7): predicted vs actual, per axis and per size bucket.
 
-Highlights buckets where the model is consistently optimistic — those are the dangerous ones.
+Highlights buckets where the model is consistently optimistic - those are the dangerous ones.
 """
 
 from __future__ import annotations

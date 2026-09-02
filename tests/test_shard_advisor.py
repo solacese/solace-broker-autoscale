@@ -46,7 +46,7 @@ def test_spanning_application_forces_hybrid():
 def test_true_spanning_reported_when_components_separate():
     # Two separate components, and an app that (via distinct events) appears in both is only possible
     # if events don't connect them. Construct so app 'x' publishes to two topics that are otherwise
-    # isolated — union-find will merge them through x, so genuine spanning requires the graph to have
+    # isolated - union-find will merge them through x, so genuine spanning requires the graph to have
     # been cut. We simulate a pre-cut export by giving disjoint producer/consumer sets that share x
     # but where x is intentionally the bridge; the advisor correctly merges. Assert the merge.
     doc = {

@@ -5,7 +5,7 @@ Accepted.
 
 ## Context
 A utilisation threshold ("scale at 75%") is usually picked by feel. But the *right* threshold is not
-a preference — it is whatever leaves enough spare capacity to absorb the load that arrives **while
+a preference - it is whatever leaves enough spare capacity to absorb the load that arrives **while
 new capacity is still being added**. If a broker takes 12 minutes to provision and load is growing
 5% per minute, a 75% threshold is unsafe: by the time the new broker is live, demand has grown past
 100% and messages have already been dropped or spooled to exhaustion.
@@ -26,7 +26,7 @@ effective_threshold = min(configured, safe_headroom)     # never raise the confi
 
 The configured per-axis headroom values are treated as **ceilings**: a derived value may be more
 conservative (lower), never less. When the derived value is lower, the report shows both numbers and
-the inputs that produced them, prominently — this is one of the most useful things the tool outputs.
+the inputs that produced them, prominently - this is one of the most useful things the tool outputs.
 
 ## Consequences
 - Headroom is explainable and reproducible, not a magic constant.

@@ -28,7 +28,7 @@ def make_test_model(
     """A small, exactly-known model for arithmetic-precise engine tests.
 
     enterprise-10k, direct+guaranteed, buckets at 1000 and 10000 bytes.
-    msg_rate: 10000 @1KB, 1000 @10KB (so byte_rate is 10e6 at both — flat byte ceiling).
+    msg_rate: 10000 @1KB, 1000 @10KB (so byte_rate is 10e6 at both - flat byte ceiling).
     """
     data = {
         "schema_version": "1",

@@ -21,7 +21,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Lint
-        run: ruff check src/ tests/ adapters/python/ dns/
+        run: ruff check src/ tests/ adapters/python/
       - name: Type check
         run: mypy src/solace_autoscale
       - name: Test (unit only; integration needs a live broker)

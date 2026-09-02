@@ -1,12 +1,12 @@
 # Client integration (§9)
 
-Clients reach brokers **directly** — there is no proxy in the data path (ADR 0002). Steering is
+Clients reach brokers **directly** - there is no proxy in the data path (ADR 0002). Steering is
 out-of-band, in three tiers. Pick per application.
 
 ## The assignment service
 
 `GET /assignment?shard=&client_id=&protocol=&mode=direct|guaranteed` returns a **per-protocol
-endpoint map**, not a single host/port — every protocol listens on a different port and expects a
+endpoint map**, not a single host/port - every protocol listens on a different port and expects a
 different URI form, so returning one endpoint forces the caller to reconstruct the rest and get it
 wrong.
 
@@ -39,7 +39,7 @@ wrong.
 
 ## Three tiers
 
-### Tier 0 — DNS, zero client change
+### Tier 0 - DNS, zero client change
 The updater maintains one DNS record per shard (`shard-a.brokers.example.com`) pointing at the
 shard's ACTIVE brokers. Clients connect to the shard name; brokers are invisible. Any protocol, any
 library, no code.
@@ -49,14 +49,14 @@ express sticky placement for a specific guaranteed consumer. TTL bounds reassign
 and many clients cache DNS for the process lifetime. **Use Tier 0 for direct messaging and
 publishers; do not use it for durable consumers.**
 
-### Tier 1 — resolver + thin adapters (default for AMQP, MQTT)
+### Tier 1 - resolver + thin adapters (default for AMQP, MQTT)
 A small helper per language calls the assignment service and returns a connection URI / factory
 config; your app uses its own unmodified client (Qpid JMS/Proton, Paho, any HTTP client). ~20 lines
 per protocol, nothing on the message path. Qpid JMS failover URI lists are built for the warm path.
 
-### Tier 2 — full SDK wrapper (only SMF, Solace JMS)
+### Tier 2 - full SDK wrapper (only SMF, Solace JMS)
 Wraps connection creation, caches the assignment, re-looks-up on reconnect, honours a reassignment
-signal. **Guaranteed consumers are never silently reassigned** — a reassignment signal applies to
+signal. **Guaranteed consumers are never silently reassigned** - a reassignment signal applies to
 direct clients and publishers only; the wrapper refuses it for a guaranteed consumer so the app
 migrates deliberately. Do **not** build a Tier 2 wrapper for AMQP or MQTT.
 
@@ -64,16 +64,16 @@ migrates deliberately. Do **not** build a Tier 2 wrapper for AMQP or MQTT.
 
 | Protocol | Client | Tier | Integration test |
 |---|---|---|---|
-| SMF | Solace PubSub+ Messaging API | 2 | `test_smf_guaranteed_publish` — persistent publish lands on a durable queue |
+| SMF | Solace PubSub+ Messaging API | 2 | `test_smf_guaranteed_publish` - persistent publish lands on a durable queue |
 | AMQP 1.0 | Qpid Proton / Qpid JMS / rhea | 1 | `test_amqp_send` |
-| MQTT 3.1.1 | Paho | 1 | `test_mqtt_pubsub` — pub/sub round trip |
+| MQTT 3.1.1 | Paho | 1 | `test_mqtt_pubsub` - pub/sub round trip |
 | MQTT 5 | Paho | 1 | See note below |
 | REST | any HTTP client | 1 | `test_rest_publish` |
 | JMS | Solace JMS or Qpid JMS | 1 or 2 | via SMF (Solace JMS) / AMQP (Qpid JMS) adapters |
 
 Run: `pytest -m integration` against a local broker (see `tests/test_integration_broker.py`).
 
-### MQTT 5 CONNACK Server Reference — verify per broker
+### MQTT 5 CONNACK Server Reference - verify per broker
 MQTT 5 has a standard server-redirect: the broker can return a **Server Reference** property in the
 CONNACK (or DISCONNECT), and a compliant client follows it with no adapter at all. Whether Solace
 emits it depends on broker version/config, so **verify against your broker rather than assuming**.
@@ -88,7 +88,7 @@ adapter as for MQTT 3.1.1. This is an **open question** to confirm on your targe
   2. **SAN** entries per broker hostname.
   The integration tests use plaintext ports for simplicity; production uses the TLS ports in the
   endpoint map.
-- **Failure behaviour — never fail closed.** When the assignment service is unreachable, the
+- **Failure behaviour - never fail closed.** When the assignment service is unreachable, the
   resolver returns the **cached** assignment. The assignment service being down must not take an
   application down. Only when there is no cache AND the service is down does the resolver error.
 - **Guaranteed consumers are never silently reassigned.** Reassignment signals apply to direct-mode

@@ -1,6 +1,6 @@
 """Actuator construction (ADR 0004, §4).
 
-``actuation.mode: recommend`` means the actuator is NEVER constructed — not instantiated, not held
+``actuation.mode: recommend`` means the actuator is NEVER constructed - not instantiated, not held
 behind a flag. ``build_actuator`` returns ``None`` in recommend mode. Callers must treat ``None`` as
 "no actuator exists" and skip actuation entirely.
 
@@ -24,7 +24,7 @@ def build_actuator(
 ) -> SafetyGate | None:
     """Return a SafetyGate, or ``None`` in recommend mode (actuator not constructed).
 
-    Refuses to construct if the model is synthetic AND mode is not recommend — a synthetic model
+    Refuses to construct if the model is synthetic AND mode is not recommend - a synthetic model
     hard-blocks actuation (§10), so there is no point constructing an actuator that would refuse
     every operation; we surface it as a clear error instead.
     """

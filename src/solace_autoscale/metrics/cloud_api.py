@@ -1,4 +1,4 @@
-"""Solace Cloud monitoring API collector — documented stub.
+"""Solace Cloud monitoring API collector - documented stub.
 
 No sample payload of the Cloud managed monitoring API was supplied. Per §1/§14 we do NOT invent
 field names. This collector raises ``NotImplementedError`` listing exactly the fields it needs, so

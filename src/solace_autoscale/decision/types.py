@@ -92,7 +92,7 @@ class AxisResult:
     effective_threshold: float
     configured_threshold: float
     derived_threshold: float | None  # None when headroom.mode == fixed
-    #: demand_ratio / effective_threshold — the value used to pick the binding axis
+    #: demand_ratio / effective_threshold - the value used to pick the binding axis
     pressure: float
     #: inputs that produced the derived threshold, for the report
     derived_inputs: dict[str, float] = field(default_factory=dict)

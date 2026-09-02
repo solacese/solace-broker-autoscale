@@ -1,4 +1,4 @@
-"""Solace Cloud (Mission Control) REST client — the ONLY component permitted to call the API (§2).
+"""Solace Cloud (Mission Control) REST client - the ONLY component permitted to call the API (§2).
 
 Endpoints (verified against the Mission Control OpenAPI, version 2.0.0):
   POST   /api/v2/missionControl/eventBrokerServices                     createService  → 202 Operation

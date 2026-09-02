@@ -12,7 +12,7 @@ testability matter, because the decision engine's correctness is the product.
 
 **Capacity data.** The per-broker maxima live in Excel workbooks measured by performance
 engineering. Reading Excel at runtime would mean shipping a spreadsheet parser on the hot path,
-re-parsing on every run, and — worse — running against numbers that changed under us without a
+re-parsing on every run, and - worse - running against numbers that changed under us without a
 version trail.
 
 ## Decision

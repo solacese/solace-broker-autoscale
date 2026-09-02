@@ -2,7 +2,7 @@
 
 The assignment-service tests (`test_assignment.py`) depend on FastAPI and guard their import with
 `pytest.importorskip("fastapi")`. That is the right degradation for a bare checkout, but it means a
-safety-relevant suite would *silently skip* — showing green — if FastAPI ever fell out of the `dev`
+safety-relevant suite would *silently skip* - showing green - if FastAPI ever fell out of the `dev`
 extra. CI installs `.[dev]`, so in CI those tests must RUN, not skip.
 
 This module deliberately does NOT use `importorskip`, so it always runs. When it detects that the
@@ -18,7 +18,7 @@ import importlib.util
 import pytest
 
 #: Packages that ship ONLY in the `dev` extra. If any is importable, we are in a dev/CI environment
-#: and the full `dev` extra — including fastapi — must be present.
+#: and the full `dev` extra - including fastapi - must be present.
 _DEV_SENTINELS = ("ruff", "mypy")
 
 

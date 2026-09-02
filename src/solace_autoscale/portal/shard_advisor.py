@@ -7,7 +7,7 @@ Approach: build a bipartite graph of applications ↔ topics, find weakly connec
 each component as a shard candidate. Report component sizes and any application spanning multiple
 components (those force hybrid mode). Emit a ``topology.shards`` config fragment to paste.
 
-Ingest (see docs — verify against a real export):
+Ingest (see docs - verify against a real export):
 The Event Portal v2 API models a topic as ``EventVersion.deliveryDescriptor.address.addressLevels``
 (each level ``{name, addressLevelType: literal|variable}``), and links applications to events via
 ``ApplicationVersion.declaredProducedEventVersionIds`` / ``declaredConsumedEventVersionIds`` and

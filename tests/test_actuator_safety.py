@@ -1,6 +1,6 @@
 """Actuator safety tests (§10, §13 Phase 4 gate).
 
-Every guardrail has a test proving the operation is REFUSED. No test issues a real Cloud API call —
+Every guardrail has a test proving the operation is REFUSED. No test issues a real Cloud API call -
 a FakeCloud records calls instead. Also tests the recommend-mode-not-constructed rule and the audit
 'before the call' ordering.
 """

@@ -1,7 +1,7 @@
 """JSON report (§11): machine consumption and the actuator's input.
 
 One data structure; markdown.py renders the same content for humans. Carries model version and a
-synthetic banner where applicable — a recommendation without provenance is not reproducible.
+synthetic banner where applicable - a recommendation without provenance is not reproducible.
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ reassignment invisible to clients.
 It would also put a stateful, latency-adding, single-point-of-failure component on the **data path**
 of a messaging system whose entire value is throughput and delivery guarantees. A proxy would have
 to re-implement flow control, guaranteed-delivery acknowledgement, and per-protocol semantics for
-SMF, AMQP, MQTT, and REST — correctly — or it silently breaks delivery.
+SMF, AMQP, MQTT, and REST - correctly - or it silently breaks delivery.
 
 ## Decision
 **No proxy in the data path.** Client traffic goes directly to brokers. Every component in this

@@ -1,7 +1,7 @@
 """Cost modelling (pure).
 
 Turns broker COUNTS into money when the operator supplies a price table (``billing.per_broker_monthly``).
-No pricing is shipped — the operator provides their own rates — so with no table the functions return
+No pricing is shipped - the operator provides their own rates - so with no table the functions return
 count-only structures and the report omits dollar figures.
 
 Two things this answers that a raw broker count does not:

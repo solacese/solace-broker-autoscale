@@ -14,7 +14,7 @@ from .resolver import Assignment
 def amqp_uri(assignment: Assignment, *, failover: list[Assignment] | None = None) -> str:
     """AMQP 1.0 (Qpid JMS / Proton / rhea). Returns the connection URI.
 
-    When ``failover`` alternatives are given, returns a Qpid JMS failover URI list — useful for the
+    When ``failover`` alternatives are given, returns a Qpid JMS failover URI list - useful for the
     warm path so the client can fall back without a resolver round-trip.
     """
     primary = assignment.endpoint("amqp")

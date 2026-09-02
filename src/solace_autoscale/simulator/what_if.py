@@ -1,7 +1,7 @@
 """What-if projection (pure): how many brokers would this shard need if load multiplied?
 
 Re-runs the SAME pure decision engine with each sample's rates scaled by a multiplier. No new
-capacity maths — it reuses ``decide`` — so a projection can never disagree with a real
+capacity maths - it reuses ``decide`` - so a projection can never disagree with a real
 recommendation at multiplier 1.0. Answers "what happens if messages double / quadruple?" which is
 the question that follows every capacity recommendation.
 

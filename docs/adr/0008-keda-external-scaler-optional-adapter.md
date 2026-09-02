@@ -7,7 +7,7 @@ Accepted. Refines [ADR 0001](0001-solace-cloud-only.md), which flatly ruled out 
 ADR 0001 rejected Kubernetes outright to keep the actuator, safety model, and config schema from
 multiplying across environments. That rejection was too strong. Kubernetes users reasonably ask
 whether this tool can participate in a KEDA-driven autoscaling setup, and the honest answer is "yes,
-as an adapter, later" — not "no, never".
+as an adapter, later" - not "no, never".
 
 The obvious Kubernetes-native shape is a [KEDA external scaler](https://keda.sh/docs/2.20/concepts/external-scalers/):
 a gRPC service KEDA polls, which drives a HorizontalPodAutoscaler (HPA). The question is whether the
@@ -26,7 +26,7 @@ The valuable part to record is *why* the adapter cannot be the core:
 - **HPA's interface is a scalar replica count.** The engine's primary product is a per-shard report:
   binding axis, effective-versus-configured headroom, hot-shard detection, model provenance, and the
   warnings that explain *why*. None of that survives flattening to a single integer. The
-  recommendation phase — the reasoning, not the number — is the product; an adapter that emits only a
+  recommendation phase - the reasoning, not the number - is the product; an adapter that emits only a
   count discards it. The core must therefore keep producing the full report, and the adapter is a
   lossy projection of it, not a replacement for it.
 - **HPA assumes scale-in is a decrement that succeeds.** Removing a broker is not: a drain can take
@@ -34,13 +34,13 @@ The valuable part to record is *why* the adapter cannot be the core:
   scale-in is in progress and may need intervention". The safety layer (drain controller, pre-delete
   emptiness checks, audit trail) has to live in the core, outside HPA's model of the world.
 - **Requiring a cluster and a CRD blocks the highest-value use case.** That use case is an engineer
-  running a capacity report in front of an architect — no cluster, no CRD, no operator. Making
+  running a capacity report in front of an architect - no cluster, no CRD, no operator. Making
   Kubernetes a prerequisite would gate the tool's most important moment behind infrastructure that
   moment does not need.
 - **What KEDA does buy, later.** Catalog distribution (KEDA's scaler catalog is a discovery channel),
   and a clean composition story: one loop scales *consumers within a broker* (the KEDA Solace
   scaler) while this tool's loop scales *brokers underneath them*. That composition is worth
-  supporting — as an adapter, once the two-loop interaction (see `docs/architecture.md`) is handled
+  supporting - as an adapter, once the two-loop interaction (see `docs/architecture.md`) is handled
   with asymmetric windows and cooldowns.
 
 ## Consequences

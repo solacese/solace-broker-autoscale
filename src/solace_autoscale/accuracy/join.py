@@ -37,7 +37,7 @@ def record_observed_capacity(
 
     Observed per-broker capacity on an axis = observed fleet demand / current_brokers. We only record
     an axis when its observed utilisation (observed demand / predicted capacity) is above
-    ``saturation_floor`` — below that, the load says nothing about the ceiling. Returns how many
+    ``saturation_floor`` - below that, the load says nothing about the ceiling. Returns how many
     axis observations were recorded.
     """
     if sample.current_brokers <= 0:

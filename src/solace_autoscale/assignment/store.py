@@ -9,7 +9,7 @@ Guaranteed placement is sticky and durable: a queue lives on exactly one broker,
 return to the same broker. Placements survive service restart and lease expiry as long as the queue
 exists. A DRAINING broker takes no NEW assignments but keeps serving existing ones.
 
-Nothing here vends credentials — only locations.
+Nothing here vends credentials - only locations.
 """
 
 from __future__ import annotations

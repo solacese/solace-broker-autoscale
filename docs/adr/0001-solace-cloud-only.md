@@ -5,7 +5,7 @@ Accepted. **Amended by [ADR 0008](0008-keda-external-scaler-optional-adapter.md)
 
 The blanket rejection of Kubernetes below was too strong. ADR 0008 refines it: the *core* stays
 standalone and Kubernetes-independent (as decided here), but a KEDA external scaler is admitted as an
-optional, later-phase **adapter** — not a mode of the core and not a dependency of it. Read the
+optional, later-phase **adapter** - not a mode of the core and not a dependency of it. Read the
 "No Kubernetes operator" consequence below as "no Kubernetes in the core", not "no Kubernetes ever".
 
 ## Context

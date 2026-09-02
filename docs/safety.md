@@ -6,7 +6,7 @@ away.
 
 ## The actuator is off by default
 
-- `actuation.mode` defaults to `recommend`. In recommend mode the actuator is **never constructed** —
+- `actuation.mode` defaults to `recommend`. In recommend mode the actuator is **never constructed** -
   `build_actuator` returns `None` (ADR 0004). There is no object to misuse.
 - Building the actuator (Phase 4) does not change the default. Flipping to `scale-up-only`/`full`
   requires an explicit config edit by the user.
@@ -20,7 +20,7 @@ away.
 | 1 | `dry_run: true` logs and returns without issuing | `_dry_run` branch |
 | 2 | Refuse all actuation when the capacity model is synthetic | `_check_model_not_synthetic` |
 | 3 | Refuse when metrics are stale beyond `staleness_limit` | `_check_metrics_fresh` |
-| 4 | Refuse to delete a broker with non-zero queue depth, bound consumers, active flows, or spooled messages — checked LIVE immediately before the call | `_check_safe_to_delete` |
+| 4 | Refuse to delete a broker with non-zero queue depth, bound consumers, active flows, or spooled messages - checked LIVE immediately before the call | `_check_safe_to_delete` |
 | 5 | Never scale below `min_brokers` or above `max_brokers` | `_check_bounds` |
 | 6 | Honour `max_ops_in_flight` and `max_ops_per_hour` | `_check_rate_limits` |
 | 7 | Check `kill_switch_file` before every operation; if present, halt and log | `_check_kill_switch` |
@@ -53,7 +53,7 @@ naming the host.
 - A drain that does not reach `DRAINED` within the stall timeout goes to `STUCK`, which requires
   operator intervention and **never** auto-resolves into deletion.
 - With large messages and guaranteed delivery a drain can take a long time. That is correct
-  behaviour, not a bug to optimise away — a slow-but-progressing drain stays `DRAINING`, not `STUCK`.
+  behaviour, not a bug to optimise away - a slow-but-progressing drain stays `DRAINING`, not `STUCK`.
 
 ## Warm pool
 
@@ -72,5 +72,5 @@ hand-rolling SEMPv2 calls, keeping its blast radius to provisioning only.
 
 Every guardrail has a test that proves the operation is refused (`tests/test_actuator_safety.py`).
 The drain state machine is tested including the stall→`STUCK` path and the refusal to delete from
-any state but `DRAINED` (`tests/test_drain.py`). **No test issues a real Cloud API call** — a
+any state but `DRAINED` (`tests/test_drain.py`). **No test issues a real Cloud API call** - a
 `FakeCloud` records calls instead.

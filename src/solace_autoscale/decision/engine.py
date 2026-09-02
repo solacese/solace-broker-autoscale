@@ -230,7 +230,7 @@ def decide(req: DecisionRequest) -> ShardDecision:
             WarningCode.BYTE_BOUND_LARGE_MSG,
             f"binding axis is bytes and avg_msg_size {avg_msg_size:.0f}B exceeds the largest "
             f"measured bucket {cap.measured_size_range[1]}B; evaluate the claim-check pattern "
-            "(payload to object storage, publish a reference) before adding brokers — often the "
+            "(payload to object storage, publish a reference) before adding brokers - often the "
             "cheaper fix",
         ))
     if mesh:
@@ -351,7 +351,7 @@ def _held_condition(
 
     ``demand_ratio`` is per-sample raw demand / per-broker capacity (capacity is constant across the
     window, so it is passed in rather than re-looked-up). If the window is not actually covered by
-    samples, this returns False — the condition cannot be shown to have *held* for the full window.
+    samples, this returns False - the condition cannot be shown to have *held* for the full window.
     """
     samples = sorted(req.shard.samples, key=lambda s: s.timestamp)
     if not samples:

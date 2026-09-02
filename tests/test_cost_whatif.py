@@ -145,7 +145,7 @@ def test_mesh_amplification_reaches_engine_via_shardinput():
 
 
 # ---- monitor loop (no live broker: drive with a fake collector via CliRunner is heavy; test the
-#      loop's building blocks instead — history + decide + record — which is what monitor wires) ---
+#      loop's building blocks instead - history + decide + record - which is what monitor wires) ---
 
 def test_monitor_building_blocks_accumulate(tmp_path):
     """The monitor loop = collect → history.add → decide → record. Verify that composition with a

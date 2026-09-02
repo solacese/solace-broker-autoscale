@@ -1,7 +1,7 @@
 """Workload simulator (§13).
 
-Generates synthetic workloads across message size, fanout, and delivery mode — combinations
-production will not conveniently produce — and validates the capacity model + decision engine end to
+Generates synthetic workloads across message size, fanout, and delivery mode - combinations
+production will not conveniently produce - and validates the capacity model + decision engine end to
 end. Pure and deterministic: no clock, no randomness (variation is by explicit parameter sweep).
 
 Two uses:
@@ -150,7 +150,7 @@ def consumer_reaction_window(
     msg_size_bytes: int = 1000,
     base_ingress_util: float = 0.5,
     # Ramp consumers, then a plateau long enough for the rolling window to flush the ramp samples
-    # and converge — a converged steady state is what "does not oscillate" must be measured against.
+    # and converge - a converged steady state is what "does not oscillate" must be measured against.
     consumer_counts: tuple[int, ...] = (1, 2, 4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8),
     n_per_step: int = 30,
     cadence: float = 30.0,
@@ -159,7 +159,7 @@ def consumer_reaction_window(
     """Model a consumer autoscaler reacting to backlog and check the broker loop does not oscillate.
 
     A consumer autoscaler (e.g. KEDA) raises the consumer replica count when a queue backs up, which
-    raises **egress** load on the broker — the signal this tool's broker loop watches. We hold
+    raises **egress** load on the broker - the signal this tool's broker loop watches. We hold
     ingress steady and ramp the consumer count (and therefore egress), then let it plateau, exactly
     as a converging consumer loop would. See ``docs/architecture.md`` (two-loop interaction).
 
@@ -171,7 +171,7 @@ def consumer_reaction_window(
     recommended broker count is **monotonic non-decreasing** across the scenario and **converges to a
     stable value** on the plateau (the tail steps are constant). It may keep rising for a few steps
     after the consumer count plateaus while the rolling window flushes the lower-egress ramp samples,
-    but it must climb toward the steady state and hold — never reverse downward chasing the faster
+    but it must climb toward the steady state and hold - never reverse downward chasing the faster
     consumer loop.
     """
     cfg = config.model_copy(deep=True)
@@ -279,7 +279,7 @@ def validate_model(config: Config, model: CapacityModel) -> ValidationReport:
             if top.decision.action != Action.no_decision:
                 failures.append(
                     f"{k}: util 3.0 recommended {top.decision.recommended_brokers} broker(s) with "
-                    f"no hit-ceiling — overload silently absorbed"
+                    f"no hit-ceiling - overload silently absorbed"
                 )
 
     return ValidationReport(total_cells=total, failures=failures)

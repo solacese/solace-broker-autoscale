@@ -3,7 +3,7 @@
 GET /assignment?shard=&client_id=&protocol=&mode=direct|guaranteed
   → per-protocol endpoint map (not a single host/port), broker_id, msg_vpn, state, lease_seconds.
 
-Never vends credentials — returns a location only. Health + readiness endpoints. The service is
+Never vends credentials - returns a location only. Health + readiness endpoints. The service is
 stateless; all durable state is in the store, so it survives restart and horizontal replication
 (with optimistic locking on placement writes).
 
@@ -78,7 +78,7 @@ def create_app(store: AssignmentStore, *, clock: Callable[[], float] = _now,
             "state": broker.state.value,
             "lease_seconds": result.lease_seconds,
             "reused_existing": result.reused_existing,
-            # per-protocol endpoint map — never a single host/port, never a credential
+            # per-protocol endpoint map - never a single host/port, never a credential
             "endpoints": endpoints,
         }
         return body

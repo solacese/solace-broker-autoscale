@@ -132,7 +132,7 @@ class SafetyGate:
     def _check_mode_allows(self, op: Operation) -> None:
         mode = self._cfg.actuation.mode
         if mode == "recommend":
-            # Should never reach here — the actuator isn't constructed in recommend mode.
+            # Should never reach here - the actuator isn't constructed in recommend mode.
             raise ActuationRefused("actuation.mode is recommend; actuator must not be constructed")
         if mode == "scale-up-only" and op.op_type is OperationType.DELETE_SERVICE:
             raise ActuationRefused("actuation.mode is scale-up-only; delete refused")
@@ -145,7 +145,7 @@ class SafetyGate:
         """Refuse a real (non-dry-run) operation unless the operator confirmed it.
 
         Confirmation is per-operation and collected by the caller (the CLI prompts and sets
-        ``op.approved``); the gate never prompts, so it stays deterministic. Dry-run is exempt —
+        ``op.approved``); the gate never prompts, so it stays deterministic. Dry-run is exempt -
         it issues nothing, so it needs no approval. Disabled when ``require_confirmation`` is false.
         """
         if not self._cfg.actuation.require_confirmation:

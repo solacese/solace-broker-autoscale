@@ -14,7 +14,7 @@ provider "solacebroker" {
   password = var.broker_password
 }
 
-# The Message VPN — identical name and spool sizing across the shard.
+# The Message VPN - identical name and spool sizing across the shard.
 resource "solacebroker_msg_vpn" "vpn" {
   msg_vpn_name    = var.msg_vpn_name
   enabled         = true
@@ -28,7 +28,7 @@ resource "solacebroker_msg_vpn" "vpn" {
   service_rest_incoming_plain_text_enabled = true
 }
 
-# Durable queues + their topic subscriptions — a queue lives on one broker, but its DEFINITION must
+# Durable queues + their topic subscriptions - a queue lives on one broker, but its DEFINITION must
 # be identical wherever the shard's brokers are provisioned so placement is deterministic.
 resource "solacebroker_msg_vpn_queue" "queues" {
   for_each        = { for q in var.queues : q.name => q }

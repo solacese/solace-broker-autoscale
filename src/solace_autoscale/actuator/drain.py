@@ -4,7 +4,7 @@ ACTIVE → DRAINING → DRAINED → DELETING → GONE, with a STUCK terminal for
 
 - Entering DRAINING blocks new assignments (the assignment store's DRAINING state).
 - DRAINED requires zero queue depth AND zero bound consumers held CONTINUOUSLY for a settle period.
-  A transient dip to zero is not enough — if it comes back, the settle timer resets.
+  A transient dip to zero is not enough - if it comes back, the settle timer resets.
 - Only DRAINED may transition to DELETING.
 - A drain that does not reach DRAINED within a timeout goes to STUCK, which requires operator
   intervention and NEVER auto-resolves into deletion.

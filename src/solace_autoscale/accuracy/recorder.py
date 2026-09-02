@@ -1,7 +1,7 @@
 """Prediction accuracy recorder (§7).
 
 Records every recommendation, and joins later observed samples back to compute observed capacity at
-observed load. SQLite by default — this data never leaves the operator's machine and is gitignored.
+observed load. SQLite by default - this data never leaves the operator's machine and is gitignored.
 
 The capacity model's credibility is the whole tool: if the first recommendation an architect checks
 is off by 40%, the project is finished. So we make error measurable, especially the OPTIMISTIC kind
@@ -121,7 +121,7 @@ class AccuracyRecorder:
         """MAPE and signed error per axis, or per (axis, bucket).
 
         Signed error is (predicted - observed) / observed: positive means the model was OPTIMISTIC
-        (claimed more capacity than delivered) — flagged prominently because it is the dangerous one.
+        (claimed more capacity than delivered) - flagged prominently because it is the dangerous one.
         """
         rows = self._conn.execute(
             "SELECT axis, msg_size_bucket, observed_capacity, predicted_capacity FROM observations"

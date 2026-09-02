@@ -1,4 +1,4 @@
-"""PubSub+ Prometheus exporter collector — documented stub.
+"""PubSub+ Prometheus exporter collector - documented stub.
 
 No exporter dump was supplied. Per §1/§14 we do NOT invent metric names. This collector raises
 ``NotImplementedError`` listing the normalised fields it must map, to be completed against a real

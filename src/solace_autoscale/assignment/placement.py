@@ -2,7 +2,7 @@
 
 Rules:
 - **Guaranteed** placement is sticky and durable. If a placement exists and its broker can still
-  serve (ACTIVE/DRAINING/DRAINED), the client returns to the SAME broker — even after lease expiry,
+  serve (ACTIVE/DRAINING/DRAINED), the client returns to the SAME broker - even after lease expiry,
   as long as the queue (broker) still exists. A queue lives on one broker; sending the consumer
   elsewhere makes its messages unreachable.
 - **Direct** clients (and publishers) may be (re)assigned freely; a DRAINING broker takes no new

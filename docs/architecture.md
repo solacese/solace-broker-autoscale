@@ -34,7 +34,7 @@ config.yaml ──▶ config.py ────────────────
 | `portal/shard_advisor` | Event Portal export → shard boundaries | reads export |
 | `assignment/*` | HTTP service + durable placement store | HTTP, SQLite/Postgres |
 | `actuator/*` | Solace Cloud API calls behind safety layer | network (opt-in) |
-| `dns/updater` | Tier-0 DNS records per shard | network (opt-in) |
+| `dns/updater` (in `solace_autoscale.dns`) | Tier-0 DNS records per shard | network (opt-in) |
 
 ## The purity boundary
 
@@ -51,18 +51,18 @@ mode it is never constructed.
 This tool scales **brokers**. A consumer autoscaler such as the
 [KEDA Solace scaler](https://keda.sh/docs/2.20/scalers/solace-pub-sub/) scales **consumers**. In a
 system that runs both, they are two independent control loops observing overlapping signals with no
-awareness of each other — the classic setup for oscillation.
+awareness of each other - the classic setup for oscillation.
 
 **The coupling.** KEDA scaling consumers *up* (because a queue is backing up) increases egress load
 on the broker, which pushes broker utilisation toward the ceiling this tool watches. This tool then
-adds a broker. Adding a broker changes the queue distribution — the very signal KEDA is measuring —
+adds a broker. Adding a broker changes the queue distribution - the very signal KEDA is measuring -
 so KEDA re-evaluates, and the cycle can repeat. Neither loop knows the other exists.
 
 **Symptoms.** Broker count and consumer replica count that ratchet up together and never settle;
 scale actions that each look locally correct but chase each other; a fleet that grows under a load
 that a stable configuration would have absorbed.
 
-**Mitigations** — the goal is to make the two loops operate on clearly separated timescales so the
+**Mitigations** - the goal is to make the two loops operate on clearly separated timescales so the
 slower one (brokers) cannot chase the faster one (consumers):
 
 - **Asymmetric windows.** Scale *up* deliberately and scale *down* slowly. This tool already derives

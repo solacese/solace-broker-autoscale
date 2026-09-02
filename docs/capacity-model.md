@@ -13,7 +13,7 @@ These map to the Mission Control `ServiceClassId` enum
 
 Each sheet has:
 
-- A **metadata block** (rows ~6–25): `Platform`, `Instance Type`, `Memory`, `Volume Type`,
+- A **metadata block** (rows ~6-25): `Platform`, `Instance Type`, `Memory`, `Volume Type`,
   `Spool Disk Size` (e.g. `65 GiB` → `1300 GiB`), `Broker Mode` (`HA`), client encryption,
   windows, `Message Type` (`SMF`), `API` (`CCSMP`).
 - A **Direct Messaging** table and one or more **Guaranteed Messaging** tables. Each table is a
@@ -35,13 +35,13 @@ When a sheet has multiple Guaranteed tables (different consumer/persistence conf
 takes the **most conservative** (lowest) ingress figure per (size, fanout) cell so the model never
 over-promises. This is recorded in provenance.
 
-## 2. What the workbooks do NOT contain — resolved via the service-class API
+## 2. What the workbooks do NOT contain - resolved via the service-class API
 
 The workbooks measure **throughput** only. They do not contain connection limits or spool
 capacity. Those are authoritative in the Mission Control `ServiceClass` schema:
 
-- `vpnConnections` — max client connections for the class → capacity axis `connections`.
-- `vpnMaxSpoolSize` — max message spool size → capacity axis `spool_bytes`.
+- `vpnConnections` - max client connections for the class → capacity axis `connections`.
+- `vpnMaxSpoolSize` - max message spool size → capacity axis `spool_bytes`.
 
 The compiler therefore fuses two sources into one model: **throughput from the workbook**,
 **connections + spool from a service-class table** (checked in as `models/service-classes.json`,

@@ -40,7 +40,7 @@ class Resolver:
     """Resolve a (shard, client_id) to an Assignment, with a fail-open cache.
 
     On a successful call the result is cached. If the assignment service is later unreachable, the
-    cached assignment is returned rather than raising — the service being down must never take the
+    cached assignment is returned rather than raising - the service being down must never take the
     application down (§9.4). If there is no cache AND the service is unreachable, ResolverError is
     raised (there is genuinely nothing to connect to).
     """

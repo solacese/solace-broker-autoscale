@@ -79,7 +79,7 @@ def lookup(
         points = [_interp(sc.delivery[m], msg_size_bytes) for m in modes]
         # conservative: pick the mode with the lowest msg_rate at this size
         msg_rate, byte_rate, interp, extrap = min(points, key=lambda p: p[0])
-        # measured range: intersection isn't meaningful; report the chosen mode's — recompute
+        # measured range: intersection isn't meaningful; report the chosen mode's - recompute
         chosen = min(zip(modes, points, strict=True), key=lambda mp: mp[1][0])[0]
         curve = sc.delivery[chosen]
     else:

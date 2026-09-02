@@ -4,7 +4,7 @@ Gate: a durable guaranteed placement survives service restart, and survives a br
 leaving DRAINING.
 
 FastAPI is in the ``dev`` extra, so it is always present in CI (which installs ``.[dev]``). These
-tests therefore RUN in CI rather than skipping — a safety-relevant test that silently skips is not a
+tests therefore RUN in CI rather than skipping - a safety-relevant test that silently skips is not a
 test. The contract is enforced by ``test_dev_extra_contract.py``, which lives OUTSIDE this module's
 ``importorskip`` and fails hard if fastapi is missing while the ``dev`` extra is installed; the
 module-level ``importorskip`` here remains only so a bare local checkout without the dev extra
@@ -121,7 +121,7 @@ def test_guaranteed_survives_lease_expiry(tmp_path):
     _seed(store)
     # assign at t=1000 with 300s lease
     a1 = assign(store, "shard-a", "c1", "guaranteed", now=1000.0, lease_seconds=300)
-    # much later, lease long expired — guaranteed placement still returns same broker (queue exists)
+    # much later, lease long expired - guaranteed placement still returns same broker (queue exists)
     a2 = assign(store, "shard-a", "c1", "guaranteed", now=100000.0, lease_seconds=300)
     assert a1.broker.broker_id == a2.broker.broker_id
     assert a2.reused_existing is True

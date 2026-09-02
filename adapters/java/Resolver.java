@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Tier-1 resolver (§9). Calls the assignment service, caches the result, and FAILS OPEN to the
- * cache when the service is unreachable — the control plane being down must never take the
+ * cache when the service is unreachable - the control plane being down must never take the
  * application down (§9.4). Returns a location only; never a credential.
  *
  * This is a reference skeleton: JSON parsing is intentionally minimal (swap in Jackson/Gson in a

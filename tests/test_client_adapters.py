@@ -119,20 +119,9 @@ def test_guaranteed_reassignment_refused():
         client.on_reassignment_signal()
 
 
-def _load_dns_updater():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "dns_updater", REPO / "dns" / "updater.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["dns_updater"] = mod  # dataclass annotation resolution needs the module registered
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def test_dns_desired_records(tmp_path):
     from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState
-    desired_records = _load_dns_updater().desired_records
+    from solace_autoscale.dns.updater import desired_records
 
     store = AssignmentStore(tmp_path / "a.db")
     store.upsert_broker(Broker("b0", "shard-a", "vpn", BrokerState.ACTIVE,

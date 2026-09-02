@@ -11,7 +11,7 @@ the wrong broker.
 
 ## Decision
 `actuation.mode` defaults to `recommend` and **stays** `recommend`. In `recommend` mode the actuator
-is **never constructed** — not instantiated, not injected, not held behind a dry-run flag. The tool
+is **never constructed** - not instantiated, not injected, not held behind a dry-run flag. The tool
 produces a report and a machine-readable recommendation; a human acts.
 
 Building the actuator (Phase 4) does **not** change this default. Changing it requires an explicit

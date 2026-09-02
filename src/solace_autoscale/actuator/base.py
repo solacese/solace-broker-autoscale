@@ -2,7 +2,7 @@
 
 An ``Operation`` is a proposed change (create/delete/spool). The ``Actuator`` protocol issues them,
 but ONLY after ``safety.SafetyGate`` approves. In ``recommend`` mode no actuator is constructed at
-all (ADR 0004) — see ``build_actuator``.
+all (ADR 0004) - see ``build_actuator``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ class Operation:
     metadata: dict[str, Any] = field(default_factory=dict)
     #: Operator confirmation for THIS operation. When ``actuation.require_confirmation`` is set, the
     #: gate refuses unless this is True. It is collected by the caller (e.g. the CLI prompts the
-    #: operator) and passed in explicitly — the gate never prompts, so it stays deterministic and
+    #: operator) and passed in explicitly - the gate never prompts, so it stays deterministic and
     #: testable. Ignored when ``require_confirmation`` is false.
     approved: bool = False
 

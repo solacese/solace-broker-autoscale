@@ -1,7 +1,7 @@
 """Tier-2 SMF SDK wrapper (§9.2). Only for protocols Solace owns (SMF, Solace JMS).
 
 Wraps connection creation: caches the assignment, re-looks-up on reconnect, and honours a
-reassignment signal. Guaranteed consumers are NEVER silently reassigned (§9.4) — a reassignment
+reassignment signal. Guaranteed consumers are NEVER silently reassigned (§9.4) - a reassignment
 signal applies only to direct-mode clients and publishers; for a guaranteed consumer the wrapper
 raises so the application decides.
 
@@ -57,7 +57,7 @@ class SmfClient:
 
     def on_reassignment_signal(self) -> SmfConnection:
         """Handle a reassignment signal. Direct/publisher: re-resolve and reconnect. Guaranteed
-        consumer: refuse — its durable queue lives on one broker and must not move silently."""
+        consumer: refuse - its durable queue lives on one broker and must not move silently."""
         if self._mode == "guaranteed":
             raise GuaranteedReassignmentRefused(
                 f"guaranteed consumer {self._client_id!r} received a reassignment signal; a durable "

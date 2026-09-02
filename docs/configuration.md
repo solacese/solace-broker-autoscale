@@ -9,11 +9,11 @@ accept `30s`, `3m`, `45m`, `1h`, or a bare number (seconds). See `config.example
   pool is billed idle capacity with no offsetting saving. The report says this plainly.
 - `topology.mode: mesh` (or `hybrid`) activates cross-broker amplification in the demand calculation
   (§5.3): inter-broker link bytes are added to the bytes axis, and for guaranteed delivery to spool
-  pressure too. This makes mesh look bad for large payloads — deliberately.
+  pressure too. This makes mesh look bad for large payloads - deliberately.
 - `actuation.mode: recommend` means the actuator is **never constructed**. `scale-up-only` and
   `full` construct it; `dry_run` still gates actual calls.
 - `actuation.require_confirmation: true` (the default) is **enforced by the safety gate**: a real
-  (non-dry-run) operation is refused — and audited as `refused` — unless the caller confirmed it by
+  (non-dry-run) operation is refused - and audited as `refused` - unless the caller confirmed it by
   setting `Operation.approved=True`. The gate never prompts, so it stays deterministic and testable;
   the caller (e.g. a CLI) collects the operator's confirmation and passes the result in. `dry_run`
   operations issue nothing and are exempt. Set it `false` to allow unattended actuation.
@@ -56,11 +56,11 @@ to decide on older data), `endpoint`, `static_path`.
 `model` (`committed`\|`elastic`).
 
 ### `actuation`
-`mode`, `dry_run`, `require_confirmation` (enforced — see the behavioural rule above),
+`mode`, `dry_run`, `require_confirmation` (enforced - see the behavioural rule above),
 `max_ops_in_flight`, `max_ops_per_hour`, `kill_switch_file`. Defaults are maximally safe.
 
 ### `capacity`
-`model` — path to the compiled JSON.
+`model` - path to the compiled JSON.
 
 ### `accuracy`
 `record`, `store` (SQLite path; never committed).

@@ -1,7 +1,7 @@
 """Tier-0 DNS updater (§9.2).
 
 Maintains one DNS record per shard, e.g. ``shard-a.brokers.example.com``, pointing at the ACTIVE
-brokers for that shard. Clients connect to the shard name and are unaware brokers exist behind it —
+brokers for that shard. Clients connect to the shard name and are unaware brokers exist behind it -
 zero client change, any protocol, any library.
 
 Documented limits (these MUST be clear to users):
@@ -38,7 +38,7 @@ def desired_records(
     """One record per shard listing the ACTIVE brokers' hostnames (from their endpoint map).
 
     A DRAINING broker is excluded from the DNS record (it takes no new connections) but keeps
-    serving existing ones directly — consistent with §9.2.
+    serving existing ones directly - consistent with §9.2.
     """
     records = []
     for shard in shards:

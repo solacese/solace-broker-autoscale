@@ -4,8 +4,8 @@
 Accepted.
 
 ## Context
-A broker's capacity is not a single number. It has four distinct axes — message rate, byte rate,
-connection count, spool bytes — each with its own failure mode and its own safe operating fraction.
+A broker's capacity is not a single number. It has four distinct axes - message rate, byte rate,
+connection count, spool bytes - each with its own failure mode and its own safe operating fraction.
 Spool filling to 100% is catastrophic and slow to recover; connection count hitting the class limit
 is a hard wall; byte rate saturating a link degrades gracefully. Treating them with one global
 threshold either wastes capacity on the forgiving axes or runs the dangerous ones too hot.

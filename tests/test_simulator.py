@@ -1,7 +1,7 @@
 """Simulator validation across the full size × fanout × delivery matrix (§13 Phase 1 gate).
 
-Runs against BOTH the committed synthetic model and — when the real workbook is available under
-resources/ — a freshly compiled real model. The real-workbook test is skipped (not failed) when the
+Runs against BOTH the committed synthetic model and - when the real workbook is available under
+resources/ - a freshly compiled real model. The real-workbook test is skipped (not failed) when the
 workbook is absent, so CI without the proprietary inputs still passes.
 """
 
@@ -56,7 +56,7 @@ def test_validate_synthetic_model_invariants(synthetic):
 def test_consumer_reaction_does_not_oscillate(synthetic):
     """P1.5 two-loop interaction: a consumer autoscaler ramping egress in response to backlog must
     not make the broker loop oscillate. The recommendation must be monotonic non-decreasing across
-    the scenario and converge to a stable value on the plateau — never reverse downward chasing the
+    the scenario and converge to a stable value on the plateau - never reverse downward chasing the
     faster consumer loop."""
     results = consumer_reaction_window(Config(), synthetic)
     assert len(results) > 3
@@ -65,14 +65,14 @@ def test_consumer_reaction_does_not_oscillate(synthetic):
     # 1. Monotonic non-decreasing across the whole scenario: the broker loop never scales down in
     #    reaction to a still-rising or freshly-plateaued consumer count (that is the oscillation).
     for prev, cur in zip(recs, recs[1:], strict=False):
-        assert cur >= prev, f"broker recommendation reversed downward: {recs} — loop oscillating"
+        assert cur >= prev, f"broker recommendation reversed downward: {recs} - loop oscillating"
 
     # 2. The recommendation CONVERGES: the tail of the run is constant (the window has flushed the
     #    ramp and the steady state holds). No perpetual creep, no reversal.
     tail = recs[-4:]
     assert len(set(tail)) == 1, f"recommendation did not settle on the plateau: tail={tail}, all={recs}"
 
-    # 3. No scale-down action is emitted while consumers ramp or hold high — a scale-down here would
+    # 3. No scale-down action is emitted while consumers ramp or hold high - a scale-down here would
     #    be the broker loop chasing the faster consumer loop back down.
     assert all(r.action != "scale-down" for r in results), \
         f"scale-down emitted under a rising/held consumer load: {[(r.step, r.action) for r in results]}"

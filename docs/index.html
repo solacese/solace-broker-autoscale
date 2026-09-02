@@ -298,7 +298,7 @@
       A single Solace broker can only grow so far. Once you're on the biggest one and traffic keeps
       climbing, the question changes from "pick a bigger broker" to "how many brokers, and when?"
       <b>solace-autoscale</b> answers that using capacity numbers you measure from your own brokers.
-      It shows you the recommendation <em>and</em> the reason behind it &mdash; never just a number.
+      It shows you the recommendation <em>and</em> the reason behind it - never just a number.
     </p>
     <div class="cta-row">
       <a class="btn primary" href="#start">Get started</a>
@@ -322,7 +322,7 @@
     <p class="lede">
       Nothing is guessed and nothing is hidden. The capacity numbers come from your own brokers, not
       from us. The recommendation is worked out the same way every time, and it comes with the full
-      reasoning &mdash; so you can still explain it to someone weeks later.
+      reasoning - so you can still explain it to someone weeks later.
     </p>
     <div class="steps">
       <div class="step">
@@ -334,13 +334,13 @@
       <div class="step">
         <span class="n">step 2 &middot; recommend</span>
         <h3>See the why, not just the how many</h3>
-        <p>It checks four things a broker can run out of &mdash; message rate, data rate, connections,
-          and stored messages &mdash; and tells you which one you'll hit first.</p>
+        <p>It checks four things a broker can run out of - message rate, data rate, connections,
+          and stored messages - and tells you which one you'll hit first.</p>
       </div>
       <div class="step">
         <span class="n">step 3 &middot; act (optional)</span>
         <h3>It only advises, unless you say otherwise</h3>
-        <p>Out of the box it just gives advice &mdash; it can't touch your brokers. Letting it scale for
+        <p>Out of the box it just gives advice - it can't touch your brokers. Letting it scale for
           you is a separate, deliberate switch, with safety checks that block anything risky.</p>
       </div>
     </div>
@@ -353,7 +353,7 @@
     <p class="section-label">why it's not obvious</p>
     <h2>Bigger messages cost far more than they look</h2>
     <p class="lede">
-      One broker can handle about 44,000 small (1&nbsp;KB) messages a second &mdash; but only about 439 a
+      One broker can handle about 44,000 small (1&nbsp;KB) messages a second - but only about 439 a
       second when each message is 200&nbsp;KB. That's why "just add more brokers" is sometimes the wrong
       call: with big messages you run out of <em>data capacity</em>, and shrinking the message is
       usually the cheaper fix than buying more brokers.
@@ -368,7 +368,7 @@
         <div class="collapse">
           The message rate drops about 100&times;, yet the broker is moving roughly the same amount of
           data (45 &rarr; 90&nbsp;MB/s). It's busy shifting <b>bytes</b>, not messages. At that point more
-          brokers help, but they get expensive fast &mdash; so it's worth checking the payload first.
+          brokers help, but they get expensive fast - so it's worth checking the payload first.
         </div>
       </div>
     </div>
@@ -383,7 +383,7 @@
     <p class="lede">
       These are real results from the tool. For each workload, the bars show how full one broker
       would be on each of the four things it can run out of. The amber line is the safe limit; the
-      highlighted bar is the one you'd hit first &mdash; and the reason for the advice.
+      highlighted bar is the one you'd hit first - and the reason for the advice.
     </p>
     <div class="scenarios" id="scenarios"></div>
     <div class="track-key">
@@ -398,11 +398,11 @@
 <section>
   <div class="wrap">
     <p class="section-label">cost &amp; planning</p>
-    <h2>Turn broker counts into dollars &mdash; and see what's coming</h2>
+    <h2>Turn broker counts into dollars - and see what's coming</h2>
     <p class="lede">
       A recommendation you can take to a budget meeting needs a price tag and a look ahead. Give it
       your own prices and it shows the monthly cost. Ask "what if traffic doubles?" and it shows how
-      many brokers you'd need &mdash; and where you'd run out of room.
+      many brokers you'd need - and where you'd run out of room.
     </p>
     <div class="grid2">
       <div class="card">
@@ -415,7 +415,7 @@
           </tbody>
         </table>
         <p class="note">A standby broker still costs money while it sits idle. You supply your own
-          prices &mdash; the tool ships none.</p>
+          prices - the tool ships none.</p>
       </div>
       <div class="card">
         <h3>Brokers needed if traffic grows</h3>
@@ -483,14 +483,14 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       <div class="knob">
         <h3>How brokers are connected</h3>
         <code>topology.mode: sharded | mesh | hybrid</code>
-        <p>If your brokers talk to each other (mesh), it counts that extra traffic &mdash; so a setup
+        <p>If your brokers talk to each other (mesh), it counts that extra traffic - so a setup
           that's costly with big messages looks costly, as it should.</p>
       </div>
       <div class="knob">
         <h3>How much safety margin</h3>
         <code>policy.headroom.mode: derived | fixed</code>
-        <p>It can work out the margin for you &mdash; leaving room for traffic that keeps rising while a
-          new broker spins up &mdash; or you can set a fixed number.</p>
+        <p>It can work out the margin for you - leaving room for traffic that keeps rising while a
+          new broker spins up - or you can set a fixed number.</p>
       </div>
       <div class="knob">
         <h3>Prices &amp; cost</h3>
@@ -508,7 +508,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
         <h3>Advise, or actually scale</h3>
         <code>actuation.mode: recommend | scale-up-only | full</code>
         <p>Advice-only by default, and it stays that way. Letting it make changes is a deliberate
-          switch &mdash; with an off switch, rate limits, and checks before anything is removed.</p>
+          switch - with an off switch, rate limits, and checks before anything is removed.</p>
       </div>
     </div>
   </div>
@@ -518,7 +518,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
   <div class="wrap">
     <p>A community project. Not an official Solace product. No warranty. Apache&nbsp;2.0.</p>
     <p>It works out its advice the same way every time, and every number on this page is tied to the
-      data that produced it &mdash; so results are repeatable and easy to check.</p>
+      data that produced it - so results are repeatable and easy to check.</p>
     <p><a href="https://github.com/solacese/solace-broker-autoscale">github.com/solacese/solace-broker-autoscale</a></p>
   </div>
 </footer>
@@ -550,7 +550,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       tag: "example 1", title: "Steady orders, small messages",
       input: "25k msg/s &middot; 1 KB each",
       action: "Add a broker", cls: "up", from: 1, to: 2,
-      why: "One broker is over its limit &mdash; but not on message count. It's the amount of data that's too high. The fix is a second broker, not a bigger one.",
+      why: "One broker is over its limit - but not on message count. It's the amount of data that's too high. The fix is a second broker, not a bigger one.",
       badge: null,
       axes: [
         {name: "message rate", ratio: 0.57, thr: 0.75, bind: false},
@@ -576,7 +576,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       tag: "example 3", title: "Large media files, 200 KB",
       input: "700 msg/s &middot; big messages",
       action: "Shrink the message first", cls: "stop", from: 1, to: 5,
-      why: "The messages are so large you're way past the data limit. Before paying for 5 brokers, try sending a small link instead of the whole file &mdash; often about 10&times; cheaper.",
+      why: "The messages are so large you're way past the data limit. Before paying for 5 brokers, try sending a small link instead of the whole file - often about 10&times; cheaper.",
       badge: {cls: "crit", text: "try shrinking the message"},
       axes: [
         {name: "message rate", ratio: 1.59, thr: 0.75, bind: false},

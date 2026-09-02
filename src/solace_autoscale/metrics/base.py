@@ -1,7 +1,7 @@
 """Metrics collector interface.
 
 A collector turns a broker metrics source into normalised ``MetricSample`` windows per shard. The
-decision engine never sees raw broker fields — collectors do the mapping (see docs/metrics.md).
+decision engine never sees raw broker fields - collectors do the mapping (see docs/metrics.md).
 
 Collectors may do I/O; the engine does not. ``current_brokers`` comes from the fleet inventory, not
 the broker, so ``collect`` takes a callable that supplies it per shard.
