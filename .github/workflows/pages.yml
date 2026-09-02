@@ -28,8 +28,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v6
         with:
           # Enable Pages (build source = GitHub Actions) from the workflow itself, so a repo that
           # never had Pages turned on in Settings does not fail the first deploy.
