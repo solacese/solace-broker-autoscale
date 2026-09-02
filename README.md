@@ -11,7 +11,7 @@ It exists because vertical scaling on Solace Cloud has a ceiling. Once you're on
 practical service class and message sizes or adoption keep growing, there's no supported path
 forward. This is the horizontal one.
 
-🔗 **[solacese.github.io/solace-autoscale](https://solacese.github.io/solace-autoscale/)** — overview, worked examples, and quickstart.
+🔗 **[solacese.github.io/solace-broker-autoscale](https://solacese.github.io/solace-broker-autoscale/)** — overview, worked examples, and quickstart.
 
 > **Community project. Not a supported Solace product. No warranty.** Apache 2.0.
 > The repo ships the capacity-model *schema and harness*, never measured numbers, credentials, or
