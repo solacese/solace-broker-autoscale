@@ -1,6 +1,6 @@
 # solace-broker-autoscale
 
-**How many Solace PubSub+ Cloud brokers does a workload need, and when?**
+**How many Solace Cloud brokers does a workload need, and when?**
 
 `solace-broker-autoscale` works that out from capacity numbers you measure on your own brokers. It
 gives you a recommendation *and* the reason behind it, never just a number. It only advises by

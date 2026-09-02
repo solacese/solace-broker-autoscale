@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>solace-autoscale</title>
-<meta name="description" content="Works out how many Solace PubSub+ Cloud brokers a workload needs, and can scale to match. A community project, not an official product.">
+<meta name="description" content="Works out how many Solace Cloud brokers a workload needs, and can scale to match. A community project, not an official product.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Spline+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -134,6 +134,19 @@
     font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
   }
   .meta-row b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ---- hero flow animation ---- */
+  .flow-fig {
+    margin: 34px 0 0; padding: 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden;
+  }
+  .flow { width: 100%; height: auto; display: block; }
+  .flow-cap {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-soft);
+    padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel-sunk);
+    letter-spacing: 0.01em;
+  }
 
   section { padding: 52px 0; border-bottom: 1px solid var(--line); }
   .section-label {
@@ -292,7 +305,7 @@
 
 <header id="top">
   <div class="wrap">
-    <p class="eyebrow">for solace pubsub+ cloud</p>
+    <p class="eyebrow">for solace cloud brokers</p>
     <h1>How many brokers does this workload need?</h1>
     <p class="standfirst">
       A single Solace broker can only grow so far. Once you're on the biggest one and traffic keeps
@@ -300,6 +313,11 @@
       <b>solace-autoscale</b> answers that using capacity numbers you measure from your own brokers.
       It shows you the recommendation <em>and</em> the reason behind it - never just a number.
     </p>
+    <figure class="flow-fig">
+      <canvas id="flow" class="flow" width="960" height="240"
+              aria-label="Animation: a publisher sends messages through one broker to a subscriber; as the message rate and size rise the broker fills up, then a second and third broker appear to share the load"></canvas>
+      <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
+    </figure>
     <div class="cta-row">
       <a class="btn primary" href="#start">Get started</a>
       <a class="btn" href="https://github.com/solacese/solace-broker-autoscale">View on GitHub</a>
@@ -691,6 +709,189 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
   drawCurve();
   // redraw when the OS theme changes (system mode)
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawCurve);
+
+  // ---- hero flow animation: publisher -> broker(s) -> subscriber, load rising, brokers added ----
+  (function () {
+    const cv = document.getElementById("flow");
+    if (!cv) return;
+    const ctx = cv.getContext("2d");
+    const cap = document.getElementById("flowCap");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Logical drawing size; the backing store is scaled to the element's real pixels for crispness.
+    const W = 960, H = 240;
+    function fit() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const cssW = cv.clientWidth || W;
+      const cssH = Math.round(cssW * H / W);
+      cv.width = Math.round(cssW * dpr);
+      cv.height = Math.round(cssH * dpr);
+      // map logical WxH onto the (scaled) backing store
+      ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+    }
+    fit();
+    window.addEventListener("resize", fit);
+
+    function C() {
+      const s = getComputedStyle(document.documentElement);
+      const g = n => s.getPropertyValue(n).trim();
+      return {
+        panel: g("--panel"), sunk: g("--panel-sunk"), ink: g("--ink"),
+        soft: g("--ink-soft"), faint: g("--ink-faint"), line: g("--line-strong"),
+        accent: g("--accent"), warn: g("--warn"), crit: g("--crit"),
+      };
+    }
+
+    // brokers/load/size/rate are end-of-phase targets; each phase eases from the previous phase.
+    const PHASES = [
+      { cap: "One broker, light load",                 dur: 3.0, brokers: 1, load: 0.30, size: 0.25, rate: 1.0 },
+      { cap: "Message rate and size climbing...",      dur: 3.4, brokers: 1, load: 1.03, size: 0.95, rate: 2.6 },
+      { cap: "Over one broker's limit - add a second", dur: 3.0, brokers: 2, load: 0.62, size: 0.95, rate: 2.6 },
+      { cap: "Load keeps rising...",                   dur: 2.6, brokers: 2, load: 0.99, size: 1.0,  rate: 3.4 },
+      { cap: "Three brokers share the load, safely",   dur: 4.2, brokers: 3, load: 0.66, size: 1.0,  rate: 3.4 },
+    ];
+    const RESET = 0.9;                       // gentle fade back to the start after the last phase
+    const TOTAL = PHASES.reduce((a, p) => a + p.dur, 0) + RESET;
+
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const ease = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+
+    const pubX = 88, subX = W - 88, midY = 108;
+    function brokerXs(n) {
+      const x0 = 320, x1 = W - 320;
+      if (n <= 1) return [(x0 + x1) / 2];
+      const out = [];
+      for (let i = 0; i < n; i++) out.push(lerp(x0, x1, i / (n - 1)));
+      return out;
+    }
+
+    function node(x, y, r, fill, stroke, label, c) {
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = fill; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = stroke; ctx.stroke();
+      if (label) {
+        ctx.fillStyle = c.soft; ctx.font = "12px 'IBM Plex Mono', monospace";
+        ctx.textAlign = "center"; ctx.fillText(label, x, y + r + 18);
+      }
+    }
+
+    function rr(x, y, w, h, r) {
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+      else ctx.rect(x, y, w, h);
+    }
+
+    function brokerBox(x, y, load, c) {
+      const w = 84, h = 56;
+      rr(x - w / 2, y - h / 2, w, h, 10);
+      ctx.fillStyle = c.panel; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = c.line; ctx.stroke();
+      const over = load > 1;
+      const bx = x - w / 2 + 10, by = y + h / 2 - 16, bw = w - 20, bh = 8;
+      rr(bx, by, bw, bh, 4); ctx.fillStyle = c.sunk; ctx.fill();
+      rr(bx, by, Math.min(1, load) * bw, bh, 4);
+      ctx.fillStyle = over ? c.crit : (load > 0.82 ? c.warn : c.accent); ctx.fill();
+      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace";
+      ctx.textAlign = "center"; ctx.fillText("broker", x, y - 6);
+    }
+
+    let dots = [];
+    let lastSpawn = 0, lastElapsed = 0;
+
+    // state at a given time, easing from the previous phase; the RESET tail eases phase 5 -> phase 1
+    function stateAt(t) {
+      let acc = 0;
+      for (let i = 0; i < PHASES.length; i++) {
+        if (t < acc + PHASES[i].dur) {
+          const local = (t - acc) / PHASES[i].dur, e = ease(local);
+          const prev = i === 0 ? PHASES[0] : PHASES[i - 1];
+          return {
+            cap: PHASES[i].cap, brokers: PHASES[i].brokers, prevBrokers: prev.brokers,
+            grow: local, load: lerp(prev.load, PHASES[i].load, e),
+            size: lerp(prev.size, PHASES[i].size, e), rate: lerp(prev.rate, PHASES[i].rate, e),
+          };
+        }
+        acc += PHASES[i].dur;
+      }
+      // RESET tail: hold 3 brokers, ease everything back down toward the opening state
+      const e = ease((t - acc) / RESET), last = PHASES[PHASES.length - 1], first = PHASES[0];
+      return {
+        cap: last.cap, brokers: 3, prevBrokers: 3, grow: 1,
+        load: lerp(last.load, first.load, e), size: lerp(last.size, first.size, e),
+        rate: lerp(last.rate, first.rate, e),
+      };
+    }
+
+    function draw(elapsed) {
+      const c = C();
+      const t = ((elapsed % TOTAL) + TOTAL) % TOTAL;
+      if (t < lastElapsed) dots = [];        // new loop: clear in-flight dots for a clean restart
+      lastElapsed = t;
+      ctx.clearRect(0, 0, W, H);
+
+      const st = stateAt(t);
+      const xs = brokerXs(st.brokers);
+      const appear = st.brokers > st.prevBrokers ? ease(Math.min(1, st.grow * 1.7)) : 1;
+      const alphaFor = i => (i >= st.prevBrokers && st.brokers > st.prevBrokers) ? appear : 1;
+
+      // connecting lines
+      ctx.lineWidth = 1.5; ctx.strokeStyle = c.line;
+      xs.forEach((bx, i) => {
+        ctx.globalAlpha = 0.5 * alphaFor(i);
+        ctx.beginPath(); ctx.moveTo(pubX + 18, midY); ctx.lineTo(bx - 46, midY); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(bx + 46, midY); ctx.lineTo(subX - 18, midY); ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+
+      // spawn + advance dots (frame-rate independent via dt)
+      if (!reduce) {
+        const dt = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
+        draw._last = elapsed;
+        const interval = 0.4 / st.rate;
+        if (elapsed - lastSpawn > interval) {
+          lastSpawn = elapsed;
+          dots.push({ t: 0, leg: 0, broker: Math.floor(Math.random() * st.brokers), r: lerp(2.5, 7, st.size) });
+        }
+        dots.forEach(d => { d.t += 0.95 * dt; });
+        dots = dots.filter(d => !(d.leg === 1 && d.t >= 1));
+      }
+      dots.forEach(d => {
+        if (d.broker >= st.brokers) d.broker = st.brokers - 1;
+        const bx = xs[d.broker]; let x, y;
+        if (d.leg === 0 && d.t < 1) { const tt = ease(d.t); x = lerp(pubX + 18, bx, tt); y = midY; }
+        else { if (d.leg === 0) { d.leg = 1; d.t = 0; } const tt = ease(Math.min(1, d.t)); x = lerp(bx, subX - 18, tt); y = midY; }
+        ctx.beginPath(); ctx.arc(x, y, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = c.accent; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
+      });
+
+      // nodes
+      node(pubX, midY, 19, c.accent, c.accent, "publisher", c);
+      node(subX, midY, 19, c.panel, c.line, "subscriber", c);
+      xs.forEach((bx, i) => { ctx.globalAlpha = alphaFor(i); brokerBox(bx, midY, st.load, c); ctx.globalAlpha = 1; });
+
+      // HUD
+      ctx.textAlign = "left"; ctx.font = "12px 'IBM Plex Mono', monospace"; ctx.fillStyle = c.faint;
+      const msgs = Math.round(lerp(8, 95, (st.rate - 1) / 2.4));
+      const kb = Math.round(lerp(1, 200, st.size));
+      ctx.fillText("rate ~" + msgs + "k msg/s", 22, H - 24);
+      ctx.fillText("size ~" + kb + " KB", 22, H - 9);
+
+      if (cap && cap.textContent !== st.cap) cap.textContent = st.cap;
+    }
+
+    if (reduce) {
+      // static representative frame: three brokers sharing the load
+      let acc = 0; for (let i = 0; i < PHASES.length - 1; i++) acc += PHASES[i].dur;
+      draw(acc + PHASES[PHASES.length - 1].dur * 0.6);
+    } else {
+      let start = null;
+      requestAnimationFrame(function frame(ts) {
+        if (start === null) start = ts;
+        draw((ts - start) / 1000);
+        requestAnimationFrame(frame);
+      });
+    }
+  })();
 </script>
 </body>
 </html>

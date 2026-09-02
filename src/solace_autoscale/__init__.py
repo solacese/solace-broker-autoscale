@@ -1,4 +1,4 @@
-"""solace-autoscale: recommend and (optionally) scale a fleet of Solace PubSub+ Cloud brokers.
+"""solace-autoscale: recommend and (optionally) scale a fleet of Solace Cloud brokers.
 
 Community project. Not a supported Solace product. No warranty.
 """

@@ -64,7 +64,7 @@ migrates deliberately. Do **not** build a Tier 2 wrapper for AMQP or MQTT.
 
 | Protocol | Client | Tier | Integration test |
 |---|---|---|---|
-| SMF | Solace PubSub+ Messaging API | 2 | `test_smf_guaranteed_publish` - persistent publish lands on a durable queue |
+| SMF | Solace Messaging API | 2 | `test_smf_guaranteed_publish` - persistent publish lands on a durable queue |
 | AMQP 1.0 | Qpid Proton / Qpid JMS / rhea | 1 | `test_amqp_send` |
 | MQTT 3.1.1 | Paho | 1 | `test_mqtt_pubsub` - pub/sub round trip |
 | MQTT 5 | Paho | 1 | See note below |

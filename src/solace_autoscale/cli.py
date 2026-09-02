@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 @click.group()
 @click.version_option(__version__, prog_name="solace-autoscale")
 def main() -> None:
-    """solace-autoscale - recommend and (optionally) scale a Solace PubSub+ Cloud broker fleet."""
+    """solace-autoscale - recommend and (optionally) scale a Solace Cloud broker fleet."""
 
 
 @main.command()

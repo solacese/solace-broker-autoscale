@@ -4,7 +4,7 @@ Every protocol (SMF, AMQP 1.0, MQTT, REST) has a passing integration test agains
 resolve via the assignment service → adapt the endpoint → connect and move a message.
 
 These are marked ``integration`` and are DESELECTED by default (``-m "not integration"``). They run
-against a local Solace PubSub+ broker. Configure via env:
+against a local Solace broker. Configure via env:
 
     SOLACE_HOST        default 127.0.0.1
     SOLACE_SMF_PORT    default 55556   (plaintext SMF)

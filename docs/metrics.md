@@ -2,7 +2,7 @@
 
 The decision engine consumes a **normalised** `MetricSample` (§5.1). Collectors map a broker metrics
 source onto it. Field names below are **not guessed** - they were captured from a live Solace
-PubSub+ broker (`solace/solace-pubsub-standard`, SEMP version `broker/10.26.x`) and are saved as
+broker (`solace/solace-pubsub-standard`, SEMP version `broker/10.26.x`) and are saved as
 fixtures under `tests/fixtures/semp/`.
 
 ## Normalised `MetricSample`

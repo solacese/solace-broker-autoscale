@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "solace-autoscale"
 version = "0.1.0"
-description = "Recommends and (optionally) scales a fleet of Solace PubSub+ Cloud brokers to match a workload. Community project, not a supported product."
+description = "Recommends and (optionally) scales a fleet of Solace Cloud brokers to match a workload. Community project, not a supported product."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
