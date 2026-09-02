@@ -314,8 +314,8 @@
       It shows you the recommendation <em>and</em> the reason behind it - never just a number.
     </p>
     <figure class="flow-fig">
-      <canvas id="flow" class="flow" width="960" height="240"
-              aria-label="Animation: a publisher sends messages through one broker to a subscriber; as the message rate and size rise the broker fills up, then a second and third broker appear to share the load"></canvas>
+      <canvas id="flow" class="flow" width="960" height="300"
+              aria-label="Animation: a publisher sends each message through a single broker to a subscriber; as the message rate and size rise the broker fills past its limit, then a second and third broker appear alongside it and each message takes one of them, sharing the load"></canvas>
       <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
     </figure>
     <div class="cta-row">
@@ -719,7 +719,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // Logical drawing size; the backing store is scaled to the element's real pixels for crispness.
-    const W = 960, H = 240;
+    const W = 960, H = 300;
     function fit() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const cssW = cv.clientWidth || W;
@@ -756,12 +756,14 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     const lerp = (a, b, t) => a + (b - a) * t;
     const ease = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
-    const pubX = 88, subX = W - 88, midY = 108;
-    function brokerXs(n) {
-      const x0 = 320, x1 = W - 320;
-      if (n <= 1) return [(x0 + x1) / 2];
+    const pubX = 88, subX = W - 88, midY = 120;
+    const brokerColX = W / 2;               // all brokers share one column: they are PARALLEL, not a chain
+    const LANE_GAP = 66;                    // vertical spacing between stacked brokers
+    // Each broker sits on its own vertical lane, centred on midY. A message goes pub -> ONE lane's
+    // broker -> sub, so it never appears to pass through more than one broker.
+    function brokerYs(n) {
       const out = [];
-      for (let i = 0; i < n; i++) out.push(lerp(x0, x1, i / (n - 1)));
+      for (let i = 0; i < n; i++) out.push(midY + (i - (n - 1) / 2) * LANE_GAP);
       return out;
     }
 
@@ -830,44 +832,74 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       ctx.clearRect(0, 0, W, H);
 
       const st = stateAt(t);
-      const xs = brokerXs(st.brokers);
+      const ys = brokerYs(st.brokers);
+      const bw = 84;                          // broker box width (matches brokerBox)
+      const inX = brokerColX - bw / 2, outX = brokerColX + bw / 2;   // left/right edges of the broker column
       const appear = st.brokers > st.prevBrokers ? ease(Math.min(1, st.grow * 1.7)) : 1;
       const alphaFor = i => (i >= st.prevBrokers && st.brokers > st.prevBrokers) ? appear : 1;
 
-      // connecting lines
+      // A message's path: publisher -> its broker's lane -> subscriber. Curved so the fan-out to a
+      // single broker is obvious. Returns {x,y} for progress p in 0..1 across the whole journey.
+      function pathPoint(by, p) {
+        const pubPt = { x: pubX + 18, y: midY };
+        const subPt = { x: subX - 18, y: midY };
+        const inPt = { x: inX, y: by }, outPt = { x: outX, y: by };
+        if (p < 0.44) {                       // publisher -> broker (curve into the lane)
+          const tt = ease(p / 0.44);
+          const cx = (pubPt.x + inPt.x) / 2;
+          return {
+            x: (1 - tt) ** 2 * pubPt.x + 2 * (1 - tt) * tt * cx + tt * tt * inPt.x,
+            y: (1 - tt) ** 2 * pubPt.y + 2 * (1 - tt) * tt * pubPt.y + tt * tt * inPt.y,
+          };
+        } else if (p < 0.56) {                // straight through the broker box
+          const tt = (p - 0.44) / 0.12;
+          return { x: lerp(inX, outX, tt), y: by };
+        } else {                              // broker -> subscriber (curve back to centre)
+          const tt = ease((p - 0.56) / 0.44);
+          const cx = (outPt.x + subPt.x) / 2;
+          return {
+            x: (1 - tt) ** 2 * outPt.x + 2 * (1 - tt) * tt * cx + tt * tt * subPt.x,
+            y: (1 - tt) ** 2 * outPt.y + 2 * (1 - tt) * tt * subPt.y + tt * tt * subPt.y,
+          };
+        }
+      }
+
+      // connecting lines: one curved path per broker lane, drawn by sampling pathPoint
       ctx.lineWidth = 1.5; ctx.strokeStyle = c.line;
-      xs.forEach((bx, i) => {
-        ctx.globalAlpha = 0.5 * alphaFor(i);
-        ctx.beginPath(); ctx.moveTo(pubX + 18, midY); ctx.lineTo(bx - 46, midY); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(bx + 46, midY); ctx.lineTo(subX - 18, midY); ctx.stroke();
+      ys.forEach((by, i) => {
+        ctx.globalAlpha = 0.45 * alphaFor(i);
+        ctx.beginPath();
+        for (let k = 0; k <= 40; k++) {
+          const pt = pathPoint(by, k / 40);
+          k === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.stroke();
       });
       ctx.globalAlpha = 1;
 
-      // spawn + advance dots (frame-rate independent via dt)
+      // spawn + advance dots (frame-rate independent via dt). Each dot is bound to ONE broker lane.
       if (!reduce) {
         const dt = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
         draw._last = elapsed;
         const interval = 0.4 / st.rate;
         if (elapsed - lastSpawn > interval) {
           lastSpawn = elapsed;
-          dots.push({ t: 0, leg: 0, broker: Math.floor(Math.random() * st.brokers), r: lerp(2.5, 7, st.size) });
+          dots.push({ t: 0, broker: Math.floor(Math.random() * st.brokers), r: lerp(2.5, 7, st.size) });
         }
-        dots.forEach(d => { d.t += 0.95 * dt; });
-        dots = dots.filter(d => !(d.leg === 1 && d.t >= 1));
+        dots.forEach(d => { d.t += 0.5 * dt; });   // t is 0..1 across the whole journey
+        dots = dots.filter(d => d.t < 1);
       }
       dots.forEach(d => {
         if (d.broker >= st.brokers) d.broker = st.brokers - 1;
-        const bx = xs[d.broker]; let x, y;
-        if (d.leg === 0 && d.t < 1) { const tt = ease(d.t); x = lerp(pubX + 18, bx, tt); y = midY; }
-        else { if (d.leg === 0) { d.leg = 1; d.t = 0; } const tt = ease(Math.min(1, d.t)); x = lerp(bx, subX - 18, tt); y = midY; }
-        ctx.beginPath(); ctx.arc(x, y, d.r, 0, Math.PI * 2);
-        ctx.fillStyle = c.accent; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
+        const pt = pathPoint(ys[d.broker], Math.min(1, d.t));
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = c.accent; ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
       });
 
       // nodes
       node(pubX, midY, 19, c.accent, c.accent, "publisher", c);
       node(subX, midY, 19, c.panel, c.line, "subscriber", c);
-      xs.forEach((bx, i) => { ctx.globalAlpha = alphaFor(i); brokerBox(bx, midY, st.load, c); ctx.globalAlpha = 1; });
+      ys.forEach((by, i) => { ctx.globalAlpha = alphaFor(i); brokerBox(brokerColX, by, st.load, c); ctx.globalAlpha = 1; });
 
       // HUD
       ctx.textAlign = "left"; ctx.font = "12px 'IBM Plex Mono', monospace"; ctx.fillStyle = c.faint;
