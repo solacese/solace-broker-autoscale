@@ -24,11 +24,13 @@ The project has two independent pieces. You can use either on its own.
 - **The controller** is the tool you run. It reads your capacity model and live metrics, decides how
   many brokers the workload needs, and can optionally scale the fleet. This is the `solace-autoscale`
   command described below.
-- **The shim** is a small client library you add to your applications. When brokers are added or
-  removed, it keeps each client pointed at the correct broker, without a proxy in the data path and
-  without changing your client code. It is optional and lives in [`adapters/`](adapters/README.md).
+- **The shim** is a thin wrapper around the messaging API your applications already use (AMQP, MQTT,
+  REST, or SMF). It sits in front of your existing client, and when brokers are added or removed it
+  points the client at the correct broker. It adds no proxy to the data path and needs no change to
+  how you publish or consume. It is optional and lives in [`adapters/`](adapters/README.md).
 
-The controller changes the number of brokers. The shim makes sure clients follow that change.
+The controller changes the number of brokers. The shim makes each publisher and subscriber follow
+that change, using the AMQP (or MQTT, REST, or SMF) client they already have.
 
 ---
 
@@ -117,22 +119,26 @@ See [`docs/safety.md`](docs/safety.md).
 
 ## The shim
 
-The shim is a client library that keeps your applications connected to the right broker as the fleet
-changes. It asks the assignment service which broker to use, then hands your own client library a
-normal connection URL. It never carries messages and never handles credentials, so your data path
-and authentication are unchanged. If the assignment service is unreachable, it returns the last known
-answer rather than failing.
+The shim wraps the messaging API your publishers and subscribers already use. You keep your existing
+AMQP, MQTT, REST, or SMF client; the shim just tells it which broker to connect to as the fleet
+changes. It asks the assignment service which broker to use, then hands your client a normal
+connection URL for that protocol. It never carries messages and never handles credentials, so your
+data path and authentication are unchanged. If the assignment service is unreachable, it returns the
+last known answer rather than failing.
+
+For example, a publisher using AMQP keeps its AMQP client and only adds the lookup:
 
 ```python
 from solace_autoscale_client import Resolver, amqp_uri
 
 r = Resolver(base_url="https://assign.example.com")
-a = r.resolve(shard="shard-a", client_id="orders-consumer", mode="guaranteed", protocol="amqp")
-uri = amqp_uri(a)   # pass this URL to your normal AMQP client and connect as usual
+a = r.resolve(shard="shard-a", client_id="orders-publisher", mode="guaranteed", protocol="amqp")
+uri = amqp_uri(a)   # pass this URL to your normal AMQP client and connect and publish as usual
 ```
 
-Python and Java versions are provided. See [`adapters/`](adapters/README.md) and
-[`docs/client-integration.md`](docs/client-integration.md) for the full integration options.
+The same pattern works for MQTT, REST, and SMF. Python and Java versions are provided. See
+[`adapters/`](adapters/README.md) and [`docs/client-integration.md`](docs/client-integration.md) for
+the full integration options.
 
 ---
 

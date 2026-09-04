@@ -314,8 +314,8 @@
       It shows you the recommendation <em>and</em> the reason behind it - never just a number.
     </p>
     <figure class="flow-fig">
-      <canvas id="flow" class="flow" width="960" height="380"
-              aria-label="Animation of horizontal scaling: a publisher at the top sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom. As the message rate and size rise past one broker's limit, an autoscaler on the left signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
+      <canvas id="flow" class="flow" width="960" height="400"
+              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses the same shim. As the message rate and size rise past one broker's limit, an autoscaler on the left signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
       <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
     </figure>
     <div class="cta-row">
@@ -720,7 +720,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // Logical drawing size; the backing store is scaled to the element's real pixels for crispness.
-    const W = 960, H = 380;
+    const W = 960, H = 400;
     function fit() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const cssW = cv.clientWidth || W;
@@ -763,7 +763,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     const ease = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
     // vertical layout: publisher row, broker row (in the cloud box), subscriber row
-    const pubY = 52, brokerY = 190, subY = 330;
+    const pubY = 66, brokerY = 196, subY = 322;
     const cx = W / 2;
     const BW = 96, BH = 66, BGAP = 30;       // broker box size + horizontal gap between brokers
     const ascX = 96;                          // autoscaler column (left of the cloud box)
@@ -781,13 +781,21 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       else ctx.rect(x, y, w, h);
     }
 
-    function node(x, y, r, fill, stroke, label, c, below) {
+    function node(x, y, r, fill, stroke, label, c, below, sub) {
       ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fillStyle = fill; ctx.fill();
       ctx.lineWidth = 2; ctx.strokeStyle = stroke; ctx.stroke();
+      ctx.textAlign = "center";
       if (label) {
-        ctx.fillStyle = c.soft; ctx.font = "13px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
-        ctx.fillText(label, x, y + (below ? r + 20 : -(r + 12)));
+        const ly = y + (below ? r + 20 : -(r + (sub ? 26 : 12)));
+        ctx.fillStyle = c.soft; ctx.font = "13px 'IBM Plex Mono', monospace";
+        ctx.fillText(label, x, ly);
+      }
+      if (sub) {
+        // secondary line: the app keeps its own messaging API; the shim only steers it
+        const sy = y + (below ? r + 36 : -(r + 12));
+        ctx.fillStyle = c.faint; ctx.font = "11px 'IBM Plex Mono', monospace";
+        ctx.fillText(sub, x, sy);
       }
     }
 
@@ -930,8 +938,8 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       });
 
       // ---- nodes ----
-      node(cx, pubY, 20, c.accent, c.accent, "publisher", c, false);
-      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true);
+      node(cx, pubY, 20, c.accent, c.accent, "publisher", c, false, "AMQP client + shim");
+      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true, "AMQP client + shim");
       xs.forEach((bx, i) => brokerBox(bx, brokerY, st.load, alphaFor(i), c));
 
       // ---- HUD ----
