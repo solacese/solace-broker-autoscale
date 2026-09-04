@@ -1,6 +1,6 @@
 # solace-broker-autoscale
 
-**How many Solace Cloud brokers does a workload need, and when?**
+**Autoscale your Solace Cloud brokers as throughput grows.**
 
 `solace-broker-autoscale` answers that from capacity numbers you measure on your own brokers. It
 gives you a recommendation and the reasoning behind it, not just a number. By default it only
