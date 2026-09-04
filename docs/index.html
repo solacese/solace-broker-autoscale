@@ -315,7 +315,7 @@
     </p>
     <figure class="flow-fig">
       <canvas id="flow" class="flow" width="960" height="400"
-              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses the same shim. As the message rate and size rise past one broker's limit, an autoscaler on the left signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
+              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses a normal AMQP client. An autoscaler on the left continuously reads message rate and size from the brokers over SEMP; when they rise past one broker's limit it signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
       <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
     </figure>
     <div class="cta-row">
@@ -814,8 +814,8 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       ctx.globalAlpha = 1;
     }
 
-    let dots = [], signals = [];
-    let lastSpawn = 0, lastElapsed = 0, firedFor = -1, rr_i = 0;   // rr_i: round-robin broker index
+    let dots = [], signals = [], semp = [];   // semp: metric pulses travelling brokers -> autoscaler
+    let lastSpawn = 0, lastElapsed = 0, firedFor = -1, rr_i = 0, lastSemp = 0;  // rr_i: round-robin broker index
 
     function stateAt(t) {
       let acc = 0;
@@ -861,7 +861,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
     function draw(elapsed) {
       const c = C();
       const t = ((elapsed % TOTAL) + TOTAL) % TOTAL;
-      if (t < lastElapsed) { dots = []; signals = []; firedFor = -1; rr_i = 0; }  // clean loop restart
+      if (t < lastElapsed) { dots = []; signals = []; semp = []; firedFor = -1; rr_i = 0; }  // clean loop restart
       lastElapsed = t;
       ctx.clearRect(0, 0, W, H);
 
@@ -881,24 +881,54 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       ctx.fillStyle = c.faint; ctx.font = "11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left";
       ctx.fillText("SOLACE CLOUD", boxL + 12, boxT + 16);
 
-      // ---- autoscaler (left) + signal it fires just before each scale-out ----
-      // fire a signal when we enter a phase that adds a broker
+      // ---- autoscaler (left): reads rate + size from the brokers via SEMP, and signals scale-out ----
+      const ascY = brokerY;
+      const dt2 = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
+
+      // fire a scale-out command when we enter a phase that adds a broker
       if (!reduce && (st.idx === 2 || st.idx === 4) && firedFor !== st.idx && st.grow < 0.15) {
         firedFor = st.idx;
         signals.push({ t: 0, targetX: boxL });
       }
-      signals.forEach(s => { if (!reduce) s.t += 0.9 * Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed))); });
+      signals.forEach(s => { if (!reduce) s.t += 0.9 * dt2; });
       signals = signals.filter(s => s.t < 1.2);
 
-      const ascY = brokerY;
-      const ascActive = signals.some(s => s.t < 0.9);
+      // steady SEMP scrape: metric pulses travel FROM the brokers TO the autoscaler, always on
+      if (!reduce && elapsed - lastSemp > 0.9) { lastSemp = elapsed; semp.push({ t: 0 }); }
+      semp.forEach(s => { if (!reduce) s.t += 0.6 * dt2; });
+      semp = semp.filter(s => s.t < 1);
+
+      // monitoring link (brokers -> autoscaler), dashed, drawn under the pulses
+      const linkY = ascY + 40;
+      ctx.strokeStyle = c.line; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6; ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(boxL, brokerY + 8); ctx.lineTo(boxL, linkY); ctx.lineTo(ascX, linkY); ctx.lineTo(ascX, ascY + 30);
+      ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.fillStyle = c.faint; ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
+      ctx.fillText("SEMP: rate + size", (ascX + boxL) / 2, linkY + 14);
+
+      // autoscaler box (accent border when a scrape or a command is in flight)
+      const ascActive = signals.some(s => s.t < 0.9) || semp.length > 0;
       rr(ascX - 42, ascY - 30, 84, 60, 10);
       ctx.fillStyle = c.panel; ctx.fill();
       ctx.lineWidth = 2; ctx.strokeStyle = ascActive ? c.accent : c.line; ctx.stroke();
       ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
       ctx.fillText("auto", ascX, ascY - 4);
       ctx.fillText("scaler", ascX, ascY + 12);
-      // signal pulses travelling from the autoscaler to the cloud box
+
+      // SEMP metric pulses: brokers -> (down, across, up) -> autoscaler, following the dashed link
+      semp.forEach(s => {
+        const p = clamp(s.t, 0, 1);
+        // three legs along the L-shaped link, equal thirds
+        let x, y;
+        if (p < 0.34) { const tt = p / 0.34; x = boxL; y = lerp(brokerY + 8, linkY, tt); }
+        else if (p < 0.66) { const tt = (p - 0.34) / 0.32; x = lerp(boxL, ascX, tt); y = linkY; }
+        else { const tt = (p - 0.66) / 0.34; x = ascX; y = lerp(linkY, ascY + 30, tt); }
+        ctx.globalAlpha = 0.75; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = c.soft; ctx.fill(); ctx.globalAlpha = 1;
+      });
+
+      // command pulses travelling from the autoscaler to the cloud box (scale-out)
       signals.forEach(s => {
         const p = clamp(s.t, 0, 1), x = lerp(ascX + 44, s.targetX - 2, ease(p));
         ctx.globalAlpha = (1 - p) * 0.9;
@@ -939,7 +969,7 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
 
       // ---- nodes ----
       node(cx, pubY, 20, c.accent, c.accent, "publisher", c, false, "AMQP client + shim");
-      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true, "AMQP client + shim");
+      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true, "AMQP client");
       xs.forEach((bx, i) => brokerBox(bx, brokerY, st.load, alphaFor(i), c));
 
       // ---- HUD ----
