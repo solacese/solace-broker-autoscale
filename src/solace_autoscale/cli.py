@@ -295,5 +295,82 @@ def monitor(config_path: str, broker_url: str | None, user: str, password: str, 
             recorder.close()
 
 
+@main.command(name="dispatch-test")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--topic", required=True, help="message topic to route")
+@click.option("--payload", default="", help="message payload (JSON or raw)")
+@click.option("--payload-file", type=click.Path(exists=True), default=None,
+              help="read payload from a file instead of --payload")
+def dispatch_test(config_path: str, topic: str, payload: str, payload_file: str | None) -> None:
+    """Show how the smart SHIM routes one message: which rule fires, broker, key, address.
+
+    Pure and offline — no broker needed. Use it to author and verify dispatch rules before wiring
+    them into the publisher/listener SHIM.
+    """
+    from .config import load_config
+    from .dispatch import DispatchPlan, rules_from_config
+
+    cfg = load_config(config_path)
+    if not cfg.dispatch.enabled:
+        click.echo("dispatch is disabled (set dispatch.enabled: true)", err=True)
+    body = Path(payload_file).read_bytes() if payload_file else payload.encode()
+    plan = DispatchPlan(
+        rules=rules_from_config([r.model_dump() for r in cfg.dispatch.rules]),
+        default_broker=cfg.dispatch.default_broker,
+    )
+    d = plan.decide(topic, body)
+    click.echo(f"topic    : {topic}")
+    click.echo(f"rule     : {d.rule}  ({'matched' if d.matched else 'default fallback'})")
+    click.echo(f"broker   : {d.broker}")
+    click.echo(f"address  : {d.address}")
+    click.echo(f"key      : {d.key if d.key is not None else '(none)'}")
+    click.echo(f"targets  : {', '.join(plan.targets)}  <- listener SHIM subscribes to all of these")
+
+
+@main.command()
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--source", "source_url", required=True, help="SEMP base URL of the source-of-truth broker")
+@click.option("--target", "target_urls", multiple=True, required=True,
+              help="SEMP base URL of a target broker (repeatable)")
+@click.option("--user", default="admin")
+@click.option("--password", default="admin")
+@click.option("--vpn", default="default")
+@click.option("--apply", "do_apply", is_flag=True, help="actually apply (default: dry-run plan only)")
+def configsync(config_path: str, source_url: str, target_urls: tuple[str, ...], user: str,
+               password: str, vpn: str, do_apply: bool) -> None:
+    """Replicate broker config from a source-of-truth broker to the fleet (dry-run by default).
+
+    Re-runnable: an edit made on the source shows up as ops here until the targets converge. Honours
+    ``configsync.mode`` (additive|mirror) and the object kinds in ``configsync.objects``.
+    """
+    from .config import load_config
+    from .configsync.semp_config import SempConfigClient, reconcile
+
+    cfg = load_config(config_path)
+    kinds = cfg.configsync.objects
+    src = SempConfigClient("source", source_url, user, password, verify=False)
+    tgts = [SempConfigClient(f"target-{i}", u, user, password, verify=False)
+            for i, u in enumerate(target_urls)]
+    try:
+        plan = reconcile(src, tgts, vpn, kinds=kinds, mode=cfg.configsync.mode, dry_run=not do_apply)
+    finally:
+        src.close()
+        for t in tgts:
+            t.close()
+
+    verb = "APPLIED" if plan.applied else "PLAN (dry-run)"
+    click.echo(f"# config replication {verb} — source={plan.source_broker} mode={cfg.configsync.mode}")
+    for target, counts in plan.summary().items():
+        ops = plan.ops_by_target[target]
+        click.echo(f"\n## {target}: {counts['create']} create, {counts['update']} update, "
+                   f"{counts['delete']} delete")
+        for op in ops:
+            click.echo(f"  {op.describe()}")
+    if plan.total_ops() == 0:
+        click.echo("\nfleet already converged — nothing to do")
+    elif not plan.applied:
+        click.echo("\nre-run with --apply to replicate (dry-run made no changes)")
+
+
 if __name__ == "__main__":
     main()

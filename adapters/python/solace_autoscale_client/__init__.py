@@ -16,6 +16,24 @@ closed) - the service being down must not take an application down.
 from .adapters import amqp_uri, mqtt_config, rest_target, smf_host
 from .resolver import Assignment, Resolver, ResolverError
 
+# The smart SHIM (both sides). Imports the pure rule engine from the main package; only pulled in
+# when solace_autoscale is importable (it always is when the adapters are used in-repo).
+try:
+    from .dispatch import (  # noqa: F401
+        DemuxedMessage,
+        DispatchError,
+        ListenerShim,
+        OutboundMessage,
+        PublisherShim,
+        ReceivedMessage,
+    )
+    _SHIM_EXPORTS = [
+        "PublisherShim", "ListenerShim", "OutboundMessage", "ReceivedMessage",
+        "DemuxedMessage", "DispatchError",
+    ]
+except ImportError:  # pragma: no cover - only when the main package isn't on the path
+    _SHIM_EXPORTS = []
+
 __all__ = [
     "Resolver",
     "Assignment",
@@ -24,4 +42,5 @@ __all__ = [
     "mqtt_config",
     "rest_target",
     "smf_host",
+    *_SHIM_EXPORTS,
 ]

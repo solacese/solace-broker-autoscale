@@ -103,6 +103,62 @@ class IntegrationConfig(_Base):
     dns: DnsConfig = Field(default_factory=DnsConfig)
 
 
+# ---- smart SHIM: rule-based dispatch (topic + payload -> broker + partition key) -------------
+
+class PayloadPredicateSpec(_Base):
+    path: str = ""  # dotted JSON path; ignored for raw_* operators
+    op: str
+    value: Any = None
+
+
+class MatchSpec(_Base):
+    topic: str = ">"
+    payload: list[PayloadPredicateSpec] = Field(default_factory=list)
+
+
+class RouteSpec(_Base):
+    broker: str
+    key: str | None = None    # partition/group-key template, e.g. "vip.{order.region}"
+    topic: str | None = None  # optional publish-address rewrite template, e.g. "vip/{topic}"
+
+
+class DispatchRuleSpec(_Base):
+    name: str
+    when: MatchSpec = Field(default_factory=MatchSpec)
+    route: RouteSpec
+
+
+class DispatchConfig(_Base):
+    """Rule-based dispatch for the smart SHIM. First matching rule wins; else ``default_broker``.
+
+    Deliberately not round-robin: the same message always routes the same way, so per-key ordering
+    holds and the listener SHIM can demultiplex a coherent stream.
+    """
+
+    enabled: bool = False
+    default_broker: str | None = None
+    rules: list[DispatchRuleSpec] = Field(default_factory=list)
+
+
+# ---- broker config replication ---------------------------------------------------------------
+
+class ConfigSyncConfig(_Base):
+    """Replicate the config slice (queues, subscriptions, endpoints, profiles) across the fleet.
+
+    Pick a ``source_of_truth`` broker; every other broker is reconciled to match it. Re-runnable, so
+    an edit made on the source propagates. ``mode: additive`` (default) never deletes target-local
+    objects; ``mirror`` makes targets identical to the source.
+    """
+
+    enabled: bool = False
+    source_of_truth: str | None = None  # broker_id; None → chosen deterministically at runtime
+    mode: Literal["additive", "mirror"] = "additive"
+    objects: list[str] = Field(
+        default_factory=lambda: ["queue", "queueSubscription", "topicEndpoint",
+                                 "clientProfile", "aclProfile"]
+    )
+
+
 class MetricsConfig(_Base):
     source: Literal["prometheus", "cloud-api", "semp", "static"] = "prometheus"
     scrape_interval: float = Field(default=30.0)
@@ -179,6 +235,8 @@ class Config(_Base):
     workload: WorkloadConfig = Field(default_factory=WorkloadConfig)
     protocols: ProtocolsConfig = Field(default_factory=ProtocolsConfig)
     integration: IntegrationConfig = Field(default_factory=IntegrationConfig)
+    dispatch: DispatchConfig = Field(default_factory=DispatchConfig)
+    configsync: ConfigSyncConfig = Field(default_factory=ConfigSyncConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     billing: BillingConfig = Field(default_factory=BillingConfig)

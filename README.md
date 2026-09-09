@@ -86,6 +86,57 @@ solace-autoscale compile --workbook performance.xlsx \
 | `accuracy` | Compares what was predicted against what actually happened, per limit. |
 | `shard-advise` | Suggests how to split traffic into groups, from an Event Portal export. |
 | `serve` | Runs the assignment service that tells clients which broker to use. |
+| `dispatch-test` | Shows how the smart shim would route one message: which rule fires, the target broker, the partition key, and the address. Runs offline. |
+| `configsync` | Replicates broker configuration (queues, subscriptions, endpoints, profiles) from a source-of-truth broker to the rest of the fleet. Dry-run by default. |
+
+## Smart shim: route by topic and payload
+
+Once a workload spans several brokers, where each message goes stops being arbitrary. The shim wraps
+the app's existing AMQP client, so there is no proxy in the data path. It makes a per-message
+decision from rules that combine the topic and the payload, picks the target broker, and stamps a
+partition key on the wire (AMQP `group-id` plus a `saas_partition_key` property). It is not
+round-robin: the same message always routes the same way, so per-key ordering holds, and the
+listener side re-runs the same rules to demultiplex a coherent per-key stream. See it live on the
+[project site](https://solacese.github.io/solace-broker-autoscale/#shim).
+
+```yaml
+dispatch:
+  enabled: true
+  default_broker: broker-bulk        # when no rule matches
+  rules:
+    - name: vip-orders               # topic AND payload, first match wins
+      when:
+        topic: "orders/>"
+        payload:
+          - { path: priority, op: in, value: [high, urgent] }
+      route:
+        broker: broker-vip
+        key:   "vip.{region}"        # partition key = ordering group, templated from the payload
+        topic: "vip/{topic}"         # optional address rewrite
+    - name: large-orders
+      when: { topic: "orders/>", payload: [ { path: amount, op: gt, value: 1000 } ] }
+      route: { broker: broker-big, key: "big.{region}" }
+```
+
+Predicate operators: `eq ne in nin gt gte lt lte exists missing prefix contains regex`, plus
+`raw_size_gt raw_size_lt raw_prefix` for non-JSON payloads. The rule engine is pure and unit-tested;
+the publisher and listener shims live in [`adapters/python`](adapters/python) and keep your own AMQP
+client.
+
+## Config replication: one broker's edits, reflected across the fleet
+
+`configsync` keeps the replicable configuration slice (queues, subscriptions, topic-endpoints,
+client and ACL profiles) in sync across brokers. Pick a source-of-truth broker; every other broker
+is reconciled to match it. It is re-runnable and idempotent, so an edit made on the source shows up
+as operations on the next reconcile until the targets converge. It is dry-run by default; pass
+`--apply` to write.
+
+```bash
+solace-autoscale configsync --config config.yaml \
+  --source https://broker-a.example.com \
+  --target https://broker-b.example.com --target https://broker-c.example.com
+# prints the create/update/delete plan per target; add --apply to replicate
+```
 
 ### Settings
 

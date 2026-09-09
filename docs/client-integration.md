@@ -93,3 +93,62 @@ adapter as for MQTT 3.1.1. This is an **open question** to confirm on your targe
   application down. Only when there is no cache AND the service is down does the resolver error.
 - **Guaranteed consumers are never silently reassigned.** Reassignment signals apply to direct-mode
   clients and publishers only.
+
+## Smart SHIM — rule-based dispatch (both sides)
+
+The tiers above steer a client to **one** broker at connection time. The **SHIM** goes further: it
+makes a **per-message** routing decision from rules that combine the message **topic** and
+**payload**, and it works on both the publisher and the listener side. It is a client-side adapter —
+still no proxy in the data path — layered over your normal AMQP client.
+
+- **Publisher SHIM** (`solace_autoscale_client.dispatch.PublisherShim`): for each `(topic, payload)`
+  it asks the pure rule engine which broker and which **partition key**, resolves that broker name to
+  an AMQP endpoint through the fail-open resolver, and publishes there with the key set as the AMQP
+  `group-id` and an application-property `saas_partition_key`. One sender is kept per broker; the
+  AMQP setup is unchanged.
+- **Listener SHIM** (`ListenerShim`): subscribes across every broker the rules can target and re-runs
+  the **same** rules over each received message to demultiplex — the application sees a coherent
+  per-key stream. A message that arrived on a broker the rules would not have chosen is flagged
+  (`consistent = False`) rather than hidden, so routing stays verifiable end to end.
+
+Not round-robin: the same message always routes the same way, so guaranteed per-key ordering holds
+and the listener can reconstruct the stream. The rule engine (`solace_autoscale.dispatch`) is pure
+and unit-tested; a live-broker AMQP test proves the round trip.
+
+### Rule shape
+
+A rule fires when its topic pattern matches **and** every payload predicate matches (AND). Rules are
+tried in order; the first match wins; otherwise the `default_broker` applies.
+
+```yaml
+dispatch:
+  enabled: true
+  default_broker: broker-bulk
+  rules:
+    - name: vip-orders
+      when:
+        topic: "orders/>"                                   # * = one level, > = rest
+        payload:
+          - { path: priority, op: in, value: [high, urgent] }   # dotted JSON path + operator
+      route:
+        broker: broker-vip
+        key:   "vip.{region}"        # partition/group key; {topic} and {dotted.path} placeholders
+        topic: "vip/{topic}"         # optional publish-address rewrite
+```
+
+Operators: `eq ne in nin gt gte lt lte exists missing prefix contains regex`, and `raw_size_gt
+raw_size_lt raw_prefix` for non-JSON payloads (matched on the raw bytes). Type mismatches (e.g. `gt`
+against a string) evaluate to *false* — a rule that does not apply, not an error.
+
+Author and check rules offline with `solace-autoscale dispatch-test --config c.yaml --topic ... --payload ...`.
+
+## Config replication
+
+`solace-autoscale configsync` keeps the replicable config slice — queues, their subscriptions,
+topic-endpoints, client-profiles, ACL-profiles — in sync across brokers via SEMPv2 **config**. Pick a
+`source_of_truth` broker; each target is reconciled to match it. The diff is pure and
+dependency-ordered (profiles → queues → subscriptions on create; children-first on delete), the apply
+is **idempotent** (an already-present create / already-absent delete is a converged state, not an
+error), and it is **dry-run by default**. `mode: additive` (default) never deletes target-local
+objects; `mode: mirror` makes a target identical to the source. Re-runnable: an edit on the source
+reappears as ops until the targets converge.

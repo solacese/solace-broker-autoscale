@@ -285,6 +285,45 @@
   footer { padding: 44px 0 72px; color: var(--ink-faint); font-family: var(--mono); font-size: 12px; }
   footer p { margin: 4px 0; }
   footer a { color: var(--ink-soft); }
+
+  /* ---- smart shim demo ---- */
+  .shim-demo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }
+  @media (max-width: 760px) { .shim-demo { grid-template-columns: 1fr; } }
+  .shim-input, .shim-output { padding: 20px; }
+  .shim-lbl { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 6px; }
+  .shim-lbl + .shim-field { margin-bottom: 14px; }
+  .shim-field { width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 13px;
+    color: var(--ink); background: var(--bg); border: 1px solid var(--line-strong);
+    border-radius: 8px; padding: 9px 11px; }
+  .shim-field:focus { outline: none; border-color: var(--accent); }
+  .shim-area { resize: vertical; line-height: 1.5; }
+  .shim-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .preset { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); cursor: pointer;
+    background: transparent; border: 1px solid var(--line-strong); border-radius: 999px;
+    padding: 5px 12px; }
+  .preset:hover { border-color: var(--accent); color: var(--accent); }
+  .shim-verdict { font-family: var(--mono); font-size: 13px; margin-bottom: 16px; }
+  .shim-verdict .rule-name { display: inline-block; font-weight: 700; padding: 3px 10px;
+    border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
+  .shim-verdict .rule-name.dflt { background: color-mix(in srgb, var(--warn) 18%, transparent);
+    color: var(--warn); }
+  .shim-verdict .verdict-lead { color: var(--ink-faint); margin-right: 8px; }
+  .shim-wire { border-top: 1px solid var(--line); }
+  .wire-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0;
+    border-bottom: 1px solid var(--line); }
+  .wire-k { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--ink-faint); }
+  .wire-v { font-family: var(--mono); font-size: 13px; color: var(--ink); text-align: right;
+    word-break: break-all; }
+  .wire-v.key { color: var(--accent); font-weight: 700; }
+  .shim-note { color: var(--ink-soft); font-size: 0.9rem; margin: 14px 0 0; min-height: 1.2em; }
+  .shim-note.err { color: var(--warn); }
+  .shim-rules { margin-top: 18px; }
+  .rules-cap { color: var(--ink-faint); font-family: var(--mono); font-size: 12px; margin: 0 0 8px; }
+  .rules-yaml { background: var(--code-bg, var(--bg)); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; overflow-x: auto; }
+  .rules-yaml code { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); }
 </style>
 </head>
 <body>
@@ -295,6 +334,7 @@
     <div class="nav-links">
       <a href="#how">How it works</a>
       <a href="#readings">Examples</a>
+      <a href="#shim">Smart shim</a>
       <a href="#start">Quickstart</a>
       <a href="#customize">Settings</a>
       <button class="theme-btn" id="themeToggle" type="button" aria-label="Toggle color theme">theme</button>
@@ -409,6 +449,74 @@
       <span><i class="swatch" style="background: color-mix(in srgb, var(--accent) 55%, transparent)"></i> within one broker</span>
       <span><i class="swatch" style="background: color-mix(in srgb, var(--crit) 62%, transparent)"></i> more than one broker can handle</span>
       <span><i class="swatch" style="background: var(--warn)"></i> safe limit</span>
+    </div>
+  </div>
+</section>
+
+<!-- smart shim: rule-based dispatch -->
+<section id="shim">
+  <div class="wrap">
+    <p class="section-label">the smart shim</p>
+    <h2>Route each message by topic <em>and</em> payload, not round-robin</h2>
+    <p class="lede">
+      Once a workload spans several brokers, <em>where</em> each message goes stops being arbitrary. The
+      shim wraps the app's existing AMQP client and makes a per-message decision from rules that combine
+      the <b>topic</b> and the <b>payload</b>, picks the target broker, and stamps a <b>partition key</b>
+      on the wire (AMQP <code>group-id</code> plus a <code>saas_partition_key</code> property). The
+      listener side runs the same rules in reverse to demultiplex a coherent per-key stream, so routing
+      is deterministic and verifiable end to end. Type a message below and watch a rule fire.
+    </p>
+
+    <div class="shim-demo">
+      <div class="shim-input card">
+        <label class="shim-lbl" for="shimTopic">topic</label>
+        <input id="shimTopic" class="shim-field" type="text" value="orders/eu/new" spellcheck="false">
+        <label class="shim-lbl" for="shimPayload">payload (JSON)</label>
+        <textarea id="shimPayload" class="shim-field shim-area" spellcheck="false" rows="6">{
+  "priority": "high",
+  "region": "EU",
+  "amount": 240
+}</textarea>
+        <div class="shim-presets">
+          <button type="button" class="preset" data-t="orders/eu/new" data-p='{"priority":"high","region":"EU","amount":240}'>VIP order</button>
+          <button type="button" class="preset" data-t="orders/us/new" data-p='{"priority":"low","region":"US","amount":9999}'>Large order</button>
+          <button type="button" class="preset" data-t="telemetry/eu/temp" data-p='{"reading":21.4}'>Telemetry</button>
+        </div>
+      </div>
+
+      <div class="shim-output card">
+        <div class="shim-verdict" id="shimVerdict"></div>
+        <div class="shim-wire">
+          <div class="wire-row"><span class="wire-k">broker</span><span class="wire-v" id="wBroker">&mdash;</span></div>
+          <div class="wire-row"><span class="wire-k">address</span><span class="wire-v" id="wAddr">&mdash;</span></div>
+          <div class="wire-row"><span class="wire-k">partition key</span><span class="wire-v" id="wKey">&mdash;</span></div>
+          <div class="wire-row"><span class="wire-k">amqp group-id</span><span class="wire-v" id="wGid">&mdash;</span></div>
+        </div>
+        <p class="shim-note" id="shimNote"></p>
+      </div>
+    </div>
+
+    <div class="shim-rules">
+      <p class="rules-cap">The rules driving this demo (first match wins; else the default broker):</p>
+      <pre class="rules-yaml"><code>dispatch:
+  enabled: true
+  default_broker: broker-bulk
+  rules:
+    - name: vip-orders                 # topic AND payload
+      when:
+        topic: "orders/&gt;"
+        payload:
+          - { path: priority, op: in, value: [high, urgent] }
+      route:
+        broker: broker-vip
+        key:   "vip.{region}"          # partition key = ordering group
+        topic: "vip/{topic}"           # optional address rewrite
+    - name: large-orders
+      when:
+        topic: "orders/&gt;"
+        payload:
+          - { path: amount, op: gt, value: 1000 }
+      route: { broker: broker-big, key: "big.{region}" }</code></pre>
     </div>
   </div>
 </section>
@@ -1001,6 +1109,127 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
         requestAnimationFrame(frame);
       });
     }
+  })();
+
+  // ---- smart shim demo: a faithful JS port of the pure rule engine ----
+  (function () {
+    const topicEl = document.getElementById("shimTopic");
+    const payEl   = document.getElementById("shimPayload");
+    if (!topicEl || !payEl) return;
+
+    const DEFAULT_BROKER = "broker-bulk";
+    const RULES = [
+      { name: "vip-orders", topic: "orders/>",
+        payload: [{ path: "priority", op: "in", value: ["high", "urgent"] }],
+        route: { broker: "broker-vip", key: "vip.{region}", topic: "vip/{topic}" } },
+      { name: "large-orders", topic: "orders/>",
+        payload: [{ path: "amount", op: "gt", value: 1000 }],
+        route: { broker: "broker-big", key: "big.{region}" } },
+    ];
+
+    // topic match: '*' one level, '>' rest
+    function topicMatches(pat, top) {
+      if (pat === top) return true;
+      const p = pat.split("/"), t = top.split("/");
+      for (let i = 0; i < p.length; i++) {
+        if (p[i] === ">") return i < t.length;
+        if (i >= t.length) return false;
+        if (p[i] === "*") continue;
+        if (p[i] !== t[i]) return false;
+      }
+      return p.length === t.length;
+    }
+    function getPath(obj, path) {
+      let cur = obj;
+      for (const seg of path.split(".")) {
+        if (cur && typeof cur === "object" && seg in cur) cur = cur[seg];
+        else return undefined;
+      }
+      return cur;
+    }
+    function evalPred(pred, obj) {
+      const a = getPath(obj, pred.path), v = pred.value;
+      switch (pred.op) {
+        case "exists": return a !== undefined;
+        case "missing": return a === undefined;
+      }
+      if (a === undefined) return false;
+      switch (pred.op) {
+        case "eq":  return a === v;
+        case "ne":  return a !== v;
+        case "in":  return Array.isArray(v) && v.includes(a);
+        case "nin": return Array.isArray(v) && !v.includes(a);
+        case "gt":  return typeof a === "number" && a > v;
+        case "gte": return typeof a === "number" && a >= v;
+        case "lt":  return typeof a === "number" && a < v;
+        case "lte": return typeof a === "number" && a <= v;
+        case "prefix": return typeof a === "string" && a.startsWith(v);
+        default: return false;
+      }
+    }
+    function render(tpl, topic, obj) {
+      let out = tpl.replace(/\{([^{}]+)\}/g, (_, ref) => {
+        if (ref === "topic") return topic;
+        const val = getPath(obj, ref);
+        return (val === undefined || val === null) ? "" : String(val);
+      });
+      return out.replace(/\.{2,}/g, ".").replace(/^\.|\.$/g, "");
+    }
+    function decide(topic, obj) {
+      for (const r of RULES) {
+        if (!topicMatches(r.topic, topic)) continue;
+        if (!r.payload.every(p => evalPred(p, obj))) continue;
+        const addr = r.route.topic ? render(r.route.topic, topic, obj) : topic;
+        const key  = r.route.key ? (render(r.route.key, topic, obj) || null) : null;
+        return { broker: r.route.broker, address: addr, key, rule: r.name, matched: true };
+      }
+      return { broker: DEFAULT_BROKER, address: topic, key: null, rule: "default", matched: false };
+    }
+
+    const $ = id => document.getElementById(id);
+    function run() {
+      const topic = topicEl.value.trim();
+      const note = $("shimNote");
+      let obj;
+      try { obj = payEl.value.trim() ? JSON.parse(payEl.value) : {}; }
+      catch (e) {
+        note.textContent = "payload is not valid JSON; non-JSON payloads still route by raw size/prefix rules";
+        note.className = "shim-note err";
+        obj = {};
+      }
+      const d = decide(topic, obj);
+      const cls = d.matched ? "" : "dflt";
+      $("shimVerdict").innerHTML =
+        `<span class="verdict-lead">rule fired</span>` +
+        `<span class="rule-name ${cls}">${d.rule}</span>`;
+      $("wBroker").textContent = d.broker;
+      $("wAddr").textContent = "topic://" + d.address;
+      const keyEl = $("wKey"), gidEl = $("wGid");
+      keyEl.textContent = d.key || "(none)";
+      keyEl.className = d.key ? "wire-v key" : "wire-v";
+      gidEl.textContent = d.key || "(none)";
+      if (!note.classList.contains("err") || obj !== null) {
+        if (d.matched) {
+          note.textContent = "Same message, same route, every time. The listener side re-runs these rules to demux the "
+            + (d.key ? '"' + d.key + '"' : "") + " stream.";
+          note.className = "shim-note";
+        } else {
+          note.textContent = "No rule matched → the default broker. No key, no address rewrite.";
+          note.className = "shim-note";
+        }
+      }
+    }
+    topicEl.addEventListener("input", run);
+    payEl.addEventListener("input", run);
+    for (const b of document.querySelectorAll(".preset")) {
+      b.addEventListener("click", () => {
+        topicEl.value = b.getAttribute("data-t");
+        try { payEl.value = JSON.stringify(JSON.parse(b.getAttribute("data-p")), null, 2); }
+        catch { payEl.value = b.getAttribute("data-p"); }
+        run();
+      });
+    }
+    run();
   })();
 </script>
 </body>
