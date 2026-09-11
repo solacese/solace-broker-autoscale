@@ -220,6 +220,37 @@ def test_spec_is_json_serialisable_and_versioned():
     assert reloaded.targets == plan.targets
 
 
+# ---- cross-language interop contract --------------------------------------------------------
+
+# The exact rule set serialized into shim/testdata/interop_spec.json, which the Go shim's
+# TestInteropGolden loads and routes. Keep this in lockstep with that file: the test below fails if
+# Python's to_spec output drifts from the committed golden the Go side reads.
+_INTEROP_RULES = [
+    {"name": "vip-orders",
+     "when": {"topic": "orders/>", "payload": [{"path": "priority", "op": "in", "value": ["high", "urgent"]}]},
+     "route": {"broker": "broker-vip", "key": "vip.{region}", "topic": "vip/{topic}"}},
+    {"name": "large-orders",
+     "when": {"topic": "orders/*/created", "payload": [{"path": "amount", "op": "gt", "value": 1000}]},
+     "route": {"broker": "broker-big", "key": "big.{region}"}},
+    {"name": "telemetry-raw",
+     "when": {"topic": "telemetry/>", "payload": [{"path": "", "op": "raw_size_gt", "value": 2048}]},
+     "route": {"broker": "broker-bulk"}},
+]
+
+
+def test_interop_golden_spec_matches_committed_file():
+    """The Go shim reads shim/testdata/interop_spec.json; assert Python still emits exactly that."""
+    import json
+    golden = Path(__file__).resolve().parents[2] / "shim" / "testdata" / "interop_spec.json"
+    plan = DispatchPlan(rules=rules_from_config(_INTEROP_RULES), default_broker="broker-bulk")
+    expected = to_spec(plan)
+    on_disk = json.loads(golden.read_text())
+    assert on_disk == expected, (
+        "shim/testdata/interop_spec.json is stale; regenerate it from to_spec so the Go "
+        "cross-language golden test stays valid"
+    )
+
+
 # ---- purity guard ---------------------------------------------------------------------------
 
 def test_dispatch_engine_is_pure_no_forbidden_imports():
