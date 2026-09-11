@@ -20,6 +20,7 @@ from .rules import (
     rules_from_config,
     target_brokers,
 )
+from .spec import SPEC_VERSION, from_spec, rule_to_dict, to_spec
 
 __all__ = [
     "OPERATORS",
@@ -37,4 +38,8 @@ __all__ = [
     "render_template",
     "rules_from_config",
     "target_brokers",
+    "SPEC_VERSION",
+    "from_spec",
+    "rule_to_dict",
+    "to_spec",
 ]

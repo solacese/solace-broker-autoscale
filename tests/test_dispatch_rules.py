@@ -8,13 +8,16 @@ from pathlib import Path
 import pytest
 
 from solace_autoscale.dispatch import (
+    SPEC_VERSION,
     DispatchPlan,
     NoRouteError,
     Predicate,
     eval_predicate,
     evaluate,
+    from_spec,
     render_template,
     rules_from_config,
+    to_spec,
     topic_matches,
 )
 from solace_autoscale.dispatch.payload import decode_json, get_path
@@ -165,12 +168,64 @@ def test_rules_from_config_roundtrip():
     assert d.broker == "broker-2" and d.key == "vip.EU"
 
 
+# ---- portable spec round-trip ---------------------------------------------------------------
+
+_SPEC_RULES = [
+    {
+        "name": "vip-orders",
+        "when": {"topic": "orders/>", "payload": [{"path": "priority", "op": "in",
+                                                   "value": ["high", "urgent"]}]},
+        "route": {"broker": "broker-vip", "key": "vip.{region}", "topic": "vip/{topic}"},
+    },
+    {
+        "name": "big-orders",
+        "when": {"topic": "orders/>", "payload": [{"path": "amount", "op": "gt", "value": 1000}]},
+        "route": {"broker": "broker-big", "key": "big.{region}"},
+    },
+    {
+        "name": "telemetry",
+        "when": {"topic": "telemetry/>"},
+        "route": {"broker": "broker-bulk"},
+    },
+]
+
+# (topic, payload) probes that exercise every rule + the default fallback.
+_PROBES = [
+    ("orders/eu/new", '{"priority": "high", "region": "EU"}'),
+    ("orders/us/new", '{"priority": "low", "region": "US", "amount": 5000}'),
+    ("telemetry/x", '{"v": 1}'),
+    ("misc/thing", '{"anything": true}'),
+    ("orders/eu/new", "not-json"),
+]
+
+
+def test_spec_roundtrip_decides_identically():
+    plan = DispatchPlan(rules=rules_from_config(_SPEC_RULES), default_broker="broker-default")
+    rebuilt = from_spec(to_spec(plan))
+    assert rebuilt.default_broker == plan.default_broker
+    assert rebuilt.targets == plan.targets
+    for topic, payload in _PROBES:
+        a, b = plan.decide(topic, payload), rebuilt.decide(topic, payload)
+        assert (a.broker, a.address, a.key, a.rule, a.matched) == \
+               (b.broker, b.address, b.key, b.rule, b.matched), (topic, payload)
+
+
+def test_spec_is_json_serialisable_and_versioned():
+    import json
+    plan = DispatchPlan(rules=rules_from_config(_SPEC_RULES), default_broker="broker-default")
+    spec = to_spec(plan)
+    assert spec["version"] == SPEC_VERSION
+    # survives a real JSON round-trip (no non-serialisable types leaked in)
+    reloaded = from_spec(json.loads(json.dumps(spec)))
+    assert reloaded.targets == plan.targets
+
+
 # ---- purity guard ---------------------------------------------------------------------------
 
 def test_dispatch_engine_is_pure_no_forbidden_imports():
     forbidden = {"httpx", "requests", "logging", "sqlite3", "socket", "urllib", "time", "proton"}
     base = Path(__file__).resolve().parents[1] / "src" / "solace_autoscale" / "dispatch"
-    for name in ("rules.py", "payload.py", "__init__.py"):
+    for name in ("rules.py", "payload.py", "spec.py", "__init__.py"):
         tree = ast.parse((base / name).read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
