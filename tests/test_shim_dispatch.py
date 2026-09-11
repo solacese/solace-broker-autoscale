@@ -115,6 +115,18 @@ def test_publisher_reuses_one_connection_per_broker():
     assert made.count("amqp://vip.local:5672") == 1  # one connection reused
 
 
+def test_publisher_separates_connections_by_endpoint():
+    """Two distinct brokers/endpoints get distinct cached connections (no over-merge)."""
+    made: list[str] = []
+    pub = PublisherShim(resolver=_resolver(), plan=_plan(), shard="shard-a",
+                        sender_factory=lambda uri: made.append(uri) or _CapturingSender(uri))
+    pub.publish("orders/eu/a", json.dumps({"priority": "high", "region": "EU"}))   # vip
+    pub.publish("orders/us/b", json.dumps({"priority": "low", "region": "US",
+                                           "amount": 5000}))                        # big
+    assert set(made) == {"amqp://vip.local:5672", "amqp://big.local:5672"}
+    assert len(made) == 2
+
+
 # ---- listener side ---------------------------------------------------------------------------
 
 def test_listener_subscribes_to_every_target_broker():

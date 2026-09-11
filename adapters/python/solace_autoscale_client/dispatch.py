@@ -69,39 +69,49 @@ class PublisherShim:
     user: str | None = None
     password: str | None = None
     sender_factory: Callable[[str], Any] | None = None
-    _conns: dict[str, Any] = field(default_factory=dict)
+    #: keyed by (broker_id, uri, user) so the same broker id under different endpoints/credentials
+    #: never reuses the wrong connection.
+    _conns: dict[tuple[str, str, str | None], Any] = field(default_factory=dict)
 
-    def plan_message(self, topic: str, payload: bytes | str) -> OutboundMessage:
-        """Pure-ish planning step: decide broker + key + address and resolve the endpoint.
+    def _plan(self, topic: str, payload: bytes | str) -> tuple[OutboundMessage, Assignment]:
+        """Decide broker + key + address, resolve the endpoint, and return both.
 
         Resolution goes through the fail-open resolver cache, so a control-plane outage does not stop
-        publishing. Does NOT touch the wire — useful for the demo and for tests.
+        publishing. Does NOT touch the wire. The resolved assignment is returned alongside the
+        outbound message so callers do not re-run the rules or the resolver a second time.
         """
         decision: Decision = self.plan.decide(topic, payload)
         assignment = self.resolver.resolve(self.shard, decision.broker, mode="direct", protocol="amqp")
         props: dict[str, Any] = {}
         if decision.key is not None:
             props[PARTITION_KEY_PROPERTY] = decision.key
-        return OutboundMessage(
+        out = OutboundMessage(
             broker_id=assignment.broker_id, address=decision.address, key=decision.key,
             body=payload, properties=props, rule=decision.rule,
         )
+        return out, assignment
+
+    def plan_message(self, topic: str, payload: bytes | str) -> OutboundMessage:
+        """Pure-ish planning step: decide broker + key + address and resolve the endpoint.
+
+        Useful for the demo and for tests. ``publish`` uses the internal :meth:`_plan` to avoid
+        resolving twice.
+        """
+        return self._plan(topic, payload)[0]
 
     def _sender_for(self, assignment: Assignment) -> Any:
-        bid = assignment.broker_id
-        if bid not in self._conns:
-            uri = _amqp_host(assignment)
+        uri = _amqp_host(assignment)
+        key = (assignment.broker_id, uri, self.user)
+        if key not in self._conns:
             if self.sender_factory is not None:
-                self._conns[bid] = self.sender_factory(uri)
+                self._conns[key] = self.sender_factory(uri)
             else:
-                self._conns[bid] = _ProtonSender(uri, self.user, self.password)
-        return self._conns[bid]
+                self._conns[key] = _ProtonSender(uri, self.user, self.password)
+        return self._conns[key]
 
     def publish(self, topic: str, payload: bytes | str) -> OutboundMessage:
         """Route and send one message on the AMQP path. Returns what was sent (for assertions)."""
-        out = self.plan_message(topic, payload)
-        assignment = self.resolver.resolve(self.shard, self.plan.decide(topic, payload).broker,
-                                            mode="direct", protocol="amqp")
+        out, assignment = self._plan(topic, payload)
         sender = self._sender_for(assignment)
         sender.send(out.address, out.body, out.properties, out.key)
         return out
