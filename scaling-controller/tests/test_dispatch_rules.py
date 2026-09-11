@@ -224,7 +224,7 @@ def test_spec_is_json_serialisable_and_versioned():
 
 def test_dispatch_engine_is_pure_no_forbidden_imports():
     forbidden = {"httpx", "requests", "logging", "sqlite3", "socket", "urllib", "time", "proton"}
-    base = Path(__file__).resolve().parents[1] / "src" / "solace_autoscale" / "dispatch"
+    base = Path(__file__).resolve().parents[1] / "solace_autoscale" / "dispatch"
     for name in ("rules.py", "payload.py", "spec.py", "__init__.py"):
         tree = ast.parse((base / name).read_text())
         for node in ast.walk(tree):

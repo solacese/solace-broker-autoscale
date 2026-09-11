@@ -11,7 +11,12 @@ from solace_autoscale.capacity.schema import CapacityModel
 from solace_autoscale.config import Config
 from solace_autoscale.decision.types import MetricSample
 
-REPO = Path(__file__).resolve().parents[1]
+# The Python control plane lives under ``scaling-controller/``; shared assets
+# (models, resources, examples) live at the repository root, one level up.
+CONTROLLER = Path(__file__).resolve().parents[1]
+REPO = CONTROLLER.parent
+# Package source root, for the "no forbidden imports" purity guards.
+PKG = CONTROLLER / "solace_autoscale"
 
 
 @pytest.fixture

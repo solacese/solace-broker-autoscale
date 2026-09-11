@@ -11,9 +11,9 @@ from solace_autoscale.metrics.prometheus import PrometheusCollector
 from solace_autoscale.metrics.semp import MB, map_vpn_monitor
 from solace_autoscale.metrics.static import StaticCollector
 
-from .conftest import REPO
+from .conftest import CONTROLLER
 
-FIX = REPO / "tests" / "fixtures" / "semp"
+FIX = CONTROLLER / "tests" / "fixtures" / "semp"
 
 
 def test_semp_mapping_from_captured_fixture():

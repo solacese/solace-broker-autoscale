@@ -11,7 +11,7 @@ from .conftest import REPO
 
 
 def test_example_config_loads():
-    cfg = load_config(REPO / "config.example.yaml")
+    cfg = load_config(REPO / "examples" / "config.example.yaml")
     assert cfg.fleet.service_class == "enterprise-10k"
     assert cfg.billing.model == "committed"
     assert cfg.actuation.mode == "recommend"  # default stays recommend

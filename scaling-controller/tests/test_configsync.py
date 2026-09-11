@@ -80,7 +80,7 @@ def test_summarise_counts():
 
 def test_configsync_core_is_pure_no_forbidden_imports():
     forbidden = {"httpx", "requests", "logging", "sqlite3", "socket", "urllib", "time"}
-    base = Path(__file__).resolve().parents[1] / "src" / "solace_autoscale" / "configsync"
+    base = Path(__file__).resolve().parents[1] / "solace_autoscale" / "configsync"
     for name in ("model.py", "diff.py", "__init__.py"):
         tree = ast.parse((base / name).read_text())
         for node in ast.walk(tree):

@@ -15,7 +15,7 @@ containing:
   values in **messages/second**.
 
 The compiler reads the **fanout = 1, Ingress** row as the sustained per-broker maximum at each size
-bucket. See `docs/capacity-model.md` for the exact shape and the normalised output schema.
+bucket. See `capacity-model.md` for the exact shape and the normalised output schema.
 
 ## Producing the numbers
 

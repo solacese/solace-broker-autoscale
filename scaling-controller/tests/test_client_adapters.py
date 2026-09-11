@@ -3,17 +3,11 @@ the live protocol integration test lives in test_integration_broker.py."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "adapters" / "python"))
-
-from solace_autoscale_client.adapters import amqp_uri, mqtt_config, rest_target  # noqa: E402
-from solace_autoscale_client.resolver import Assignment, Resolver, ResolverError  # noqa: E402
-from solace_autoscale_client.smf_wrapper import (  # noqa: E402
+from solace_autoscale_client.adapters import amqp_uri, mqtt_config, rest_target
+from solace_autoscale_client.resolver import Assignment, Resolver, ResolverError
+from solace_autoscale_client.smf_wrapper import (
     GuaranteedReassignmentRefused,
     SmfClient,
 )

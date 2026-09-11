@@ -360,7 +360,7 @@ def test_decision_engine_is_pure_no_forbidden_imports():
     from pathlib import Path
     forbidden = {"httpx", "requests", "logging", "sqlite3", "socket", "urllib"}
     for name in ("engine.py", "headroom.py", "types.py"):
-        src = Path(__file__).resolve().parents[1] / "src" / "solace_autoscale" / "decision" / name
+        src = Path(__file__).resolve().parents[1] / "solace_autoscale" / "decision" / name
         tree = ast.parse(src.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

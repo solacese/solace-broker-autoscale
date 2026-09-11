@@ -25,20 +25,14 @@ Start one with:
 from __future__ import annotations
 
 import os
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
+from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState
+from solace_autoscale_client.resolver import Resolver
+
 pytestmark = pytest.mark.integration
-
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "adapters" / "python"))
-
-from solace_autoscale_client.resolver import Resolver  # noqa: E402
-
-from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState  # noqa: E402
 
 HOST = os.environ.get("SOLACE_HOST", "127.0.0.1")
 SMF_PORT = int(os.environ.get("SOLACE_SMF_PORT", "55556"))
@@ -88,6 +82,7 @@ def _resolver(store) -> Resolver:
 
 def test_rest_publish(tmp_path):
     import requests
+
     from solace_autoscale_client.adapters import rest_target
 
     r = _resolver(_store(tmp_path))
@@ -102,6 +97,7 @@ def test_rest_publish(tmp_path):
 
 def test_mqtt_pubsub(tmp_path):
     import paho.mqtt.client as mqtt
+
     from solace_autoscale_client.adapters import mqtt_config
 
     r = _resolver(_store(tmp_path))
@@ -133,6 +129,7 @@ def test_mqtt_pubsub(tmp_path):
 def test_amqp_send(tmp_path):
     from proton import Message
     from proton.utils import BlockingConnection
+
     from solace_autoscale_client.adapters import amqp_uri
 
     r = _resolver(_store(tmp_path))
@@ -152,6 +149,7 @@ def test_smf_guaranteed_publish(tmp_path):
     from solace.messaging.config.transport_security_strategy import TLS  # noqa: F401
     from solace.messaging.messaging_service import MessagingService
     from solace.messaging.resources.topic import Topic
+
     from solace_autoscale_client.adapters import smf_host
 
     r = _resolver(_store(tmp_path))

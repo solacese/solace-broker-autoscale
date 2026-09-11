@@ -10,9 +10,9 @@ from solace_autoscale.portal.shard_advisor import (
     topic_from_address_levels,
 )
 
-from .conftest import REPO
+from .conftest import CONTROLLER
 
-FIX = REPO / "tests" / "fixtures" / "portal"
+FIX = CONTROLLER / "tests" / "fixtures" / "portal"
 
 
 def test_two_disjoint_components_from_fixture():

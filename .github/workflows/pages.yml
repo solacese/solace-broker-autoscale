@@ -1,13 +1,13 @@
 name: pages
 
-# Publishes the docs/ folder (landing page + markdown docs) to GitHub Pages.
+# Publishes the guide/ folder (landing page + markdown docs) to GitHub Pages.
 # One-time repo setup: Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
 
 on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
+      - "guide/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -36,6 +36,6 @@ jobs:
           enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: guide
       - id: deployment
         uses: actions/deploy-pages@v4

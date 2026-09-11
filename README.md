@@ -1,14 +1,10 @@
 # solace-broker-autoscale
 
-**Autoscale your Solace Cloud brokers as throughput grows.**
+**Autoscale your Solace Cloud brokers as throughput grows, and keep every client pointed at the right broker.**
 
-`solace-broker-autoscale` answers that from capacity numbers you measure on your own brokers. It
-gives you a recommendation and the reasoning behind it, not just a number. By default it only
-advises; scaling the fleet for you is a separate setting you turn on deliberately.
-
-Vertical scaling on Solace Cloud has a limit. Once you are on the largest practical service class
-and traffic keeps growing, there is no bigger broker to buy. This tool provides the horizontal path:
-run more brokers and spread the load across them.
+Vertical scaling on Solace Cloud has a ceiling. Once you are on the largest practical service class
+and traffic keeps climbing, there is no bigger broker to buy. This project is the horizontal path:
+run more brokers, spread the load, and route each message to where it belongs.
 
 🔗 **[Overview and examples](https://solacese.github.io/solace-broker-autoscale/)**
 
@@ -17,203 +13,128 @@ run more brokers and spread the load across them.
 
 ---
 
-## Two parts
+## Two products, one repo
 
-The project has two independent pieces. You can use either on its own.
+The project ships two independent pieces. Use either on its own.
 
-- **The controller** is the tool you run. It reads your capacity model and live metrics, decides how
-  many brokers the workload needs, and can optionally scale the fleet. This is the `solace-autoscale`
-  command described below.
-- **The shim** is a thin wrapper around the messaging API your applications already use (AMQP, MQTT,
-  REST, or SMF). It sits in front of your existing client, and when brokers are added or removed it
-  points the client at the correct broker. It adds no proxy to the data path and needs no change to
-  how you publish or consume. It is optional and lives in [`adapters/`](adapters/README.md).
+| Product | Folder | Language | What it does |
+|---|---|---|---|
+| **Scaling controller** | [`scaling-controller/`](scaling-controller/) | Python | Reads your capacity model and live metrics, decides how many brokers the workload needs, explains why, and can optionally scale the fleet. This is the `solace-autoscale` command. |
+| **Smart shim** | [`shim/`](shim/) | Go | A client-side library that wraps your app's own AMQP client. Per message, it applies your routing rules, picks the target broker, stamps a partition key, and (optionally) rewrites the address. No proxy in the data path. |
 
-The controller changes the number of brokers. The shim makes each publisher and subscriber follow
-that change, using the AMQP (or MQTT, REST, or SMF) client they already have.
+The controller changes the *number* of brokers. The shim makes each publisher and subscriber follow
+that change and route each message deterministically across the fleet.
+
+### Repository layout
+
+```
+scaling-controller/   Python control plane (the solace-autoscale CLI, decision engine, assignment service)
+shim/                 Go smart shim (rule engine, resolver, publisher + listener, real AMQP, CLI demo)
+guide/                Documentation and design records (published to the project site)
+examples/             Ready-to-run config, starting with config.example.yaml
+deploy/               Deployment assets (Terraform, container, KEDA scaler)
+models/               Capacity model files, including the fabricated synthetic sample
+resources/            Inputs you supply (performance workbooks); nothing measured is committed
+scripts/              Helpers, e.g. regenerating the synthetic model
+```
 
 ---
 
-## The controller
-
-### Install
-
-Requires Python 3.11 or later.
+## Scaling controller (Python)
 
 ```bash
-pip install -e '.[compile]'
+cd scaling-controller
+pip install -e '.[compile]'          # installs the solace-autoscale command
 ```
-
-This installs the `solace-autoscale` command.
-
-### Use it
-
-You need two inputs: a configuration file (start from the included `config.example.yaml`) and a
-metrics file, which is a JSON snapshot of your broker's load (format in
-[`docs/metrics.md`](docs/metrics.md)).
 
 ```bash
 # How many brokers does this workload need now?
-solace-autoscale recommend --config config.example.yaml --metrics metrics.json
+solace-autoscale recommend --config ../examples/config.example.yaml --metrics metrics.json
 
 # How many would it need if traffic doubled or quadrupled?
-solace-autoscale whatif --config config.example.yaml --metrics metrics.json --multipliers 1,2,4
+solace-autoscale whatif --config ../examples/config.example.yaml --metrics metrics.json --multipliers 1,2,4
 ```
 
-By default these run against an included sample model (`models/synthetic-v0.json`) that contains
-obviously fake capacity numbers. Every report flags the sample model, and it is blocked from making
-any real change, so you can see the output safely. The tool never acts on fake data.
-
-To use your own numbers, measure your brokers into a workbook (see
-[`docs/benchmark.md`](docs/benchmark.md)), compile it into a model file, and point your configuration
-at that file:
+By default these run against an included sample model (`models/synthetic-v0.json`) whose numbers are
+obviously fabricated. Every report flags the sample model and blocks any real change, so you can see
+the output safely. To use your own numbers, measure your brokers into a workbook (see
+[`guide/benchmark.md`](guide/benchmark.md)), compile it, and point your config at the result:
 
 ```bash
 solace-autoscale compile --workbook performance.xlsx \
     --service-classes models/service-classes.json --out models/mymodel.json
-# then set  capacity.model: models/mymodel.json  in your configuration
 ```
 
-### Commands
-
-| Command | What it does |
-|---|---|
-| `recommend` | Reports how many brokers a workload needs, with the reason: which limit is reached, how full each broker is, and the cost. |
-| `whatif` | The same recommendation, projected under load multipliers, so you can see the limit before you reach it. |
-| `compile` | Turns a measured workbook into a versioned model file. Run this once whenever your numbers change. |
-| `monitor` | Watches a live broker over time and records how accurate past advice was. |
-| `simulate` | Tests the model across many message sizes and fan-out patterns. |
-| `accuracy` | Compares what was predicted against what actually happened, per limit. |
-| `shard-advise` | Suggests how to split traffic into groups, from an Event Portal export. |
-| `serve` | Runs the assignment service that tells clients which broker to use. |
-| `dispatch-test` | Shows how the smart shim would route one message: which rule fires, the target broker, the partition key, and the address. Runs offline. |
-| `configsync` | Replicates broker configuration (queues, subscriptions, endpoints, profiles) from a source-of-truth broker to the rest of the fleet. Dry-run by default. |
-
-## Smart shim: route by topic and payload
-
-Once a workload spans several brokers, where each message goes stops being arbitrary. The shim wraps
-the app's existing AMQP client, so there is no proxy in the data path. It makes a per-message
-decision from rules that combine the topic and the payload, picks the target broker, and stamps a
-partition key on the wire (AMQP `group-id` plus a `saas_partition_key` property). It is not
-round-robin: the same message always routes the same way, so per-key ordering holds, and the
-listener side re-runs the same rules to demultiplex a coherent per-key stream. See it live on the
-[project site](https://solacese.github.io/solace-broker-autoscale/#shim).
-
-```yaml
-dispatch:
-  enabled: true
-  default_broker: broker-bulk        # when no rule matches
-  rules:
-    - name: vip-orders               # topic AND payload, first match wins
-      when:
-        topic: "orders/>"
-        payload:
-          - { path: priority, op: in, value: [high, urgent] }
-      route:
-        broker: broker-vip
-        key:   "vip.{region}"        # partition key = ordering group, templated from the payload
-        topic: "vip/{topic}"         # optional address rewrite
-    - name: large-orders
-      when: { topic: "orders/>", payload: [ { path: amount, op: gt, value: 1000 } ] }
-      route: { broker: broker-big, key: "big.{region}" }
-```
-
-Predicate operators: `eq ne in nin gt gte lt lte exists missing prefix contains regex`, plus
-`raw_size_gt raw_size_lt raw_prefix` for non-JSON payloads. The rule engine is pure and unit-tested;
-the publisher and listener shims live in [`adapters/python`](adapters/python) and keep your own AMQP
-client.
-
-## Config replication: one broker's edits, reflected across the fleet
-
-`configsync` keeps the replicable configuration slice (queues, subscriptions, topic-endpoints,
-client and ACL profiles) in sync across brokers. Pick a source-of-truth broker; every other broker
-is reconciled to match it. It is re-runnable and idempotent, so an edit made on the source shows up
-as operations on the next reconcile until the targets converge. It is dry-run by default; pass
-`--apply` to write.
-
-```bash
-solace-autoscale configsync --config config.yaml \
-  --source https://broker-a.example.com \
-  --target https://broker-b.example.com --target https://broker-c.example.com
-# prints the create/update/delete plan per target; add --apply to replicate
-```
-
-### Settings
-
-All settings live in one YAML file. Unknown keys are rejected, and the defaults are conservative.
-Start from [`config.example.yaml`](config.example.yaml). The settings you are most likely to change:
-
-| Setting | Effect |
-|---|---|
-| `fleet.min_brokers` / `max_brokers` | The lowest and highest broker count allowed. Reaching the limit is reported, never hidden. |
-| `workload.delivery` / `bottleneck` | `direct`, `guaranteed`, or `mixed`; set the limit to check, or let the tool detect it. |
-| `metrics.source` | Where the numbers come from: `semp`, `prometheus`, `cloud-api`, or a `static` file. |
-| `billing.per_broker_monthly` | Your own prices, used to turn broker counts into a monthly cost. No prices are included. |
-| `actuation.mode` | `recommend` (default, advice only), `scale-up-only`, or `full`. |
-
-Full reference: [`docs/configuration.md`](docs/configuration.md).
-
-### Safety
-
-The controller cannot change your brokers unless you turn scaling on, and even then it is
-constrained:
-
-- It defaults to advice only. In `recommend` mode, the component that makes changes is never created.
-- A sample model or stale metrics block all changes.
-- Every real change is written to an audit log first. It also honours a kill-switch file and rate
-  limits, requires explicit confirmation, and refuses to delete a broker that still has traffic.
-- TLS certificate checking is on by default. Disabling it requires an explicit `--insecure` flag.
-
-See [`docs/safety.md`](docs/safety.md).
+Full commands, settings, and safety controls are in [`scaling-controller/README.md`](scaling-controller/README.md).
 
 ---
 
-## The shim
+## Smart shim (Go)
 
-The shim wraps the messaging API your publishers and subscribers already use. You keep your existing
-AMQP, MQTT, REST, or SMF client; the shim just tells it which broker to connect to as the fleet
-changes. It asks the assignment service which broker to use, then hands your client a normal
-connection URL for that protocol. It never carries messages and never handles credentials, so your
-data path and authentication are unchanged. If the assignment service is unreachable, it returns the
-last known answer rather than failing.
+Once a workload spans several brokers, where each message goes stops being arbitrary. The shim wraps
+the app's existing AMQP client, so there is no proxy in the data path. Per message it makes one
+decision from rules that combine the Solace topic and the JSON payload, picks the target broker, and
+stamps a partition key on the wire (AMQP `group-id` plus a `saas_partition_key` property). It is not
+round-robin: the same message always routes the same way, so per-key ordering holds, and the listener
+side re-runs the same rules to demultiplex a coherent per-key stream.
 
-For example, a publisher using AMQP keeps its AMQP client and only adds the lookup:
-
-```python
-from solace_autoscale_client import Resolver, amqp_uri
-
-r = Resolver(base_url="https://assign.example.com")
-a = r.resolve(shard="shard-a", client_id="orders-publisher", mode="guaranteed", protocol="amqp")
-uri = amqp_uri(a)   # pass this URL to your normal AMQP client and connect and publish as usual
+```yaml
+# rule spec (JSON on disk, shown here as YAML for readability): first match wins
+default_broker: broker-bulk
+rules:
+  - name: vip-orders                 # topic AND payload
+    when:
+      topic: "orders/>"
+      payload:
+        - { path: priority, op: in, value: [high, urgent] }
+    route:
+      broker: broker-vip
+      key:   "vip.{region}"          # partition key = ordering group, templated from the payload
+      topic: "vip/{topic}"           # optional address rewrite
+  - name: large-orders
+    when: { topic: "orders/>", payload: [ { path: amount, op: gt, value: 1000 } ] }
+    route: { broker: broker-big, key: "big.{region}" }
 ```
 
-The same pattern works for MQTT, REST, and SMF. Python and Java versions are provided. See
-[`adapters/`](adapters/README.md) and [`docs/client-integration.md`](docs/client-integration.md) for
-the full integration options.
+Predicate operators: `eq ne in nin gt gte lt lte exists missing prefix contains regex`, plus
+`raw_size_gt raw_size_lt raw_prefix` for non-JSON payloads. The rule spec is portable: the Python
+controller's `dispatch-test` and the Go shim read the same JSON, proven by a cross-language golden
+test. Build and try it from [`shim/`](shim/):
+
+```bash
+cd shim
+go test ./...
+go run ./cmd/shim demo          # runs the rule engine + an in-memory transport, offline
+```
+
+See [`shim/README.md`](shim/README.md) for the library API, the `Transport` interface, and the AMQP
+transport.
 
 ---
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) - how the pieces fit together
-- [`docs/capacity-model.md`](docs/capacity-model.md) - the model file and how to build it
-- [`docs/configuration.md`](docs/configuration.md) - every setting
-- [`docs/metrics.md`](docs/metrics.md) - where the numbers come from
-- [`docs/client-integration.md`](docs/client-integration.md) - connecting clients (the shim)
-- [`docs/safety.md`](docs/safety.md) - the safety controls
-- [`docs/adr/`](docs/adr/) - the design decisions and the reasons for them
+- [`guide/architecture.md`](guide/architecture.md) - how the pieces fit together
+- [`guide/capacity-model.md`](guide/capacity-model.md) - the model file and how to build it
+- [`guide/configuration.md`](guide/configuration.md) - every controller setting
+- [`guide/metrics.md`](guide/metrics.md) - where the numbers come from
+- [`guide/rule-spec.md`](guide/rule-spec.md) - the portable dispatch rule spec (Python and Go)
+- [`guide/client-integration.md`](guide/client-integration.md) - connecting clients
+- [`guide/safety.md`](guide/safety.md) - the safety controls
+- [`guide/adr/`](guide/adr/) - the design decisions and the reasons for them
 
 ## Development
 
+Each product builds and tests on its own:
+
 ```bash
-pip install -e '.[dev]'    # tests, linters, type checker, compiler
-pytest                     # unit tests (live-broker tests are skipped unless requested)
-ruff check . && mypy src/solace_autoscale
+# Python controller
+cd scaling-controller && pip install -e '.[dev]'
+pytest -m "not integration" -q && ruff check . && mypy solace_autoscale
+
+# Go shim
+cd shim && go test ./... && go vet ./...
 ```
 
-The live-broker tests need extra client libraries and a local broker. See
-[`tests/test_integration_broker.py`](tests/test_integration_broker.py) for the Docker command and
-run them with `pytest -m integration`.
-
-Contributions are welcome. The decision engine is a pure function (numbers in, recommendation out, no
-input or output). Please keep it that way.
+Contributions are welcome. The decision engine and the rule engine are pure functions (inputs in,
+result out, no I/O). Please keep them that way.

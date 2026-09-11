@@ -40,7 +40,7 @@ The valuable part to record is *why* the adapter cannot be the core:
 - **What KEDA does buy, later.** Catalog distribution (KEDA's scaler catalog is a discovery channel),
   and a clean composition story: one loop scales *consumers within a broker* (the KEDA Solace
   scaler) while this tool's loop scales *brokers underneath them*. That composition is worth
-  supporting - as an adapter, once the two-loop interaction (see `docs/architecture.md`) is handled
+  supporting - as an adapter, once the two-loop interaction (see `../architecture.md`) is handled
   with asymmetric windows and cooldowns.
 
 ## Consequences
@@ -49,7 +49,7 @@ The valuable part to record is *why* the adapter cannot be the core:
 - A future `adapters/keda/` external scaler can wrap the engine without changing it. It will have to
   own the lossy count projection and document what report detail it drops.
 - The two independent control loops (KEDA consumers, this tool's brokers) must be composed
-  deliberately to avoid oscillation; the mitigations are documented in `docs/architecture.md`.
+  deliberately to avoid oscillation; the mitigations are documented in `../architecture.md`.
 - ADR 0001's "Solace Cloud managed services only" still holds for the *actuator*: the adapter drives
   the same Cloud-API actuator through the same safety gate, it does not add a self-managed broker
   lifecycle.
