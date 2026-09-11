@@ -2,12 +2,19 @@
 
 The smart shim decides, per message, which broker a message goes to, what partition key to stamp on
 it, and what address to publish it to. Those decisions come from an ordered list of rules. The rules
-are pure data: this document defines their portable format so a rule set authored and tested in the
-Python reference engine can be shipped to an adapter in any language and evaluated identically.
+are pure data: this document defines their portable format so a rule set is evaluated identically by
+the Go shim that runs in applications and by the Python engine the control plane reasons with.
 
-The Python engine round-trips this format with `to_spec(plan)` and `from_spec(dict)` in
-`solace_autoscale.dispatch`. The format is the same shape the config file already uses, plus a
-`version` and a `default_broker`.
+Two engines read this one format:
+
+- **Go** (the data path, in [`/shim`](../shim/README.md)): `rules.LoadSpec(data)` parses the spec
+  into a `*rules.Plan` the publisher and listener evaluate per message.
+- **Python** (the control plane, in `/scaling-controller`): `to_spec(plan)` and `from_spec(dict)` in
+  `solace_autoscale.dispatch` round-trip the same JSON for `dispatch-test` and capacity planning.
+
+The format is the same shape the config file already uses, plus a `version` and a `default_broker`.
+A cross-language golden test (`shim/testdata/interop_spec.json`) is emitted by Python and asserted by
+Go, so the two engines cannot drift.
 
 ## Shape
 
@@ -87,10 +94,28 @@ Any adapter, in any language, must produce the same decision the reference engin
 6. **Invalid JSON payload:** payload predicates that read a path do not match (the field is absent),
    but whole-payload operators such as `raw_size_gt` and `raw_prefix` still apply to the raw bytes.
 
-## Why a spec, not just Python
+### Operators
 
-The reference engine is Python, which is the right home for authoring and testing rules. But the
-shim runs inside customer applications, which are written in many languages, and it sits on the
-message hot path. Shipping the rules as this portable spec lets each language have a thin native
-adapter that reads the same rules and routes the same way, with Python staying the place rules are
-written, versioned, and tested.
+| Operator | Meaning |
+|---|---|
+| `eq` / `ne` | equal / not equal (numbers compare by value across `1` vs `1.0`) |
+| `in` / `nin` | value is / is not one of a list |
+| `gt` `gte` `lt` `lte` | numeric or string ordering |
+| `exists` / `missing` | the path is present / absent (no `value`) |
+| `prefix` | string starts with `value` |
+| `contains` | string contains `value`, or list contains `value` |
+| `regex` | string matches the `value` regular expression |
+| `raw_size_gt` / `raw_size_lt` | undecoded payload byte length above / below `value` |
+| `raw_prefix` | undecoded payload bytes start with `value` |
+
+A missing field is a non-match for every operator except `missing`. A type mismatch (for example
+`gt` against a string) evaluates to *false* — a rule that does not apply, not an error. Integer
+predicate values keep their exact value on both engines (Go decodes JSON numbers with `UseNumber`).
+
+## Why a spec, not one engine
+
+The data path is Go, because the shim runs inside customer applications and sits on the message hot
+path. The control plane is Python, which is the right home for authoring, versioning, and testing
+rules and for capacity planning. Shipping the rules as this portable spec lets both engines read the
+same rules and route the same way, and lets any future language adapter join without a rewrite. The
+golden interop test is what keeps the two honest.

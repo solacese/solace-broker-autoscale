@@ -94,26 +94,31 @@ adapter as for MQTT 3.1.1. This is an **open question** to confirm on your targe
 - **Guaranteed consumers are never silently reassigned.** Reassignment signals apply to direct-mode
   clients and publishers only.
 
-## Smart SHIM — rule-based dispatch (both sides)
+## Smart shim — rule-based dispatch (both sides)
 
-The tiers above steer a client to **one** broker at connection time. The **SHIM** goes further: it
+The tiers above steer a client to **one** broker at connection time. The **shim** goes further: it
 makes a **per-message** routing decision from rules that combine the message **topic** and
-**payload**, and it works on both the publisher and the listener side. It is a client-side adapter —
+**payload**, and it works on both the publisher and the listener side. It is a client-side library —
 still no proxy in the data path — layered over your normal AMQP client.
 
-- **Publisher SHIM** (`solace_autoscale_client.dispatch.PublisherShim`): for each `(topic, payload)`
-  it asks the pure rule engine which broker and which **partition key**, resolves that broker name to
-  an AMQP endpoint through the fail-open resolver, and publishes there with the key set as the AMQP
-  `group-id` and an application-property `saas_partition_key`. One sender is kept per broker; the
-  AMQP setup is unchanged.
-- **Listener SHIM** (`ListenerShim`): subscribes across every broker the rules can target and re-runs
-  the **same** rules over each received message to demultiplex — the application sees a coherent
-  per-key stream. A message that arrived on a broker the rules would not have chosen is flagged
-  (`consistent = False`) rather than hidden, so routing stays verifiable end to end.
+The shim is written in Go and lives in [`/shim`](../shim/README.md). It talks real AMQP 1.0 through
+`transport/amqp` (github.com/Azure/go-amqp) and can run the whole path offline against an in-memory
+transport for tests and the `shim demo` command.
+
+- **Publisher** (`dispatch.PublisherShim`): for each `(topic, payload)` it asks the pure rule engine
+  which broker and which **partition key**, resolves that broker name to an AMQP endpoint through the
+  fail-open resolver, and publishes there with the key set as the AMQP `group-id` and an
+  application-property `saas_partition_key`. One sender is cached per `(broker, uri)`; your AMQP setup
+  is unchanged.
+- **Listener** (`dispatch.ListenerShim`): subscribes across every broker the rules can target
+  (`plan.Targets()`) and fans their deliveries into one channel, recovering each message's partition
+  key from the wire so the application sees a coherent per-key stream.
 
 Not round-robin: the same message always routes the same way, so guaranteed per-key ordering holds
-and the listener can reconstruct the stream. The rule engine (`solace_autoscale.dispatch`) is pure
-and unit-tested; a live-broker AMQP test proves the round trip.
+and the listener can reconstruct the stream. The rule engine is pure and unit-tested in Go, and a
+cross-language golden test keeps it byte-for-byte in step with the controller's Python engine
+(`solace_autoscale.dispatch`), which still reads and writes the same portable spec for
+`dispatch-test` and capacity planning.
 
 ### Rule shape
 
