@@ -54,6 +54,30 @@ class SempConfigClient:
             raise ConfigSyncError(f"SEMP config GET failed: {path}: {e}") from e
         return resp.json()
 
+    def _get_all(self, path: str) -> list[dict[str, Any]]:
+        """GET a SEMPv2 collection and follow ``meta.paging.nextPageUri`` to the end.
+
+        SEMPv2 caps a single response at the requested ``count`` and returns a cursor for the next
+        page. Reading only the first page silently under-reports large brokers, so both snapshot
+        reads page through every object. The page cap guards against a broker echoing a
+        self-referential cursor; it is never expected to trip in practice.
+        """
+        rows: list[dict[str, Any]] = []
+        # First request goes through the config-relative path; the cursor thereafter is absolute.
+        body = self._get(path)
+        for _ in range(10_000):
+            rows.extend(body.get("data", []))
+            next_uri = body.get("meta", {}).get("paging", {}).get("nextPageUri")
+            if not next_uri:
+                return rows
+            try:
+                resp = self._client.get(next_uri)
+                resp.raise_for_status()
+            except httpx.HTTPError as e:
+                raise ConfigSyncError(f"SEMP config GET failed (paging): {next_uri}: {e}") from e
+            body = resp.json()
+        raise ConfigSyncError(f"SEMP config paging exceeded page cap for {path}")
+
     def _write(self, verb: str, path: str, body: dict[str, Any]) -> None:
         method = {"create": "POST", "update": "PUT", "delete": "DELETE"}[verb]
         try:
@@ -86,7 +110,7 @@ class SempConfigClient:
             if kind not in kinds and not (kind == "queue" and want_subs):
                 continue
             coll = KIND_SPECS[kind]["collection"]
-            data = self._get(f"/msgVpns/{msg_vpn}/{coll}?count=100").get("data", [])
+            data = self._get_all(f"/msgVpns/{msg_vpn}/{coll}?count=100")
             for raw in data:
                 if kind == "queue":
                     queue_names.append(str(raw["queueName"]))
@@ -95,9 +119,9 @@ class SempConfigClient:
         # children (queue subscriptions) keyed under their queue
         if want_subs:
             for qname in queue_names:
-                data = self._get(
+                data = self._get_all(
                     f"/msgVpns/{msg_vpn}/queues/{qname}/subscriptions?count=100"
-                ).get("data", [])
+                )
                 for raw in data:
                     bc.add(normalise("queueSubscription", raw, parent=(qname,)))
         return bc

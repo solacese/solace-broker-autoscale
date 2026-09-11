@@ -42,6 +42,47 @@ def _handler_for(queues, subs_by_queue):
     return handler
 
 
+def test_snapshot_pages_through_all_objects():
+    """A collection larger than one page must be read in full via meta.paging.nextPageUri."""
+    page1 = [{"queueName": f"q{i}", "accessType": "exclusive"} for i in range(100)]
+    page2 = [{"queueName": f"q{i}", "accessType": "exclusive"} for i in range(100, 151)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/queues") and "cursor" not in request.url.query.decode():
+            return httpx.Response(200, json={
+                "data": page1,
+                "meta": {"paging": {"nextPageUri": "http://broker/SEMP/v2/config"
+                                    "/msgVpns/default/queues?count=100&cursor=PAGE2"}},
+            })
+        if path.endswith("/queues"):  # page 2 (cursor present), no further cursor
+            return httpx.Response(200, json=_collection(page2))
+        return httpx.Response(200, json=_collection([]))
+
+    client = _mk_client("b", handler)
+    snap = client.snapshot("default", ["queue"])
+    names = {o.identity[-1] for o in snap.of_kind("queue")}
+    assert len(names) == 151
+    assert "q0" in names and "q150" in names
+
+
+def test_snapshot_single_page_no_cursor():
+    """No nextPageUri → exactly one request, existing behaviour intact."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/queues"):
+            calls.append(str(request.url))
+            return httpx.Response(200, json=_collection(
+                [{"queueName": "only", "accessType": "exclusive"}]))
+        return httpx.Response(200, json=_collection([]))
+
+    client = _mk_client("b", handler)
+    snap = client.snapshot("default", ["queue"])
+    assert {o.identity[-1] for o in snap.of_kind("queue")} == {"only"}
+    assert len(calls) == 1
+
+
 def test_snapshot_fetches_queues_when_subscriptions_requested():
     client = _mk_client("b", _handler_for(["orders"], {"orders": ["a/>", "b/>"]}))
     snap = client.snapshot("default", ["queueSubscription"])
