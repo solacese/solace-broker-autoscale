@@ -210,13 +210,49 @@ class ListenerShim:
         self._receivers.clear()
 
 
+# ---- send retry (pure helper; no proton, no real sleep in tests) -----------------------------
+
+def _send_with_retry(
+    fn: Callable[[], None],
+    *,
+    attempts: int,
+    backoff: float,
+    sleep: Callable[[float], None],
+) -> None:
+    """Call ``fn`` up to ``attempts`` times, sleeping ``backoff * 2**n`` between tries.
+
+    Re-attempts the send on the *existing* connection only; it does not reconnect or fail over to
+    another broker (a larger change, out of scope). The last failure is re-raised as DispatchError so
+    callers see a single exception type.
+    """
+    last: Exception | None = None
+    for n in range(max(1, attempts)):
+        try:
+            fn()
+            return
+        except Exception as e:  # transient send failure; retry on the same connection
+            last = e
+            if n < attempts - 1:
+                sleep(backoff * (2 ** n))
+    raise DispatchError(f"send failed after {attempts} attempt(s): {last}") from last
+
+
 # ---- proton-backed transport (lazy import; keeps the AMQP setup we already had) --------------
 
 class _ProtonSender:
-    def __init__(self, uri: str, user: str | None, password: str | None) -> None:
+    def __init__(self, uri: str, user: str | None, password: str | None, *,
+                 max_retries: int = 3, backoff: float = 0.1,
+                 sleep: Callable[[float], None] | None = None) -> None:
         from proton.utils import BlockingConnection
         self._conn = BlockingConnection(uri, user=user, password=password, timeout=15)
         self._senders: dict[str, Any] = {}
+        self._max_retries = max_retries
+        self._backoff = backoff
+        if sleep is not None:
+            self._sleep = sleep
+        else:
+            import time
+            self._sleep = time.sleep
 
     def send(self, address: str, body: bytes | str, properties: dict[str, Any],
              group_id: str | None) -> None:
@@ -228,7 +264,10 @@ class _ProtonSender:
             msg.properties = dict(properties)
         if group_id:
             msg.group_id = group_id
-        self._senders[address].send(msg, timeout=10)
+        _send_with_retry(
+            lambda: self._senders[address].send(msg, timeout=10),
+            attempts=self._max_retries, backoff=self._backoff, sleep=self._sleep,
+        )
 
     def close(self) -> None:
         self._conn.close()

@@ -14,11 +14,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "adapters" / "python"))
 
+import pytest  # noqa: E402
 from solace_autoscale_client.dispatch import (  # noqa: E402
     PARTITION_KEY_PROPERTY,
+    DispatchError,
     ListenerShim,
     PublisherShim,
     ReceivedMessage,
+    _send_with_retry,
 )
 from solace_autoscale_client.resolver import Resolver  # noqa: E402
 
@@ -125,6 +128,34 @@ def test_publisher_separates_connections_by_endpoint():
                                            "amount": 5000}))                        # big
     assert set(made) == {"amqp://vip.local:5672", "amqp://big.local:5672"}
     assert len(made) == 2
+
+
+# ---- send retry ------------------------------------------------------------------------------
+
+def test_send_retries_then_succeeds():
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient")
+
+    _send_with_retry(fn, attempts=3, backoff=0.1, sleep=slept.append)
+    assert calls["n"] == 3
+    assert slept == [0.1, 0.2]  # backoff * 2**n between the two failures
+
+
+def test_send_gives_up_after_max():
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("always down")
+
+    with pytest.raises(DispatchError):
+        _send_with_retry(fn, attempts=3, backoff=0.1, sleep=lambda _s: None)
+    assert calls["n"] == 3
 
 
 # ---- listener side ---------------------------------------------------------------------------
