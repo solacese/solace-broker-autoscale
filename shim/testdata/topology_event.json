@@ -1,0 +1,56 @@
+{
+  "brokers": [
+    {
+      "broker_id": "broker-a",
+      "endpoints": {
+        "amqp": "amqp://broker-a:5672",
+        "smf": "tcp://broker-a:55555"
+      },
+      "state": "active"
+    },
+    {
+      "broker_id": "broker-b",
+      "endpoints": {
+        "amqp": "amqp://broker-b:5672",
+        "smf": "tcp://broker-b:55555"
+      },
+      "state": "active"
+    },
+    {
+      "broker_id": "broker-c",
+      "endpoints": {
+        "amqp": "amqp://broker-c:5672",
+        "smf": "tcp://broker-c:55555"
+      },
+      "state": "active"
+    },
+    {
+      "broker_id": "broker-d",
+      "endpoints": {
+        "amqp": "amqp://broker-d:5672",
+        "smf": "tcp://broker-d:55555"
+      },
+      "state": "active"
+    },
+    {
+      "broker_id": "broker-old",
+      "endpoints": {
+        "amqp": "amqp://broker-old:5672",
+        "smf": "tcp://broker-old:55555"
+      },
+      "state": "draining"
+    }
+  ],
+  "emitted_at": "2026-01-01T00:00:02Z",
+  "gen": 2,
+  "handoffs": [
+    {
+      "effective_gen": 2,
+      "from_broker": "broker-a",
+      "reason": "scale-up",
+      "to_broker": "broker-d"
+    }
+  ],
+  "shard": "orders",
+  "version": 1
+}

@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "default_broker": "broker-bulk",
+  "rules": [
+    {
+      "name": "vip-orders",
+      "when": {
+        "topic": "orders/>",
+        "payload": [
+          {
+            "op": "in",
+            "path": "priority",
+            "value": [
+              "high",
+              "urgent"
+            ]
+          }
+        ]
+      },
+      "route": {
+        "broker": "broker-vip",
+        "key": "vip.{region}",
+        "topic": "vip/{topic}"
+      }
+    },
+    {
+      "name": "large-orders",
+      "when": {
+        "topic": "orders/*/created",
+        "payload": [
+          {
+            "op": "gt",
+            "path": "amount",
+            "value": 1000
+          }
+        ]
+      },
+      "route": {
+        "broker": "broker-big",
+        "key": "big.{region}"
+      }
+    },
+    {
+      "name": "telemetry-raw",
+      "when": {
+        "topic": "telemetry/>",
+        "payload": [
+          {
+            "op": "raw_size_gt",
+            "value": 2048
+          }
+        ]
+      },
+      "route": {
+        "broker": "broker-bulk"
+      }
+    }
+  ]
+}

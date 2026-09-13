@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
+    # Python control plane lives under scaling-controller/.
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scaling-controller
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -21,11 +25,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Lint
-        run: ruff check src/ tests/ adapters/python/
+        run: ruff check solace_autoscale tests solace_autoscale_client
       - name: Type check
-        run: mypy src/solace_autoscale
+        run: mypy solace_autoscale
       - name: Test (unit only; integration needs a live broker)
         run: pytest -m "not integration" -q
+
+  shim:
+    # Native Go smart shim lives under shim/.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shim
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Format
+        # gofmt -l lists files that are not gofmt-clean; any output fails the job.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./...
 
   compile-synthetic-model:
     # §6: the compiler runs in CI. Here it recompiles the synthetic placeholder from its generator
@@ -38,7 +67,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e '.[dev]'
+        run: pip install -e './scaling-controller[dev]'
       - name: Regenerate synthetic model and check it is committed unchanged
         run: |
           python scripts/make_synthetic_model.py
@@ -54,6 +83,9 @@ jobs:
   integration:
     # Live-broker protocol integration tests (§9.3 gate). Runs a real Solace broker as a service.
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scaling-controller
     services:
       solace:
         image: solace/solace-pubsub-standard:latest
@@ -78,6 +110,7 @@ jobs:
       - name: Install (with integration protocol clients)
         run: pip install -e '.[dev,integration]'
       - name: Wait for broker SEMP + enable services
+        working-directory: .
         run: |
           for i in $(seq 1 60); do
             curl -s -u admin:admin http://localhost:8080/SEMP/v2/monitor/about/api | grep -q sempVersion && break
