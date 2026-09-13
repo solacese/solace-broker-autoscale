@@ -31,8 +31,11 @@ accept `30s`, `3m`, `45m`, `1h`, or a bare number (seconds). See `config.example
 | Key | Default | Meaning |
 |---|---|---|
 | `provider` | `solace-cloud` | Only value supported (ADR 0001). |
-| `service_class` | `enterprise-10k` | Key into the capacity model. |
+| `service_class` | `enterprise-10k` | Friendly label **or** a raw Mission Control `ServiceClassId` (e.g. `ENTERPRISE_10K_HIGHAVAILABILITY`). Validated at load; a typo fails loudly. Also the key into the capacity model. See [ADR 0010](adr/0010-mission-control-identifier-alignment.md). |
 | `min_brokers` / `max_brokers` | 1 / 8 | Clamp on the recommendation. |
+
+Friendly labels: `developer`, `enterprise-{250,1k,5k,10k,50k,100k,200k}`, and a `-ha` suffix for the
+high-availability variant (e.g. `enterprise-10k-ha`). Each resolves to a canonical `ServiceClassId`.
 
 ### `topology`
 `mode` (`sharded`\|`mesh`\|`hybrid`), `shard_key`, `shards[]` (`name`, `match`).
@@ -58,6 +61,14 @@ to decide on older data), `endpoint`, `static_path`.
 ### `actuation`
 `mode`, `dry_run`, `require_confirmation` (enforced - see the behavioural rule above),
 `max_ops_in_flight`, `max_ops_per_hour`, `kill_switch_file`. Defaults are maximally safe.
+
+### `cloud`
+Solace Cloud (Mission Control) connection. `region` (`us`\|`au`\|`eu`\|`sg`\|`us-static-ip`) picks the
+control-plane base URL; `base_url` overrides it explicitly when set; `datacenter_id` is the
+`datacenterId` required by createService; `idempotency_header` (default `Idempotency-Key`);
+`timeout`. **The API token is never in config** — it is read from the environment/secret store, so it
+can't leak into the hashed config or an audit record. See
+[ADR 0010](adr/0010-mission-control-identifier-alignment.md).
 
 ### `capacity`
 `model` - path to the compiled JSON.
