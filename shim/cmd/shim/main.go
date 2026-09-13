@@ -9,12 +9,18 @@
 //	    watch the shim route messages to different brokers and recover partition keys with nothing
 //	    installed.
 //
+//	shim demo --scale
+//	    Watch an event-driven, ordering-first scale-up: a topology snapshot pushed over the spine
+//	    moves a partition key to a new broker, held on its old broker until in-flight traffic drains
+//	    before cutover, so per-key order survives the reassignment.
+//
 // The route command is the fast way to check that a rule spec does what you think before wiring it
 // into an application. The demo is the fast way to see the shim behave end to end.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -23,6 +29,8 @@ import (
 
 	"github.com/solacese/solace-broker-autoscale/shim/dispatch"
 	"github.com/solacese/solace-broker-autoscale/shim/rules"
+	"github.com/solacese/solace-broker-autoscale/shim/spine"
+	"github.com/solacese/solace-broker-autoscale/shim/topology"
 	"github.com/solacese/solace-broker-autoscale/shim/transport/memory"
 )
 
@@ -58,8 +66,10 @@ Usage:
   shim route --spec FILE --topic TOPIC [--payload JSON]
       Print how one message routes under a portable rule spec.
 
-  shim demo
+  shim demo [--scale]
       Run an offline publish/subscribe round trip over the in-memory transport.
+      With --scale, demonstrate an event-driven, ordering-first scale-up: a topology
+      snapshot pushed over the spine moves a key, held on its old broker until it drains.
 
 Run "shim route -h" or "shim demo -h" for command flags.
 `)
@@ -132,8 +142,12 @@ type demoMsg struct {
 
 func runDemo(args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+	scale := fs.Bool("scale", false, "demonstrate an event-driven scale-up: a topology snapshot pushed over the spine moves a key, held on its old broker until it drains (ordering-first)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *scale {
+		return runScaleDemo()
 	}
 
 	plan, err := rules.LoadSpec([]byte(demoSpec))
@@ -202,6 +216,179 @@ func runDemo(args []string) error {
 	w.Flush()
 	return nil
 }
+
+// scaleSink is a minimal spine.TopologySink for the demo: it records the latest applied topology with
+// generation-win, exactly like the resolver. It also remembers the previous topology so the demo can
+// show the fencer the (prev, next) pair a handoff spans.
+type scaleSink struct {
+	prev, cur *topology.Topology
+}
+
+func (s *scaleSink) Apply(t *topology.Topology) bool {
+	if s.cur != nil && t.Gen() <= s.cur.Gen() {
+		return false
+	}
+	s.prev, s.cur = s.cur, t
+	return true
+}
+
+// runScaleDemo shows the ordering-first, event-driven reassignment path end to end with no broker:
+// a topology snapshot is PUSHED over the spine (not polled), it moves one partition key to a new
+// broker, and the fencer keeps that key on its old broker until in-flight traffic drains before
+// cutting over - so per-key order survives the scale-up.
+func runScaleDemo() error {
+	shard := "orders"
+	tport := memory.New()
+	sink := &scaleSink{}
+
+	sub := spine.NewSubscriber(tport, sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applied := make(chan int, 4)
+	sub.OnApply = func(_ string, gen int, ok bool) {
+		if ok {
+			applied <- gen
+		}
+	}
+	go func() { _ = sub.Run(ctx, "memory://spine", spine.WildcardTopologySource) }()
+
+	sender, err := tport.Sender(ctx, "memory://spine")
+	if err != nil {
+		return err
+	}
+
+	// Generation 1: three active brokers. Generation 2: a scale-up adds broker-d.
+	gen1 := scaleTopo(shard, 1, []string{"broker-a", "broker-b", "broker-c"}, nil)
+	// Push gen 1 and wait for it to be applied (the memory transport registers the receiver async).
+	if err := pushUntilApplied(ctx, sender, shard, gen1, applied, 1); err != nil {
+		return err
+	}
+
+	// Find a key that the scale-up will move, so the demo shows a real handoff.
+	gen2Preview := scaleTopo(shard, 2, []string{"broker-a", "broker-b", "broker-c", "broker-d"}, nil)
+	movedKey, from, to := firstMovedKey(gen1, gen2Preview)
+	gen2 := scaleTopo(shard, 2, []string{"broker-a", "broker-b", "broker-c", "broker-d"},
+		[]topology.Handoff{{FromBroker: from, ToBroker: to, EffectiveGen: 2, Reason: "scale-up"}})
+
+	fmt.Printf("shard %q, moved key %q: %s -> %s at gen 2\n\n", shard, movedKey, from, to)
+
+	// A deterministic clock so the demo is instantaneous and reproducible.
+	clk := &demoClock{t: time.Unix(1000, 0)}
+	grace := 30 * time.Second
+	fencer := spine.NewFencer(grace)
+	fencer.Now = clk.now
+	reorder := spine.NewReorderer(grace)
+	reorder.Now = clk.now
+
+	fmt.Println("PUBLISH-SIDE FENCE (drain-before-cutover)")
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "  when\troute-to\tstamp-gen\tdraining")
+
+	// While still at gen 1, the key routes to its current owner.
+	r, _ := fencer.Route(sink.prev, sink.cur, movedKey)
+	fmt.Fprintf(w, "  before scale (gen 1)\t%s\t%d\t%v\n", r.BrokerID, r.Gen, r.Draining)
+
+	// The scale event arrives over the spine: push gen 2 and observe the handoff it introduces.
+	if err := pushUntilApplied(ctx, sender, shard, gen2, applied, 2); err != nil {
+		w.Flush()
+		return err
+	}
+	fencer.Observe(sink.prev, sink.cur)
+
+	// Immediately after the event: within the grace window, the moved key still goes to the OLD broker.
+	r, _ = fencer.Route(sink.prev, sink.cur, movedKey)
+	fmt.Fprintf(w, "  event applied, in grace\t%s\t%d\t%v\n", r.BrokerID, r.Gen, r.Draining)
+
+	// After the grace window: cut over to the new owner, stamped at the new generation.
+	clk.t = clk.t.Add(grace + time.Second)
+	r, _ = fencer.Route(sink.prev, sink.cur, movedKey)
+	fmt.Fprintf(w, "  after grace (cutover)\t%s\t%d\t%v\n", r.BrokerID, r.Gen, r.Draining)
+	w.Flush()
+
+	// Listener side: the pre-cutover (gen 1) messages and the post-cutover (gen 2) message for the
+	// moved key arrive, possibly out of order. The reorderer releases them in (gen, seq) order and
+	// never lets the gen-2 message overtake the still-draining gen-1 stream.
+	clk.t = time.Unix(1000, 0) // reset the clock for the listener timeline
+	fmt.Println("\nLISTEN-SIDE REORDER (per-key generation order)")
+	var released []spine.FencedMessage
+	released = append(released, reorder.Admit(spine.FencedMessage{Key: movedKey, Gen: 1, Seq: 1})...)
+	released = append(released, reorder.Admit(spine.FencedMessage{Key: movedKey, Gen: 1, Seq: 2})...)
+	// The new broker is faster: its gen-2 message arrives before gen-1 has drained. It is held.
+	released = append(released, reorder.Admit(spine.FencedMessage{Key: movedKey, Gen: 2, Seq: 3})...)
+	fmt.Printf("  released before hold elapses: %d (gen-2 is held behind draining gen-1)\n", len(released))
+	clk.t = clk.t.Add(grace + time.Second)
+	released = append(released, reorder.Tick()...)
+
+	w = tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "  order\tkey\tgen\tseq")
+	for i, m := range released {
+		fmt.Fprintf(w, "  %d\t%s\t%d\t%d\n", i+1, m.Key, m.Gen, m.Seq)
+	}
+	w.Flush()
+	fmt.Println("\nper-key order preserved across the scale-up: gen-1 messages precede gen-2.")
+	return nil
+}
+
+func scaleTopo(shard string, gen int, active []string, handoffs []topology.Handoff) *topology.Topology {
+	brokers := make([]topology.BrokerRef, 0, len(active))
+	for _, id := range active {
+		brokers = append(brokers, topology.BrokerRef{
+			BrokerID:  id,
+			State:     topology.StateActive,
+			Endpoints: map[string]string{"amqp": "amqp://" + id + ":5672"},
+		})
+	}
+	return &topology.Topology{
+		Version:    topology.Version,
+		Shard:      shard,
+		Generation: gen,
+		EmittedAt:  time.Unix(1000, int64(gen)).UTC().Format(time.RFC3339),
+		Brokers:    brokers,
+		Handoffs:   handoffs,
+	}
+}
+
+func firstMovedKey(prev, next *topology.Topology) (key, from, to string) {
+	for i := 0; i < 5000; i++ {
+		k := fmt.Sprintf("key-%d", i)
+		po, ok1 := prev.Owner(k)
+		no, ok2 := next.Owner(k)
+		if ok1 && ok2 && po != no {
+			return k, po, no
+		}
+	}
+	return "", "", ""
+}
+
+// pushUntilApplied republishes a last-value topology snapshot until the subscriber applies the wanted
+// generation, tolerating the memory transport's asynchronous receiver registration.
+func pushUntilApplied(ctx context.Context, sender dispatch.Sender, shard string, t *topology.Topology, applied <-chan int, want int) error {
+	body, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	msg := dispatch.Message{Address: spine.ControlSource(shard), Body: body}
+	deadline := time.After(2 * time.Second)
+	for {
+		if err := sender.Send(ctx, msg); err != nil {
+			return err
+		}
+		select {
+		case gen := <-applied:
+			if gen >= want {
+				return nil
+			}
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for gen %d to be applied", want)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+type demoClock struct{ t time.Time }
+
+func (c *demoClock) now() time.Time { return c.t }
 
 func orNone(s string) string {
 	if s == "" {
