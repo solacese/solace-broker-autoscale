@@ -39,6 +39,12 @@ class FakeCloud:
         self.calls.append(("spool", (service_id, size_gb, idempotency_key)))
         return "op-spool-1"
 
+    def get_service(self, service_id):
+        return {"data": {"creationState": "COMPLETED", "adminState": "START"}}
+
+    def get_service_operation(self, service_id, operation_id):
+        return {"data": {"status": "SUCCEEDED"}}
+
     def get_operation(self, operation_id):
         return {"data": {"status": "SUCCEEDED"}}
 
