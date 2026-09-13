@@ -70,6 +70,14 @@ actuation:
   max_ops_per_hour: 4
   kill_switch_file: /var/run/solace-autoscale.halt
 
+cloud:
+  region: us               # us | au | eu | sg | us-static-ip  (picks the Mission Control base URL)
+  # base_url: https://api.solace.cloud   # explicit override; wins over region when set
+  # datacenter_id: aws-us-east-1a        # required datacenterId for createService
+  idempotency_header: Idempotency-Key
+  timeout: 30s
+  # API token is read from the environment/secret store, never from this file.
+
 capacity:
   model: models/synthetic-v0.json
 

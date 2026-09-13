@@ -54,6 +54,45 @@ def test_max_below_min_rejected():
         Config.model_validate({"fleet": {"min_brokers": 5, "max_brokers": 2}})
 
 
+def test_service_class_accepts_label_and_resolves():
+    from solace_autoscale.cloud import ServiceClassId
+    cfg = Config.model_validate({"fleet": {"service_class": "enterprise-10k-ha"}})
+    assert cfg.fleet.service_class == "enterprise-10k-ha"  # stored label unchanged
+    assert cfg.fleet.service_class_id is ServiceClassId.ENTERPRISE_10K_HIGHAVAILABILITY
+
+
+def test_service_class_accepts_raw_id():
+    from solace_autoscale.cloud import ServiceClassId
+    cfg = Config.model_validate({"fleet": {"service_class": "ENTERPRISE_5K_STANDALONE"}})
+    assert cfg.fleet.service_class_id is ServiceClassId.ENTERPRISE_5K_STANDALONE
+
+
+def test_service_class_typo_rejected():
+    with pytest.raises(ValidationError):
+        Config.model_validate({"fleet": {"service_class": "enterprise-9k"}})
+
+
+def test_cloud_region_resolves_base_url():
+    from solace_autoscale.cloud import Region
+    cfg = Config.model_validate({"cloud": {"region": "eu"}})
+    assert cfg.cloud.region is Region.EU
+    assert cfg.cloud.effective_base_url() == "https://api.solacecloud.eu"
+
+
+def test_cloud_base_url_overrides_region():
+    cfg = Config.model_validate({
+        "cloud": {"region": "eu", "base_url": "https://api.solace.cloud/"},
+    })
+    # explicit base_url wins over region, trailing slash trimmed
+    assert cfg.cloud.effective_base_url() == "https://api.solace.cloud"
+
+
+def test_cloud_defaults_to_us():
+    cfg = Config()
+    assert cfg.cloud.effective_base_url() == "https://api.solace.cloud"
+    assert cfg.cloud.timeout == pytest.approx(30.0)
+
+
 def test_config_hash_stable_and_sensitive():
     a = Config()
     b = Config()

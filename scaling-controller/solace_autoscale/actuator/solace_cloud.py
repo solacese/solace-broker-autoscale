@@ -16,9 +16,12 @@ poll. Every call carries an idempotency key header so a retry after a timeout ca
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 DEFAULT_BASE = "https://api.solace.cloud"
 
@@ -32,6 +35,17 @@ class SolaceCloudClient:
             headers={"Authorization": f"Bearer {api_token}",
                      "Content-Type": "application/json"},
             timeout=timeout,
+        )
+
+    @classmethod
+    def from_config(cls, config: Config, api_token: str) -> SolaceCloudClient:
+        """Build a client from ``cloud:`` config. The token stays out of config (env/secret)."""
+        c = config.cloud
+        return cls(
+            api_token,
+            base_url=c.effective_base_url(),
+            idempotency_header=c.idempotency_header,
+            timeout=c.timeout,
         )
 
     def _post(self, path: str, body: dict[str, Any], idem: str) -> dict[str, Any]:
