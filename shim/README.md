@@ -91,12 +91,14 @@ for d := range deliveries {
 | Package             | What it does                                                                 |
 | ------------------- | ---------------------------------------------------------------------------- |
 | `rules`             | The rule engine and the portable spec loader (`LoadSpec`). No I/O.           |
-| `resolve`           | Fail-open resolver: caches assignments, serves the last good one if the      |
-|                     | assignment service is unreachable.                                           |
+| `topology`          | Parses topology snapshots and answers key ownership (rendezvous). No I/O.    |
+| `spine`             | Consumes control events (`Subscriber`) and the ordering-first cutover        |
+|                     | machinery (`Fencer`, `Reorderer`). Pure but for an injected clock.           |
+| `resolve`           | Fail-open resolver: events-primary, HTTP/cache cold-start and fallback.      |
 | `dispatch`          | The data path: `PublisherShim`, `ListenerShim`, and the `Transport` seam.    |
 | `transport/amqp`    | Real AMQP 1.0 transport (github.com/Azure/go-amqp).                          |
 | `transport/memory`  | In-memory transport so the whole shim runs and tests offline.                |
-| `cmd/shim`          | The `route` and `demo` CLI.                                                  |
+| `cmd/shim`          | The `route` and `demo` (`--scale`) CLI.                                      |
 
 ## Cross-language interop
 

@@ -356,7 +356,7 @@
     </p>
     <figure class="flow-fig">
       <canvas id="flow" class="flow" width="960" height="400"
-              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses a normal AMQP client. An autoscaler on the left continuously reads message rate and size from the brokers over SEMP; when they rise past one broker's limit it signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load."></canvas>
+              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses a normal AMQP client. An autoscaler on the left continuously reads message rate and size from the brokers over SEMP; when they rise past one broker's limit it signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load. The autoscaler then publishes a topology event on the brokers' own control topics; the shim reacts to the push and moves a small fraction of partition keys to the new broker ordering-first, draining each key on its old broker before cutting over, so per-key order survives the scale event."></canvas>
       <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
     </figure>
     <div class="cta-row">
@@ -466,6 +466,14 @@
       listener side runs the same rules in reverse to demultiplex a coherent per-key stream, so routing
       is deterministic and verifiable end to end. Type a message below and watch a rule fire.
     </p>
+    <p class="lede">
+      When the fleet scales, the shim does not poll to find out. The autoscaler publishes a topology
+      snapshot as an <b>event</b> on the brokers' own reserved control topics, and the shim reacts to
+      the push. A scale-up moves only a small fraction of partition keys (rendezvous hashing), and each
+      moved key is reassigned <b>ordering-first</b>: it keeps draining on its old broker until in-flight
+      messages clear, then cuts over to the new owner, stamped with a generation (<code>saas_gen</code>)
+      so the listener releases the key's stream in order. Per-key order survives the scale event.
+    </p>
 
     <div class="shim-demo">
       <div class="shim-input card">
@@ -491,6 +499,7 @@
           <div class="wire-row"><span class="wire-k">address</span><span class="wire-v" id="wAddr">&mdash;</span></div>
           <div class="wire-row"><span class="wire-k">partition key</span><span class="wire-v" id="wKey">&mdash;</span></div>
           <div class="wire-row"><span class="wire-k">amqp group-id</span><span class="wire-v" id="wGid">&mdash;</span></div>
+          <div class="wire-row"><span class="wire-k">saas_gen</span><span class="wire-v" id="wGen">&mdash;</span></div>
         </div>
         <p class="shim-note" id="shimNote"></p>
       </div>
@@ -1208,6 +1217,9 @@ solace-autoscale whatif --config config.example.yaml --metrics metrics.json --mu
       keyEl.textContent = d.key || "(none)";
       keyEl.className = d.key ? "wire-v key" : "wire-v";
       gidEl.textContent = d.key || "(none)";
+      // The generation the message is published under: the current topology generation the shim last
+      // applied from the event spine. Fixed here (no live fleet in the demo) to show the wire shape.
+      $("wGen").textContent = d.key ? "7" : "(none)";
       if (!note.classList.contains("err") || obj !== null) {
         if (d.matched) {
           note.textContent = "Same message, same route, every time. The listener side re-runs these rules to demux the "

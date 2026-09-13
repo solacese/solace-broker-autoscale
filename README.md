@@ -120,6 +120,7 @@ transport.
 - [`guide/metrics.md`](guide/metrics.md) - where the numbers come from
 - [`guide/rule-spec.md`](guide/rule-spec.md) - the portable dispatch rule spec (Python and Go)
 - [`guide/client-integration.md`](guide/client-integration.md) - connecting clients
+- [`guide/event-spine.md`](guide/event-spine.md) - event-driven, ordering-first reassignment
 - [`guide/safety.md`](guide/safety.md) - the safety controls
 - [`guide/adr/`](guide/adr/) - the design decisions and the reasons for them
 

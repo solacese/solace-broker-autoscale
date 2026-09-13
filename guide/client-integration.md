@@ -88,9 +88,14 @@ adapter as for MQTT 3.1.1. This is an **open question** to confirm on your targe
   2. **SAN** entries per broker hostname.
   The integration tests use plaintext ports for simplicity; production uses the TLS ports in the
   endpoint map.
-- **Failure behaviour - never fail closed.** When the assignment service is unreachable, the
-  resolver returns the **cached** assignment. The assignment service being down must not take an
-  application down. Only when there is no cache AND the service is down does the resolver error.
+- **Events are primary; HTTP is cold-start and fallback.** The shim learns topology from the **event
+  spine** ([event-spine.md](event-spine.md), ADR 0009): a topology snapshot pushed over the product's
+  own brokers, applied on receipt, events winning by generation. `GET /assignment` and `GET /topology`
+  are demoted to seeding the cache on boot and covering a silent bus - not the primary path.
+- **Failure behaviour - never fail closed.** When the bus is quiet the shim serves its **last applied
+  snapshot**; when the assignment service is unreachable the resolver returns the **cached**
+  assignment. Neither the bus nor the service being down takes an application down. Only a cold boot
+  with no cache AND an unreachable resolver is an error.
 - **Guaranteed consumers are never silently reassigned.** Reassignment signals apply to direct-mode
   clients and publishers only.
 
@@ -119,6 +124,11 @@ and the listener can reconstruct the stream. The rule engine is pure and unit-te
 cross-language golden test keeps it byte-for-byte in step with the controller's Python engine
 (`solace_autoscale.dispatch`), which still reads and writes the same portable spec for
 `dispatch-test` and capacity planning.
+
+The shim learns which broker owns a key from the **event spine**, and a scale event that moves a key
+is applied **ordering-first**: the key drains on its old broker before any message crosses to the new
+one, stamped with a generation (`saas_gen`) so the listener releases the key's stream in order. See
+[event-spine.md](event-spine.md).
 
 ### Rule shape
 

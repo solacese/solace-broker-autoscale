@@ -109,8 +109,21 @@ Any adapter, in any language, must produce the same decision the reference engin
 | `raw_prefix` | undecoded payload bytes start with `value` |
 
 A missing field is a non-match for every operator except `missing`. A type mismatch (for example
-`gt` against a string) evaluates to *false* — a rule that does not apply, not an error. Integer
+`gt` against a string) evaluates to *false* - a rule that does not apply, not an error. Integer
 predicate values keep their exact value on both engines (Go decodes JSON numbers with `UseNumber`).
+
+## Wire properties
+
+When the shim publishes a decided message it stamps two application properties, both also readable by
+the listener to demultiplex and order per-key streams:
+
+| Property | Meaning |
+|---|---|
+| `saas_partition_key` | the resolved `route.key`, also set as the AMQP `group-id`. The same message always carries the same key, so a key's stream stays on one broker and stays ordered. |
+| `saas_gen` | the topology **generation** the message was published under (see [event-spine.md](event-spine.md)). It lets the listener fence on generation across a reassignment without decoding the body: a post-cutover message for a key is held until the pre-cutover stream drains. |
+
+The generation is the same monotonic per-shard counter the event spine stamps on topology snapshots,
+so a data message and the control event that moved its key agree on ordering.
 
 ## Why a spec, not one engine
 

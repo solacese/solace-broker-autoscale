@@ -26,3 +26,6 @@ client message.
   owning the data path. This is the correct trade for a messaging system.
 - Guaranteed consumers get sticky/durable placement because their queue lives on one broker; the
   control plane records that placement rather than routing around it.
+- [ADR 0009](0009-event-spine-ordering-first-reassignment.md) later lets control *events* ride the
+  product's own brokers on a reserved topic tree. That is consistent with this decision: the spine
+  carries control (topology snapshots), never a client message, and the data path stays direct.

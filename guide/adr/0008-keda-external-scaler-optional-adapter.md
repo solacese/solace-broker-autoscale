@@ -53,3 +53,7 @@ The valuable part to record is *why* the adapter cannot be the core:
 - ADR 0001's "Solace Cloud managed services only" still holds for the *actuator*: the adapter drives
   the same Cloud-API actuator through the same safety gate, it does not add a self-managed broker
   lifecycle.
+- The reassignment that a scale decision triggers is delivered as an event, not a poll, and is
+  ordering-first: see [ADR 0009](0009-event-spine-ordering-first-reassignment.md). An adapter that
+  flattens the report to a replica count still relies on the same spine to move keys safely underneath
+  the pods it scales.
