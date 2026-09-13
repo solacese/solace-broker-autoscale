@@ -4,7 +4,9 @@ Endpoints (verified against the Mission Control OpenAPI, version 2.0.0):
   POST   /api/v2/missionControl/eventBrokerServices                     createService  → 202 Operation
   DELETE /api/v2/missionControl/eventBrokerServices/{id}                deleteService  → 202 Operation
   PATCH  /api/v2/missionControl/eventBrokerServices/{serviceId}/messageSpool  updateMessageSpool
-  GET    /api/v2/missionControl/eventBrokerServices/{serviceId}/operations/{operationId}
+  GET    /api/v2/missionControl/eventBrokerServices/{id}                getService
+  GET    /api/v2/missionControl/eventBrokerServices/{serviceId}/operations/{operationId}  (preferred)
+  GET    /api/v2/missionControl/eventBrokerServices/multiResourceOperations/{operationId}  (id-only)
   GET    /api/v2/missionControl/eventBrokerServices/{serviceId}/brokerState
   GET    /api/v2/missionControl/.../broker/SEMP/v2/monitor/...          (queue state for pre-delete)
 
@@ -16,9 +18,14 @@ poll. Every call carries an idempotency key header so a retry after a timeout ca
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+from ..cloud import OperationStatus
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 DEFAULT_BASE = "https://api.solace.cloud"
 
@@ -32,6 +39,17 @@ class SolaceCloudClient:
             headers={"Authorization": f"Bearer {api_token}",
                      "Content-Type": "application/json"},
             timeout=timeout,
+        )
+
+    @classmethod
+    def from_config(cls, config: Config, api_token: str) -> SolaceCloudClient:
+        """Build a client from ``cloud:`` config. The token stays out of config (env/secret)."""
+        c = config.cloud
+        return cls(
+            api_token,
+            base_url=c.effective_base_url(),
+            idempotency_header=c.idempotency_header,
+            timeout=c.timeout,
         )
 
     def _post(self, path: str, body: dict[str, Any], idem: str) -> dict[str, Any]:
@@ -75,13 +93,48 @@ class SolaceCloudClient:
         )
         return str(resp.get("data", {}).get("id", ""))
 
+    def get_service(self, service_id: str) -> dict[str, Any]:
+        """GET the full Service (getService).
+
+        Returns the Service record: ``serviceClassId``, ``creationState`` (see
+        ``ServiceCreationState``), ``adminState`` (``ServiceAdminState``), ``msgVpnName``,
+        ``serviceConnectionEndpoints`` (hosts/ports/protocols), ``messageSpoolDetails``, and
+        ``ongoingOperationIds``. This is the spec-first way to read endpoints and lifecycle state.
+        """
+        return self._get(f"/api/v2/missionControl/eventBrokerServices/{service_id}")
+
+    def get_service_operation(self, service_id: str, operation_id: str) -> dict[str, Any]:
+        """GET a service-scoped operation (spec's first-documented operation path).
+
+        Prefer this when the serviceId is known (create/delete/update all target a known service);
+        ``status`` is one of ``OperationStatus``. Use ``get_operation`` only when just the op id is
+        available.
+        """
+        return self._get(
+            f"/api/v2/missionControl/eventBrokerServices/{service_id}/operations/{operation_id}"
+        )
+
     def get_operation(self, operation_id: str) -> dict[str, Any]:
-        # The service-scoped operation path needs the serviceId; callers that only have the op id can
-        # use the multi-resource operation endpoint. We use the documented service operation path via
-        # the operation record's resourceId when available.
+        """GET an operation by id alone, via the multi-resource operation endpoint.
+
+        This is the id-only fallback for callers that do not have the serviceId. When the serviceId
+        is known, ``get_service_operation`` is the more specific path. ``status`` is one of
+        ``OperationStatus``.
+        """
         return self._get(
             f"/api/v2/missionControl/eventBrokerServices/multiResourceOperations/{operation_id}"
         )
+
+    @staticmethod
+    def operation_status(operation_response: dict[str, Any]) -> OperationStatus:
+        """Parse ``data.status`` of an Operation/MultiResourceOperation into the typed enum.
+
+        Callers compare against ``OperationStatus.SUCCEEDED`` / ``.is_terminal()`` rather than a
+        bare string. Raises ``ValueError`` (via the enum) on an unexpected value, surfacing a
+        spec drift instead of silently treating it as not-done.
+        """
+        raw = str(operation_response.get("data", {}).get("status", ""))
+        return OperationStatus(raw)
 
     def get_broker_state(self, service_id: str) -> dict[str, Any]:
         return self._get(

@@ -17,6 +17,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .cloud import Region, ServiceClassId, resolve_service_class
+from .cloud.enums import base_url_for
+
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -43,9 +46,25 @@ class _Base(BaseModel):
 
 class FleetConfig(_Base):
     provider: Literal["solace-cloud"] = "solace-cloud"
+    #: Friendly label (e.g. ``enterprise-10k``, ``enterprise-10k-ha``) or a raw Mission Control
+    #: ServiceClassId (e.g. ``ENTERPRISE_10K_HIGHAVAILABILITY``). Validated at load; a typo fails
+    #: loudly. Read ``service_class_id`` for the canonical ServiceClassId to send to the API.
     service_class: str = "enterprise-10k"
     min_brokers: int = Field(default=1, ge=1)
     max_brokers: int = Field(default=8, ge=1)
+
+    @field_validator("service_class")
+    @classmethod
+    def _known_service_class(cls, v: str) -> str:
+        # Resolve for validation only; keep the operator's original label as the stored value so
+        # existing config and cost tables keyed by the label keep working.
+        resolve_service_class(v)
+        return v
+
+    @property
+    def service_class_id(self) -> ServiceClassId:
+        """The canonical Mission Control ServiceClassId this fleet provisions."""
+        return resolve_service_class(self.service_class)
 
     @model_validator(mode="after")
     def _check(self) -> FleetConfig:
@@ -220,6 +239,31 @@ class ActuationConfig(_Base):
     kill_switch_file: str = "/var/run/solace-autoscale.halt"
 
 
+class CloudConfig(_Base):
+    """Solace Cloud (Mission Control) connection settings.
+
+    The API token is NEVER stored here - it is read from the environment/secret store by the
+    caller, so it can't leak into the hashed config or an audit record. ``region`` picks the
+    control-plane base URL; ``base_url`` overrides it explicitly when set (e.g. a private control
+    plane). ``datacenter_id`` is the required ``datacenterId`` for createService.
+    """
+
+    region: Region = Region.US
+    base_url: str | None = None
+    datacenter_id: str | None = None
+    idempotency_header: str = "Idempotency-Key"
+    timeout: float = Field(default=30.0)
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _timeout(cls, v: Any) -> float:
+        return parse_duration(v)
+
+    def effective_base_url(self) -> str:
+        """The API base URL to use: explicit ``base_url`` if set, else the region's base."""
+        return self.base_url.rstrip("/") if self.base_url else base_url_for(self.region)
+
+
 class CapacityConfigBlock(_Base):
     model: str = "models/synthetic-v0.json"
 
@@ -241,6 +285,7 @@ class Config(_Base):
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     billing: BillingConfig = Field(default_factory=BillingConfig)
     actuation: ActuationConfig = Field(default_factory=ActuationConfig)
+    cloud: CloudConfig = Field(default_factory=CloudConfig)
     capacity: CapacityConfigBlock = Field(default_factory=CapacityConfigBlock)
     accuracy: AccuracyConfig = Field(default_factory=AccuracyConfig)
 
