@@ -3,6 +3,13 @@
 GET /assignment?shard=&client_id=&protocol=&mode=direct|guaranteed
   → per-protocol endpoint map (not a single host/port), broker_id, msg_vpn, state, lease_seconds.
 
+GET /topology?shard=
+  → the current topology snapshot for a shard, in the exact wire form the event spine publishes
+    (ADR 0009). This is the shim's COLD-START fallback: on boot, or if the bus is unreachable, the
+    shim fetches the snapshot once here, then live spine events take over and win by generation.
+    Because the service is stateless over the store and does not own the generation counter, the
+    cold snapshot carries gen 0 - a floor that any real spine event (gen >= 1) supersedes.
+
 Never vends credentials - returns a location only. Health + readiness endpoints. The service is
 stateless; all durable state is in the store, so it survives restart and horizontal replication
 (with optimistic locking on placement writes).
@@ -21,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Query
 from ..config import load_config
 from .placement import NoBrokerAvailable, assign
 from .store import AssignmentStore, BrokerState
+from .topology import COLD_START_GEN, BrokerRef, ShardTopology
 
 DEFAULT_LEASE_SECONDS = 300
 
@@ -82,6 +90,23 @@ def create_app(store: AssignmentStore, *, clock: Callable[[], float] = _now,
             "endpoints": endpoints,
         }
         return body
+
+    @app.get("/topology")  # type: ignore[untyped-decorator, unused-ignore]
+    def topology(shard: str = Query(...)) -> dict:
+        """Cold-start snapshot for a shard, in the spine's wire form (ADR 0009).
+
+        Carries gen 0 (COLD_START_GEN): a floor the live event spine supersedes. Includes every
+        broker on the shard with its state, so the shim can compute ownership (ACTIVE brokers only)
+        exactly as it would from a spine event. No handoffs - the service does not track in-flight
+        cutovers; those come only from the generation-owning spine.
+        """
+        brokers = store.brokers_for_shard(shard)
+        topo = ShardTopology(
+            shard=shard,
+            gen=COLD_START_GEN,
+            brokers=tuple(BrokerRef.from_broker(b) for b in brokers),
+        )
+        return topo.to_event(emitted_at=datetime.fromtimestamp(clock(), UTC).isoformat())
 
     return app
 

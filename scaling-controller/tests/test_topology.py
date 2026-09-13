@@ -121,3 +121,35 @@ def test_from_event_rejects_unknown_version():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected ValueError for unknown version")
+
+
+def test_interop_golden_topology_event_matches_committed_file():
+    """The Go shim parses shim/testdata/topology_event.json; assert Python still emits exactly it.
+
+    Same cross-language contract as the dispatch rule-spec golden: the Python model writes the wire
+    form and the Go topology package reads it, so both sides route identically. Regenerate the file
+    from to_event if this fails.
+    """
+    import json
+    from pathlib import Path
+
+    golden = Path(__file__).resolve().parents[2] / "shim" / "testdata" / "topology_event.json"
+
+    def ref(bid: str, state: BrokerState = BrokerState.ACTIVE) -> BrokerRef:
+        return BrokerRef(
+            broker_id=bid, state=state,
+            endpoints={"amqp": f"amqp://{bid}:5672", "smf": f"tcp://{bid}:55555"},
+        )
+
+    topo = ShardTopology(
+        shard="orders", gen=2,
+        brokers=(ref("broker-a"), ref("broker-b"), ref("broker-c"), ref("broker-d"),
+                 ref("broker-old", BrokerState.DRAINING)),
+        handoffs=(Handoff("broker-a", "broker-d", 2, "scale-up"),),
+    )
+    expected = topo.to_event(emitted_at="2026-01-01T00:00:02Z")
+    on_disk = json.loads(golden.read_text())
+    assert on_disk == expected, (
+        "shim/testdata/topology_event.json is stale; regenerate it from to_event so the Go "
+        "cross-language golden test stays valid"
+    )

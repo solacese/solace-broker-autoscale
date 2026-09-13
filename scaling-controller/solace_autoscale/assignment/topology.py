@@ -34,6 +34,11 @@ GENERATION_PROPERTY = "saas_gen"
 #: Topology event schema version. Bump when the event shape changes in a way consumers must gate on.
 TOPOLOGY_VERSION = 1
 
+#: Generation for a cold-start snapshot served by the stateless assignment service (GET /topology).
+#: It is a floor: any real spine event carries gen >= 1 and supersedes it, so the shim always
+#: converges on the generation-owning spine once live events arrive.
+COLD_START_GEN = 0
+
 #: A broker takes NEW keyed traffic only in this state (mirrors _ASSIGNABLE_STATES in the store).
 _OWNABLE_STATES = {BrokerState.ACTIVE}
 

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/solacese/solace-broker-autoscale/shim/topology"
 )
 
 // Assignment is where a shard currently lives.
@@ -55,6 +57,8 @@ type Resolver struct {
 
 	mu    sync.Mutex
 	cache map[cacheKey]Assignment
+	//: per-shard live topology applied from the event spine; events win over HTTP by generation.
+	topo map[string]*topology.Topology
 }
 
 type cacheKey struct{ shard, client, mode string }
@@ -99,6 +103,98 @@ func (r *Resolver) Resolve(ctx context.Context, shard, client, mode, protocol st
 		return cached, nil // fail open
 	}
 	return Assignment{}, fmt.Errorf("assignment service unreachable and no cached assignment for %v: %w", key, err)
+}
+
+// Apply installs a topology snapshot from the event spine. Events win by generation: a snapshot is
+// applied only if its generation is strictly greater than the one already held for the shard, so a
+// late or duplicate event is harmless and can never regress the resolver. Returns true if applied.
+//
+// This is how the resolver becomes events-primary: once a spine event lands, ResolveKey answers from
+// the applied topology with no network call. Apply is safe to call from the spine subscriber
+// goroutine concurrently with ResolveKey.
+func (r *Resolver) Apply(t *topology.Topology) bool {
+	if t == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.topo == nil {
+		r.topo = map[string]*topology.Topology{}
+	}
+	if cur, ok := r.topo[t.Shard]; ok && t.Gen() <= cur.Gen() {
+		return false // do not regress: an equal or older generation is ignored
+	}
+	r.topo[t.Shard] = t
+	return true
+}
+
+// KeyLocation is where a partition key currently lives: the owning broker and its endpoint for the
+// requested protocol, plus the generation the answer was fenced at (so a publisher can stamp saas_gen
+// and a handoff can be respected).
+type KeyLocation struct {
+	BrokerID string
+	Endpoint string
+	Protocol string
+	Gen      int
+	Shard    string
+}
+
+// ResolveKey maps (shard, partition key) to its owning broker, events-primary: it answers from the
+// applied topology when one is present, and only cold-starts over HTTP (GET /topology) when the shard
+// has no applied topology yet. After a cold start the snapshot is cached like a spine event (at its
+// generation), so live events supersede it. Fail-open: if HTTP is unreachable and a topology is
+// cached, that cached topology is used; only a cold shard with no cache errors.
+func (r *Resolver) ResolveKey(ctx context.Context, shard, key, protocol string) (KeyLocation, error) {
+	if protocol == "" {
+		protocol = "amqp"
+	}
+	if t, ok := r.topology(shard); ok {
+		return r.locate(t, shard, key, protocol)
+	}
+
+	// Cold start: fetch the shard snapshot once, apply it, then locate.
+	body, err := r.fetchTopology(ctx, shard)
+	if err == nil {
+		if t, lerr := topology.LoadTopology(body); lerr == nil {
+			r.Apply(t)
+			return r.locate(t, shard, key, protocol)
+		} else {
+			err = fmt.Errorf("decode topology: %w", lerr)
+		}
+	}
+	if t, ok := r.topology(shard); ok {
+		return r.locate(t, shard, key, protocol) // fail open to whatever we have
+	}
+	return KeyLocation{}, fmt.Errorf("no topology for shard %q and cold-start fetch failed: %w", shard, err)
+}
+
+func (r *Resolver) locate(t *topology.Topology, shard, key, protocol string) (KeyLocation, error) {
+	owner, ok := t.Owner(key)
+	if !ok {
+		return KeyLocation{}, fmt.Errorf("no ownable broker for shard %q key %q at gen %d", shard, key, t.Gen())
+	}
+	endpoint, err := t.EndpointFor(owner, protocol)
+	if err != nil {
+		return KeyLocation{}, err
+	}
+	return KeyLocation{BrokerID: owner, Endpoint: endpoint, Protocol: protocol, Gen: t.Gen(), Shard: shard}, nil
+}
+
+func (r *Resolver) topology(shard string) (*topology.Topology, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.topo[shard]
+	return t, ok
+}
+
+func (r *Resolver) fetchTopology(ctx context.Context, shard string) ([]byte, error) {
+	q := url.Values{}
+	q.Set("shard", shard)
+	full := strings.TrimRight(r.BaseURL, "/") + "/topology?" + q.Encode()
+	if r.Fetch != nil {
+		return r.Fetch(ctx, full)
+	}
+	return defaultFetch(ctx, full, r.Timeout)
 }
 
 func (r *Resolver) fetch(ctx context.Context, shard, client, mode, protocol string) ([]byte, error) {
