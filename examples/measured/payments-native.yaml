@@ -1,0 +1,81 @@
+# Opt-in runnable controller configuration: edit inventory and compile the matching model first.
+fleet:
+  service_class: enterprise-1k
+  min_brokers: 1
+  max_brokers: 8 # Active + warm Cloud services per shard.
+capacity:
+  model: models/aws-10.8.1.241.json
+  scenario: worst
+  fanout: 1
+  message_size_hint: 1024
+workload:
+  delivery: guaranteed
+metrics:
+  source: semp
+  scrape_interval: 10s
+  staleness_limit: 30s
+assignment:
+  store: ./native-assignment.db
+  routing: partitioned
+  strategy: rendezvous
+  partitions: 128
+  lease_seconds: 30
+  broker_weights: {}
+automation:
+  enabled: true
+  fleet_id: payments
+  poll_interval: 10s
+  trigger_utilization: 0.80
+  target_utilization: 0.65
+  migration_grace: 30s
+  empty_settle: 10s
+  migration_timeout: 15m
+  max_parallel_migrations: 1
+  max_migrations_per_hour: 12
+  min_target_consumers: 1
+  queue_spool_mb: 1000
+  shards:
+    payments:
+      enabled: true # false stops new moves; in-flight migrations finish safely.
+      trigger_utilization: 0.80
+      target_utilization: 0.65
+      scale_up_window: 30s
+      cooldown: 15m
+policy:
+  scale_up_window: 30s
+  cooldown: 15m
+  warm_pool: 1
+actuation:
+  mode: scale-up-only
+  dry_run: false
+  require_confirmation: false
+  max_ops_in_flight: 1
+  max_ops_per_hour: 4
+  kill_switch_file: ./autoscale.halt
+provisioning:
+  enabled: false # Set true to authorize Cloud service creation using the configured token.
+  token_env: SOLACE_CLOUD_TOKEN
+  api_base_url: https://api.solace.cloud # Your organization home: US, EU, AU or SG.
+  datacenter_id: YOUR_DATACENTER_ID
+  broker_version: 10.8.1.241-0 # Verify the available revision; must match measured generation.
+  endpoint_index: 0
+  client_username: autoscale-app
+  client_password_env: SOLACE_AUTOSCALE_CLIENT_PASSWORD
+  readiness_timeout: 30m
+accuracy:
+  record: false
+
+# Native SMF topic dispatch: apps only publish topics and subscribe in durable groups.
+messaging:
+  enabled: true
+  routes:
+    - pattern: payments/*/*
+      shard: payments
+      dispatch: by-key # by-key | by-topic | single
+      key_levels: [1] # account ID: payments/account-42/created
+  allow_dynamic_groups: false
+  subscriptions:
+    - group: ledger
+      topics: ["payments/>"]
+    - group: audit
+      topics: ["payments/*/created"]

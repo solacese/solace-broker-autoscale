@@ -7,7 +7,7 @@ callers of the engine (CLI), never by the engine itself.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .schema import CapacityModel, DeliveryCurve, ServiceClassCapacity
@@ -25,6 +25,9 @@ class CapacityPoint:
     extrapolated: bool
     #: The measured [min, max] size range for the delivery curve, for extrapolation reporting.
     measured_size_range: tuple[int, int]
+    ingress_byte_rate: float | None = None
+    egress_byte_rate: float | None = None
+    source_cells: list[str] = field(default_factory=list)
 
 
 def load_model(path: str | Path) -> CapacityModel:
@@ -47,6 +50,9 @@ def _interp(curve: DeliveryCurve, size: float) -> tuple[float, float, bool, bool
     if size >= buckets[-1].msg_size_bytes:
         b = buckets[-1]
         return b.msg_rate, b.byte_rate, False, size > b.msg_size_bytes
+    for b in buckets:
+        if size == b.msg_size_bytes:
+            return b.msg_rate, b.byte_rate, False, False
     for lo, hi in zip(buckets, buckets[1:], strict=False):
         if lo.msg_size_bytes <= size <= hi.msg_size_bytes:
             span = hi.msg_size_bytes - lo.msg_size_bytes
@@ -64,6 +70,9 @@ def lookup(
     service_class: str,
     msg_size_bytes: float,
     delivery: str,
+    *,
+    fanout: float = 1.0,
+    scenario: str = "worst",
 ) -> CapacityPoint:
     """Per-broker capacity for the query. Raises KeyError for an unknown class/delivery.
 
@@ -71,6 +80,22 @@ def lookup(
     this size, since a mixed workload cannot be promised the higher figure.
     """
     sc: ServiceClassCapacity = model.service_classes[service_class]
+
+    if model.schema_version == "2":
+        from .profile_model import envelope
+
+        assert sc.benchmark is not None  # enforced on model load
+        ingress, egress, interp, bounds, refs = envelope(
+            sc.benchmark, msg_size_bytes, fanout, delivery, scenario,
+        )
+        return CapacityPoint(
+            msg_rate=min(ingress, egress / fanout),
+            byte_rate=(ingress + egress) * msg_size_bytes,
+            ingress_byte_rate=ingress * msg_size_bytes,
+            egress_byte_rate=egress * msg_size_bytes,
+            connections=sc.connections_max, spool_bytes=sc.spool_bytes_max,
+            interpolated=interp, extrapolated=False, measured_size_range=bounds, source_cells=refs,
+        )
 
     if delivery == "mixed":
         modes = [m for m in ("direct", "guaranteed") if m in sc.delivery]

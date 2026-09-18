@@ -1,23 +1,19 @@
-"""solace-autoscale client adapters (Python).
+"""Solace autoscale clients.
 
-Three tiers (§9.2):
-  - Tier 0 (DNS): no code here - connect to the shard DNS name with your normal client.
-  - Tier 1 (resolver + thin protocol adapters): ``Resolver`` calls the assignment service and returns
-    a per-protocol connection URI / factory config. Your app uses its OWN unmodified client library
-    (Qpid JMS/Proton, Paho, any HTTP client). This is the default for AMQP and MQTT.
-  - Tier 2 (SDK wrapper): only for protocols Solace owns (SMF, Solace JMS). Wraps connection
-    creation, caches the assignment, re-looks-up on reconnect, honours a reassignment signal.
-
-Never handles credentials - the resolver returns a location; auth stays with your existing
-mechanism. When the assignment service is unreachable, the cached assignment is used (never fail
-closed) - the service being down must not take an application down.
+MessagingClient provides native SMF publish/subscribe with durable buffering and managed
+handover. Resolver and KeyRouter remain available for lower-level protocol integrations.
+Credentials come from an application-supplied provider; the controller returns locations.
 """
-
 from .adapters import amqp_uri, mqtt_config, rest_target, smf_host
+from .key_router import KeyRouter
+from .messaging import Message, MessagingClient
 from .resolver import Assignment, Resolver, ResolverError
 
 __all__ = [
     "Resolver",
+    "MessagingClient",
+    "Message",
+    "KeyRouter",
     "Assignment",
     "ResolverError",
     "amqp_uri",

@@ -133,3 +133,34 @@ def test_dns_desired_records(tmp_path):
     assert recs[0].name == "shard-a.brokers.example.com"
     # draining broker excluded from DNS
     assert recs[0].hostnames == ["b0.example.com"]
+
+
+def test_resolver_query_ids_cannot_inject_parameters():
+    import json
+    from urllib.parse import parse_qs, urlparse
+    seen = []
+    def opener(url):
+        seen.append(parse_qs(urlparse(url).query))
+        return json.dumps({'broker_id':'b','msg_vpn':'v','state':'active','lease_seconds':300,
+                           'endpoints':{'smf':'tcps://b:55443'}}).encode()
+    resolver=Resolver('http://svc', _opener=opener)
+    resolver.resolve('orders/eu & asia', 'x&mode=direct', 'guaranteed')
+    assert seen[0]['mode']==['guaranteed']
+    assert seen[0]['client_id']==['x&mode=direct']
+    assert seen[0]['shard']==['orders/eu & asia']
+
+
+def test_resolver_auth_denial_does_not_use_cache():
+    import json
+    from urllib.error import HTTPError
+    calls=[]
+    def opener(url):
+        calls.append(url)
+        if len(calls)>1:
+            raise HTTPError(url,401,'unauthorized',{},None)
+        return json.dumps({'broker_id':'b','msg_vpn':'v','state':'active','lease_seconds':300,
+                           'endpoints':{'smf':'tcps://b:55443'}}).encode()
+    resolver=Resolver('http://svc', _opener=opener)
+    resolver.resolve('s','c')
+    with pytest.raises(ResolverError, match='401'):
+        resolver.resolve('s','c')

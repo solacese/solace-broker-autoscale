@@ -24,6 +24,9 @@ from urllib.parse import urlparse
 import click
 
 from . import __version__
+from .capacity.cli import plan, profiles
+from .controller.cli import run_controller
+from .metrics.fleet_cli import monitor_fleet
 
 if TYPE_CHECKING:
     from .decision.types import ShardInput
@@ -33,6 +36,12 @@ if TYPE_CHECKING:
 @click.version_option(__version__, prog_name="solace-autoscale")
 def main() -> None:
     """solace-autoscale - recommend and (optionally) scale a Solace Cloud broker fleet."""
+
+
+main.add_command(profiles)
+main.add_command(plan)
+main.add_command(monitor_fleet)
+main.add_command(run_controller)
 
 
 @main.command()
@@ -293,6 +302,69 @@ def monitor(config_path: str, broker_url: str | None, user: str, password: str, 
         collector.close()
         if recorder is not None:
             recorder.close()
+
+
+
+
+@main.command("explain")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--topic", default=None, help="Explain one concrete business topic without contacting brokers.")
+@click.option("--json", "as_json", is_flag=True, help="Print the expanded machine-readable policy.")
+def explain_policy(config_path: str, topic: str | None, as_json: bool) -> None:
+    """Validate and explain the effective policy. Never connects to or mutates a broker."""
+    from .assignment.routing import partition_for
+    from .assignment.topics import matches, validate_topic
+    from .config import load_config
+    try:
+        cfg = load_config(config_path)
+        report: dict = {
+            "config_hash": cfg.config_hash(),
+            "broker_limit_per_shard": cfg.fleet.max_brokers,
+            "warm_brokers_per_shard": cfg.policy.warm_pool,
+            "cloud_creation": cfg.provisioning.enabled,
+            "delivery": "guaranteed, asynchronous broker receipts, at least once",
+            "partitions_per_shard": cfg.assignment.partitions,
+            "migration": cfg.automation.model_dump(mode="json"),
+            "messaging": cfg.messaging.model_dump(mode="json"),
+            "note": "Current broker ownership requires the running assignment service.",
+        }
+        if topic is not None:
+            validate_topic(topic)
+            routes = [r for r in cfg.messaging.routes if matches(r.pattern, topic)]
+            if len(routes) != 1:
+                raise ValueError("topic must match exactly one route")
+            route = routes[0]
+            if route.dispatch == "by-key":
+                key = _json.dumps([topic.split("/")[i] for i in route.key_levels], separators=(",", ":"))
+            else:
+                key = _json.dumps(["topic", topic] if route.dispatch == "by-topic"
+                                  else ["route", route.pattern], separators=(",", ":"))
+            report["topic"] = {"value": topic, "shard": route.shard, "key": key,
+                               "partition": partition_for(route.shard, key, cfg.assignment.partitions)}
+        if as_json:
+            click.echo(_json.dumps(report, indent=2))
+        else:
+            click.echo("Publishing: save locally, deliver asynchronously, retry until broker acceptance.")
+            click.echo("Subscribers process independently. Handlers must deduplicate event IDs.")
+            click.echo(f"Capacity per workload: up to {cfg.fleet.max_brokers} brokers, "
+                       f"including {cfg.policy.warm_pool} warm spare(s).")
+            click.echo("Cloud service creation: " + ("enabled" if cfg.provisioning.enabled else "disabled"))
+            for route in cfg.messaging.routes:
+                keep = ("topic levels " + ", ".join(str(i + 1) for i in route.key_levels)
+                        if route.dispatch == "by-key" else
+                        "each complete topic" if route.dispatch == "by-topic" else "the whole workload")
+                enabled = cfg.automation.shards.get(route.shard)
+                mode = "automatic" if enabled is None or enabled.enabled else "paused"
+                click.echo(f"{route.shard}: {route.pattern}; keep {keep} together; scaling {mode}.")
+            for group in cfg.messaging.subscriptions:
+                click.echo(f"Subscriber {group.group}: " + ", ".join(group.topics))
+            if topic is not None:
+                click.echo(f"This topic maps to partition {report['topic']['partition']} "
+                           f"in {report['topic']['shard']}.")
+            click.echo("Current broker ownership requires the running assignment service.")
+            click.echo("Read-only check complete. Use --json for the expanded settings.")
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

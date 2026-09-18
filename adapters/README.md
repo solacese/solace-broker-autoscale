@@ -22,3 +22,9 @@ uri = amqp_uri(a)          # feed to your unmodified Qpid JMS / Proton client
 
 If the assignment service is unreachable, `resolve` returns the last cached assignment rather than
 failing - the control plane being down must never take your application down.
+
+## Managed native publish/subscribe
+
+Use `MessagingClient` for a single business-topic API with broker-native fanout, durable local
+publishing and automatic group queue discovery. See [the native guide](../docs/native-messaging.md)
+and [runnable app](../examples/payments/native_app.py). Lower-level adapters above remain available.

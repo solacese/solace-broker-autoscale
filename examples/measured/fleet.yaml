@@ -1,0 +1,19 @@
+# Explicit scope: one active service endpoint per HA group. Never list standby/monitor nodes.
+# Declare the actual deployed generation; monitoring refuses a mismatched profile.
+provider: aws
+broker_version: 10.8.1.241
+service_class: enterprise-1k
+deployment_mode: HA
+brokers:
+  - broker_id: orders-a
+    shard: orders
+    msg_vpn: orders
+    base_url: https://orders-a.example.com:943
+    username_env: ORDERS_A_SEMP_USERNAME
+    password_env: ORDERS_A_SEMP_PASSWORD
+  - broker_id: orders-b
+    shard: orders
+    msg_vpn: orders
+    base_url: https://orders-b.example.com:943
+    username_env: ORDERS_B_SEMP_USERNAME
+    password_env: ORDERS_B_SEMP_PASSWORD

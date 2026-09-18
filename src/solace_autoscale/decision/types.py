@@ -40,6 +40,7 @@ class WarningCode(StrEnum):
     INSUFFICIENT_WINDOW = "insufficient-window"
     UNSAFE_HEADROOM = "unsafe-headroom"
     STALE_METRICS = "stale-metrics"
+    INVALID_METRICS = "invalid-metrics"
     INTERPOLATED_CAPACITY = "interpolated-capacity"
     COMMITTED_NO_SCALEDOWN = "committed-billing-no-scaledown"
     MESH_AMPLIFICATION = "mesh-amplification"
@@ -116,3 +117,4 @@ class ShardDecision:
     reason: str | None = None
     fanout_ratio: float = 0.0
     avg_msg_size: float = 0.0
+    capacity_source_cells: list[str] = field(default_factory=list)

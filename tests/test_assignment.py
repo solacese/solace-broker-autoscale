@@ -167,3 +167,17 @@ def test_protocol_filter_404_for_unavailable(tmp_path):
     client = make_client(store, clock_val=1.0)
     r = client.get("/assignment", params={"shard": "shard-a", "client_id": "c1", "protocol": "mqtt"})
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize('state', [BrokerState.DELETING, BrokerState.GONE])
+def test_guaranteed_home_disappears_without_silent_migration(tmp_path, state):
+    store = AssignmentStore(tmp_path / 'a.db')
+    _seed(store)
+    first = assign(store, 'shard-a', 'durable', 'guaranteed', 1, 300)
+    store.set_broker_state(first.broker.broker_id, state)
+    client = make_client(store, clock_val=1000)
+    response = client.get('/assignment', params={'shard': 'shard-a', 'client_id': 'durable',
+                                                'mode': 'guaranteed'})
+    assert response.status_code == 503
+    assert 'migration' in response.json()['detail']
+    assert store.get_placement('shard-a', 'durable').broker_id == first.broker.broker_id

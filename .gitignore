@@ -46,3 +46,13 @@ assignment.db
 
 # browser automation scratch
 .playwright-mcp/
+
+# Local supplied benchmark folders, including their PDFs
+OneDrive_*/
+
+# Local durable application payloads and controller state
+*.outbox.db*
+*.controller.lock
+*.audit.jsonl
+*.ledger.db*
+assignment.db-*

@@ -1,0 +1,24 @@
+# Replace these placeholder endpoints with dedicated, actual HA services.
+provider: aws
+broker_version: 10.8.1.241
+service_class: enterprise-1k
+deployment_mode: HA
+brokers:
+  - broker_id: payments-a
+    shard: payments
+    role: active
+    msg_vpn: payments
+    base_url: https://payments-a.example.com:943
+    username_env: PAYMENTS_A_SEMP_USERNAME
+    password_env: PAYMENTS_A_SEMP_PASSWORD
+    endpoints:
+      smf: tcps://payments-a.example.com:55443
+  - broker_id: payments-b
+    shard: payments
+    role: warm
+    msg_vpn: payments
+    base_url: https://payments-b.example.com:943
+    username_env: PAYMENTS_B_SEMP_USERNAME
+    password_env: PAYMENTS_B_SEMP_PASSWORD
+    endpoints:
+      smf: tcps://payments-b.example.com:55443

@@ -1,0 +1,11 @@
+# Recommended for ordered business keys and durable messaging.
+assignment:
+  store: ./assignment.db
+  routing: partitioned        # client | partitioned
+  strategy: rendezvous        # least-placements | rendezvous
+  partitions: 128             # Fixed per shard; changing this requires migration.
+  lease_seconds: 300          # Location cache lifetime, not a queue ownership timeout.
+  broker_weights: {}          # Optional relative tested capacity, e.g. {broker-a: 1, broker-b: 2}.
+# Existing guaranteed placements always remain on their broker, even after lease expiry.
+# The application supplies a routing key (order ID, account ID, device ID) to KeyRouter.
+# Consumers resolve the same partition and use that partition's queue on the returned broker.

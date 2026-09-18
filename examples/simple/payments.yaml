@@ -1,0 +1,13 @@
+version: 1
+connection: connection.yaml
+scaling:
+  mode: automatic
+  max_brokers: 4
+  warm_brokers: 1
+workloads:
+  payments:
+    topic: payments/{account}/{event}
+    keep_together: account
+    subscribers:
+      ledger: payments/>
+      audit: payments/*/created

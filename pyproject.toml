@@ -57,7 +57,7 @@ solace_autoscale = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "adapters/python"]
 markers = [
   "integration: requires a live broker (deselect with -m 'not integration')",
 ]

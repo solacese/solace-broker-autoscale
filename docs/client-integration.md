@@ -1,5 +1,7 @@
 # Client integration (§9)
 
+For the implemented unattended managed-queue workflow, use [Automatic scaling](automatic-scaling.md), including its complete YAML and recovery behavior.
+
 Clients reach brokers **directly** - there is no proxy in the data path (ADR 0002). Steering is
 out-of-band, in three tiers. Pick per application.
 
@@ -93,3 +95,11 @@ adapter as for MQTT 3.1.1. This is an **open question** to confirm on your targe
   application down. Only when there is no cache AND the service is down does the resolver error.
 - **Guaranteed consumers are never silently reassigned.** Reassignment signals apply to direct-mode
   clients and publishers only.
+
+## Stable key routing
+
+For horizontal fleets, prefer a shared business key over independent publisher/consumer client IDs.
+The implemented `assignment.routing: partitioned` option and Python `KeyRouter` resolve the same
+partition owner for both sides. [Routing guide](routing.md) covers configuration, queue/topic
+conventions, caching, direct handover limits and why existing guaranteed partitions do not move
+when a new broker joins. Java's existing adapter remains client-mode only.

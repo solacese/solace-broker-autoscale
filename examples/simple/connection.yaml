@@ -1,0 +1,26 @@
+# Operator setup: replace inventory endpoints and compile your matching measured profile.
+inventory: ../measured/payments-fleet.yaml
+fleet:
+  service_class: enterprise-1k
+capacity:
+  model: ../../models/aws-10.8.1.241.json
+  scenario: worst
+  fanout: 1
+  message_size_hint: 1024
+metrics:
+  source: semp
+  scrape_interval: 10s
+  staleness_limit: 30s
+assignment:
+  store: ../../state/payments.db
+automation:
+  fleet_id: payments
+  poll_interval: 10s
+policy:
+  scale_up_window: 30s
+  cooldown: 15m
+actuation:
+  kill_switch_file: ../../state/payments.halt
+provisioning:
+  enabled: false # Existing active/warm brokers only. Cloud creation requires separate setup.
+  client_username: autoscale-app
