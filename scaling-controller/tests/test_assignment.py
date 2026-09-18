@@ -206,3 +206,16 @@ def test_topology_empty_shard_returns_no_brokers(tmp_path):
     r = client.get("/topology", params={"shard": "nope"})
     assert r.status_code == 200
     assert r.json()["brokers"] == []
+
+@pytest.mark.parametrize('state', [BrokerState.DELETING, BrokerState.GONE])
+def test_guaranteed_home_disappears_without_silent_migration(tmp_path, state):
+    store = AssignmentStore(tmp_path / 'a.db')
+    _seed(store)
+    first = assign(store, 'shard-a', 'durable', 'guaranteed', 1, 300)
+    store.set_broker_state(first.broker.broker_id, state)
+    client = make_client(store, clock_val=1000)
+    response = client.get('/assignment', params={'shard': 'shard-a', 'client_id': 'durable',
+                                                'mode': 'guaranteed'})
+    assert response.status_code == 503
+    assert 'migration' in response.json()['detail']
+    assert store.get_placement('shard-a', 'durable').broker_id == first.broker.broker_id

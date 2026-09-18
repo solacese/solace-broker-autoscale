@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "build/**"]
+    branches: [main, "build/**", "codex/**"]
   pull_request:
 
 jobs:
@@ -127,4 +127,51 @@ jobs:
           SOLACE_AMQP_PORT: "5672"
           SOLACE_MQTT_PORT: "1883"
           SOLACE_REST_PORT: "9000"
-        run: pytest -m integration -q
+        run: pytest tests/test_integration_broker.py -m integration -q
+
+  migration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scaling-controller
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev,integration]'
+      - name: Start two isolated migration brokers
+        run: |
+          for spec in "a 18081 15556 15672" "b 18082 15557 15673"; do
+            set -- $spec
+            docker run -d --name migration-$1 --shm-size=1g -p $2:8080 -p $3:55555 -p $4:5672 \
+              -e username_admin_globalaccesslevel=admin -e username_admin_password=admin \
+              solace/solace-pubsub-standard:latest
+          done
+          for port in 18081 18082; do
+            B=http://127.0.0.1:$port/SEMP/v2/config
+            for i in $(seq 1 90); do
+              curl -fsS -u admin:admin "$B/about/api" >/dev/null && break
+              sleep 3
+            done
+            curl -fsS -u admin:admin -X PATCH "$B/msgVpns/default/clientUsernames/default" \
+              -H 'Content-Type: application/json' -d '{"enabled":true,"password":"default"}'
+            curl -fsS -u admin:admin -X PATCH "$B/msgVpns/default" \
+              -H 'Content-Type: application/json' \
+              -d '{"authenticationBasicEnabled":true,"authenticationBasicType":"internal","maxMsgSpoolUsage":1500,"serviceAmqpPlainTextEnabled":true}'
+          done
+      - name: Prove queue handover, publisher NACK, durable retry and restart
+        run: pytest tests/test_integration_migration.py tests/test_integration_native_topics.py -m integration -q
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Prepare Go settlement queue
+        run: |
+          B=http://127.0.0.1:18081/SEMP/v2/config/msgVpns/default/queues
+          curl -fsS -u admin:admin -X POST "$B" -H 'Content-Type: application/json' -d '{"queueName":"q-go-settlement","accessType":"exclusive","permission":"consume","ingressEnabled":true,"egressEnabled":true}'
+          curl -fsS -u admin:admin -X POST "$B/q-go-settlement/subscriptions" -H 'Content-Type: application/json' -d '{"subscriptionTopic":"autoscale/go/settlement"}'
+      - name: Prove application-controlled AMQP acknowledgement and redelivery
+        working-directory: shim
+        env:
+          SOLACE_GO_AMQP_URI: amqp://default:default@127.0.0.1:15672
+        run: go test -race ./...

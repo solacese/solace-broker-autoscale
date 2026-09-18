@@ -311,3 +311,31 @@ def test_audit_written_even_when_refused(tmp_path):
     records = AuditLog(audit_path).read_all()
     assert records[0]["phase"] == "intent"
     assert any(r["phase"] == "refused" for r in records)
+
+
+@pytest.mark.parametrize('state', [
+    {'total_msgs_spooled': 0},
+    {'total_msgs_spooled': 0, 'bound_consumers': 0, 'active_flows': 0, 'spooled_bytes': float('nan')},
+])
+def test_incomplete_delete_telemetry_is_refused_and_audited(tmp_path, state):
+    cfg = _cfg(actuation={'mode': 'full', 'dry_run': False})
+    cloud = FakeCloud(queue_state=state)
+    gate = _gate(cfg, cloud, tmp_path)
+    result = gate.approve_and_issue(_op(OperationType.DELETE_SERVICE, target_service_id='svc'),
+                                    _state(), now=100)
+    assert not result.issued
+    assert cloud.calls == []
+    assert AuditLog(tmp_path / 'audit.jsonl').read_all()[-1]['phase'] == 'refused'
+
+
+def test_failed_delete_observation_is_refused_and_audited(tmp_path):
+    class Unreachable(FakeCloud):
+        def queue_state(self, service_id, msg_vpn):
+            raise ValueError('incomplete SEMP response')
+    cloud = Unreachable()
+    gate = _gate(_cfg(actuation={'mode': 'full', 'dry_run': False}), cloud, tmp_path)
+    result = gate.approve_and_issue(_op(OperationType.DELETE_SERVICE, target_service_id='svc'),
+                                    _state(), now=100)
+    assert not result.issued
+    assert cloud.calls == []
+    assert AuditLog(tmp_path / 'audit.jsonl').read_all()[-1]['phase'] == 'refused'

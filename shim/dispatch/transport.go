@@ -23,6 +23,9 @@ type Message struct {
 	Body       []byte            // opaque payload
 	GroupID    string            // AMQP group-id (the partition key); "" for none
 	Properties map[string]string // application properties
+	// Ack and Release are set by reliable transports. Applications settle only after processing.
+	Ack     func(context.Context) error
+	Release func(context.Context) error
 }
 
 // Sender publishes messages to one broker. Send must be safe for concurrent use.

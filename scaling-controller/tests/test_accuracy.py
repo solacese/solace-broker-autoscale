@@ -34,7 +34,7 @@ def test_observed_vs_predicted_and_optimistic_flag(tmp_path):
         ingress_byte_rate=9_000_000, egress_byte_rate=0, avg_msg_size=1000,
         connection_count=1, spool_used=0, current_brokers=1,
     )
-    n = record_observed_capacity(rec, model, "enterprise-10k", "direct", "domain-a", sample, ts=100)
+    n = record_observed_capacity(rec, model, "enterprise-10k", "direct", "domain-a", sample, ts=100, saturation_confirmed=True)
     assert n >= 1
     stats = {s.axis: s for s in rec.stats(group_by="axis")}
     assert "bytes" in stats
@@ -73,9 +73,18 @@ def test_recorder_persists_across_reopen(tmp_path):
     rec = AccuracyRecorder(path)
     model = make_test_model()
     sample = MetricSample(100, 16000, 16000, 16000000, 16000000, 1000, 1, 0, 2)
-    record_observed_capacity(rec, model, "enterprise-10k", "direct", "s", sample, ts=100)
+    record_observed_capacity(rec, model, "enterprise-10k", "direct", "s", sample, ts=100, saturation_confirmed=True)
     rec.close()
     # reopen: data survives
     rec2 = AccuracyRecorder(path)
     assert len(rec2.stats()) >= 1
     rec2.close()
+
+
+def test_high_offered_load_is_not_independent_saturation_evidence(tmp_path):
+    rec = AccuracyRecorder(tmp_path / 'acc.db')
+    sample = MetricSample(100, 16000, 16000, 16000000, 16000000, 1000, 1, 0, 2)
+    assert record_observed_capacity(rec, make_test_model(), 'enterprise-10k', 'direct',
+                                    's', sample, ts=100) == 0
+    assert not rec.stats()
+    rec.close()

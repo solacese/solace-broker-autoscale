@@ -1,9 +1,8 @@
 """Assignment store (§9.1).
 
 Persists broker inventory (per shard, with per-protocol endpoints and state) and durable guaranteed
-placements. SQLite by default; a Postgres backend is provided for multi-instance deployment using
-**optimistic locking** on placement writes (a version column with a compare-and-set), documented in
-docs and chosen over leader election because placement writes are low-rate and idempotent.
+placements. SQLite uses a local file, WAL and complete assignment transactions. Threads and processes
+sharing that local file serialize writers. This is not a distributed Postgres implementation.
 
 Guaranteed placement is sticky and durable: a queue lives on exactly one broker, so a consumer must
 return to the same broker. Placements survive service restart and lease expiry as long as the queue
@@ -16,12 +15,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import wraps
 from pathlib import Path
+from typing import Concatenate, ParamSpec, TypeVar
 
 
 class BrokerState(StrEnum):
+    WARM = "warm"
     ACTIVE = "active"
     DRAINING = "draining"
     DRAINED = "drained"
@@ -73,21 +78,88 @@ CREATE TABLE IF NOT EXISTS placements (
     PRIMARY KEY (shard, client_id)
 );
 CREATE INDEX IF NOT EXISTS idx_brokers_shard ON brokers(shard);
+CREATE INDEX IF NOT EXISTS idx_placements_broker ON placements(broker_id);
+CREATE TABLE IF NOT EXISTS routing_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def _transactional(fn: Callable[Concatenate[AssignmentStore, P], T]
+                   ) -> Callable[Concatenate[AssignmentStore, P], T]:
+    """Serialize all access, nesting store calls inside the complete assignment transaction."""
+    @wraps(fn)
+    def wrapped(self: AssignmentStore, /, *args: P.args, **kwargs: P.kwargs) -> T:
+        with self.transaction():
+            return fn(self, *args, **kwargs)
+    return wrapped
+
+
 class AssignmentStore:
-    """SQLite-backed store. Postgres uses the same interface (see PostgresAssignmentStore note)."""
+    """SQLite-backed single-host store; never place the database on a network filesystem."""
 
     def __init__(self, path: str | Path) -> None:
+        self._lock = threading.RLock()
+        self._depth = 0
         self._path = str(path)
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Commit the whole lookup/select/write operation, or roll it all back on failure."""
+        with self._lock:
+            outer = self._depth == 0
+            if outer:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._depth += 1
+            try:
+                yield
+                if outer:
+                    self._conn.commit()
+            except BaseException:
+                if outer:
+                    self._conn.rollback()
+                raise
+            finally:
+                self._depth -= 1
 
     # ---- broker inventory --------------------------------------------------------------------
 
+    @_transactional
+    def ensure_routing(self, routing: str, partitions: int) -> None:
+        """Persist the partition contract so a configuration edit cannot strand existing queues."""
+        value = json.dumps({"routing": routing, "partitions": partitions if routing == "partitioned" else 0,
+                            "hash": "sha256-json-v1"}, sort_keys=True)
+        row = self._conn.execute("SELECT value FROM routing_settings WHERE name='contract'").fetchone()
+        if row is not None and row["value"] != value:
+            raise ValueError("routing/partition count changed; migrate queues and placements explicitly")
+        if row is None:
+            existing = self._conn.execute("SELECT COUNT(*) FROM placements").fetchone()[0]
+            if existing and routing != "client":
+                raise ValueError("existing client placements require migration before partitioned routing")
+            self._conn.execute("INSERT INTO routing_settings VALUES ('contract',?)", (value,))
+
+    @_transactional
+    def ensure_managed_namespace(self, fleet_id: str | None) -> None:
+        """Keep queue names stable across controller and assignment service restarts."""
+        row = self._conn.execute(
+            "SELECT value FROM routing_settings WHERE name='managed_namespace'"
+        ).fetchone()
+        if row is not None and row["value"] != fleet_id:
+            raise ValueError(
+                "managed fleet_id changed or disabled; existing queue ownership must be preserved"
+            )
+        if row is None and fleet_id is not None:
+            self._conn.execute("INSERT INTO routing_settings VALUES ('managed_namespace',?)", (fleet_id,))
+
+    @_transactional
     def upsert_broker(self, broker: Broker) -> None:
         self._conn.execute(
             """INSERT INTO brokers (broker_id, shard, msg_vpn, state, endpoints)
@@ -98,31 +170,35 @@ class AssignmentStore:
             (broker.broker_id, broker.shard, broker.msg_vpn, broker.state.value,
              json.dumps(broker.endpoints)),
         )
-        self._conn.commit()
 
+    @_transactional
     def set_broker_state(self, broker_id: str, state: BrokerState) -> None:
         self._conn.execute("UPDATE brokers SET state=? WHERE broker_id=?", (state.value, broker_id))
-        self._conn.commit()
 
+    @_transactional
     def get_broker(self, broker_id: str) -> Broker | None:
         row = self._conn.execute("SELECT * FROM brokers WHERE broker_id=?", (broker_id,)).fetchone()
         return _row_to_broker(row) if row else None
 
+    @_transactional
     def brokers_for_shard(self, shard: str) -> list[Broker]:
         rows = self._conn.execute("SELECT * FROM brokers WHERE shard=?", (shard,)).fetchall()
         return [_row_to_broker(r) for r in rows]
 
+    @_transactional
     def assignable_brokers(self, shard: str) -> list[Broker]:
         return [b for b in self.brokers_for_shard(shard) if b.state in _ASSIGNABLE_STATES]
 
     # ---- placements --------------------------------------------------------------------------
 
+    @_transactional
     def get_placement(self, shard: str, client_id: str) -> Placement | None:
         row = self._conn.execute(
             "SELECT * FROM placements WHERE shard=? AND client_id=?", (shard, client_id)
         ).fetchone()
         return _row_to_placement(row) if row else None
 
+    @_transactional
     def put_placement(self, p: Placement) -> None:
         """Idempotent upsert with optimistic locking (compare-and-set on ``p.version``).
 
@@ -149,21 +225,21 @@ class AssignmentStore:
                     f"placement {p.shard}/{p.client_id} changed concurrently "
                     f"(held version {p.version}); re-read and retry"
                 )
-        self._conn.commit()
 
+    @_transactional
     def renew_lease(self, shard: str, client_id: str, lease_expires_at: float) -> None:
         self._conn.execute(
             "UPDATE placements SET lease_expires_at=?, version=version+1 WHERE shard=? AND client_id=?",
             (lease_expires_at, shard, client_id),
         )
-        self._conn.commit()
 
+    @_transactional
     def delete_placement(self, shard: str, client_id: str) -> None:
         self._conn.execute(
             "DELETE FROM placements WHERE shard=? AND client_id=?", (shard, client_id)
         )
-        self._conn.commit()
 
+    @_transactional
     def placements_on_broker(self, broker_id: str, mode: str | None = None) -> list[Placement]:
         if mode:
             rows = self._conn.execute(
@@ -176,7 +252,8 @@ class AssignmentStore:
         return [_row_to_placement(r) for r in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 class OptimisticLockError(Exception):

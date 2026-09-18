@@ -1,0 +1,141 @@
+{
+  "shards": {
+    "orders": {
+      "key_subdividable": true,
+      "samples": [
+        {
+          "timestamp": 1000000.0,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000030.2,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000060.4,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000090.6,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000120.8,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000151.0,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000181.2,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000211.4,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000241.6,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000271.8,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000302.0,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        },
+        {
+          "timestamp": 1000332.2,
+          "ingress_msg_rate": 12000,
+          "egress_msg_rate": 0,
+          "ingress_byte_rate": 12000000,
+          "egress_byte_rate": 0,
+          "avg_msg_size": 1000,
+          "connection_count": 10,
+          "spool_used": 0,
+          "current_brokers": 1
+        }
+      ]
+    }
+  }
+}

@@ -57,7 +57,7 @@ func (l *ListenerShim) Subscribe(ctx context.Context, source string) (<-chan Del
 		r, err := l.tport.Receiver(ctx, uri, source)
 		if err != nil {
 			l.Close()
-			return nil, fmt.Errorf("subscribe broker %q at %s: %w", broker, uri, err)
+			return nil, fmt.Errorf("subscribe broker %q: %w", broker, err)
 		}
 		l.mu.Lock()
 		l.recvs = append(l.recvs, r)

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	goamqp "github.com/Azure/go-amqp"
 	"github.com/solacese/solace-broker-autoscale/shim/dispatch"
@@ -96,6 +97,7 @@ type sender struct {
 
 func (s *sender) Send(ctx context.Context, msg dispatch.Message) error {
 	m := goamqp.NewMessage(msg.Body)
+	m.Header = &goamqp.MessageHeader{Durable: true}
 	m.Properties = &goamqp.MessageProperties{}
 	if msg.Address != "" {
 		to := msg.Address
@@ -127,12 +129,30 @@ func (r *receiver) Receive(ctx context.Context) (dispatch.Message, error) {
 	if err != nil {
 		return dispatch.Message{}, err
 	}
-	// Acknowledge so the broker can advance; the shim delivers at-least-once to its channel.
-	if err := r.link.AcceptMessage(ctx, m); err != nil {
-		return dispatch.Message{}, fmt.Errorf("accept message: %w", err)
-	}
-
+	// Receiving is not successful application processing. Leave settlement to the caller.
 	out := dispatch.Message{Body: m.GetData()}
+	var mu sync.Mutex
+	settled := false
+	settle := func(ctx context.Context, accept bool) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if settled {
+			return nil
+		}
+		var err error
+		if accept {
+			err = r.link.AcceptMessage(ctx, m)
+		} else {
+			err = r.link.ReleaseMessage(ctx, m)
+		}
+		if err == nil {
+			settled = true
+		}
+		return err
+	}
+	out.Ack = func(ctx context.Context) error { return settle(ctx, true) }
+	out.Release = func(ctx context.Context) error { return settle(ctx, false) }
+
 	if m.Properties != nil {
 		if m.Properties.To != nil {
 			out.Address = *m.Properties.To

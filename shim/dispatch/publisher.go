@@ -77,7 +77,7 @@ func (s *PublisherShim) Publish(ctx context.Context, topic string, payload []byt
 	}
 	sender, err := s.sender(ctx, dec.Broker, uri)
 	if err != nil {
-		return Result{Decision: dec, URI: uri}, fmt.Errorf("connect broker %q at %s: %w", dec.Broker, uri, err)
+		return Result{Decision: dec, URI: uri}, fmt.Errorf("connect broker %q: %w", dec.Broker, err)
 	}
 
 	merged := make(map[string]string, len(props)+1)
@@ -90,7 +90,7 @@ func (s *PublisherShim) Publish(ctx context.Context, topic string, payload []byt
 	msg := Message{Address: dec.Address, Body: payload, GroupID: dec.Key, Properties: merged}
 
 	if err := s.sendWithRetry(ctx, sender, msg); err != nil {
-		return Result{Decision: dec, URI: uri}, fmt.Errorf("send to broker %q at %s: %w", dec.Broker, uri, err)
+		return Result{Decision: dec, URI: uri}, fmt.Errorf("send to broker %q: %w", dec.Broker, err)
 	}
 	return Result{Decision: dec, URI: uri}, nil
 }

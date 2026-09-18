@@ -112,3 +112,40 @@ the other without a test failing.
 The shim stamps the partition key both as the AMQP **group-id** and as a `saas_partition_key`
 application property. Listeners read it back (preferring the property), so consumers can process a
 coherent per-key stream without re-running the rules.
+
+## Asynchronous publication and reliable processing
+
+The existing `PublisherShim.Publish` waits for the transport outcome; it never waits for a subscriber response. Wrap it with `NewAsyncPublisher(pub, 8, 64)` to enqueue without waiting for a broker receipt:
+
+```go
+async, err := dispatch.NewAsyncPublisher(pub, 8, 64)
+if err != nil { return err }
+defer async.Close()
+receipt, err := async.Publish(ctx, topic, payload, properties)
+if err != nil { return err } // queue full, invalid message or stopped publisher
+// Other application work continues. A separate worker monitors the buffered result channel.
+outcome := <-receipt
+if outcome.Err != nil { /* retain the event and recover delivery */ }
+```
+
+The queue is **memory-only**, with copied payloads, a 1 MiB payload limit, bounded workers and bounded pending slots. Keys for the same broker share a sequential worker. An exhausted delivery failure stops the async wrapper and returns errors for remaining work; it never reports abandoned messages as successful. Keep event IDs, retain events externally until success, and deduplicate subscriber effects. Close cancels pending work and completes its result channels. Do not share the underlying publisher with other callers while its async wrapper owns it.
+
+**Consumer API change:** real AMQP deliveries are no longer acknowledged on receipt. After the business transaction commits, call `d.Message.Ack(ctx)` and check its error. On a recoverable processing failure, call `d.Message.Release(ctx)` to allow redelivery, or close the receiver and let the broker recover unacknowledged messages. Merely reading the channel does not confirm processing.
+
+```go
+for d := range deliveries {
+    if err := commitIdempotently(d.Message); err != nil {
+        if d.Message.Release != nil {
+            if err := d.Message.Release(ctx); err != nil { return err }
+        }
+        continue
+    }
+    if d.Message.Ack != nil {
+        if err := d.Message.Ack(ctx); err != nil { return err }
+    }
+}
+```
+
+Reliable sends now mark AMQP messages durable. The live settlement test verifies redelivery after receiver shutdown without ACK, explicit release, and removal after successful ACK. Run it with `SOLACE_GO_AMQP_URI` pointing at an isolated broker with the documented queue fixture.
+
+The Go event-spine primitives remain available. They do **not** yet implement the Python controller's persisted partition ownership, outbox and broker-fenced migration contract. Managed topic mode rejects the Go topology-hashing endpoint to prevent accidental remapping around that contract. See [production readiness](../guide/production-readiness.md).

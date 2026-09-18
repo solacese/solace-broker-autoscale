@@ -105,3 +105,17 @@ def test_enabled_protocols():
     cfg = Config()
     assert "smf" in cfg.protocols.enabled_protocols()
     assert "mqtt" not in cfg.protocols.enabled_protocols()  # default disabled
+
+
+@pytest.mark.parametrize('data', [
+    {'metrics': {'scrape_interval': 0}},
+    {'metrics': {'staleness_limit': -1}},
+    {'policy': {'scale_down_window': -1}},
+    {'policy': {'cooldown': -1}},
+    {'metrics': {'scrape_interval': float('inf')}},
+    {'policy': {'scale_up_window': float('nan')}},
+])
+def test_invalid_timing_configuration_is_rejected(data):
+    from solace_autoscale.config import Config
+    with pytest.raises(ValueError):
+        Config.model_validate(data)

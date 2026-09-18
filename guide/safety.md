@@ -25,7 +25,7 @@ away.
 | 6 | Honour `max_ops_in_flight` and `max_ops_per_hour` | `_check_rate_limits` |
 | 7 | Check `kill_switch_file` before every operation; if present, halt and log | `_check_kill_switch` |
 | 8 | Write the audit record BEFORE issuing (decision id, model version, config hash, full request body) | `AuditLog` + intent phase |
-| 9 | Idempotency key on every Cloud API call so a retry cannot double-provision | `_check_idempotency_key` + client header |
+| 9 | Idempotency key on every mutation; server support and caller reconciliation are also required | `_check_idempotency_key` + client header |
 | 10 | When `require_confirmation` is set, refuse a real (non-dry-run) operation the caller did not confirm (`Operation.approved`) | `_check_confirmation` |
 
 Mode is also checked: `scale-up-only` refuses deletes; `recommend` should never reach the gate at
@@ -57,16 +57,22 @@ naming the host.
 
 ## Warm pool
 
-Maintain `policy.warm_pool` pre-provisioned idle brokers so activation is seconds. Actual
-provisioning duration is recorded on every create and fed back into `minutes_to_capacity` (§5.7),
-replacing the assumption with a measured value. Warm brokers are billed idle capacity, so their cost
-is reported on every run.
+`policy.warm_pool` is a planning assumption for recommendations and a desired spare count for
+`run` with `provisioning.enabled`. The automatic controller reconciles unique Cloud names,
+waits for readiness, and replenishes spares within the active-plus-warm broker ceiling.
+It does not currently learn readiness durations automatically. See [automatic scaling](automatic-scaling.md).
 
-## Terraform for identical config
+Managed queue handover uses a separate persisted phase machine from broker deletion above.
+It requires broker-enforced ingress rejection, zero queued/unacknowledged/spooled messages,
+a continuous empty interval and bound destination consumers. It never deletes either broker.
 
-`deploy/terraform/` templates the broker **configuration** (VPN, queues, ACLs, client profiles, DMR
-links) so a new broker matches its peers. The actuator triggers `apply` for config rather than
-hand-rolling SEMPv2 calls, keeping its blast radius to provisioning only.
+## Terraform and direct SEMP
+
+`deploy/terraform/` contains configuration templates. The CLI does not execute Terraform.
+Pre-delete observations require an explicit `SempConnection` per service, with broker management
+credentials separate from the Cloud API token. The previously assumed Cloud monitor proxy is not
+used. Every queue/topic-endpoint page is inspected, missing counters refuse deletion, and remaining
+client connections also block it. Publishers must be quiesced; inspection is not an atomic lock.
 
 ## Testing
 

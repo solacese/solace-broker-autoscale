@@ -22,6 +22,7 @@ Guardrails:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,7 +94,9 @@ class SafetyGate:
             raise ActuationRefused("capacity model is synthetic; actuation hard-blocked (§10)")
 
     def _check_metrics_fresh(self, state: FleetState) -> None:
-        if state.newest_metric_age_seconds > self._cfg.metrics.staleness_limit:
+        if (not math.isfinite(state.newest_metric_age_seconds)
+                or state.newest_metric_age_seconds < 0
+                or state.newest_metric_age_seconds > self._cfg.metrics.staleness_limit):
             raise ActuationRefused(
                 f"metrics stale: newest sample {state.newest_metric_age_seconds:.0f}s old > "
                 f"staleness_limit {self._cfg.metrics.staleness_limit:.0f}s"
@@ -167,11 +170,19 @@ class SafetyGate:
         if sid is None:
             raise ActuationRefused("delete operation missing target_service_id")
         msg_vpn = op.metadata.get("msg_vpn", "default")
-        live = self._cloud.queue_state(sid, msg_vpn)  # live SEMP check
-        depth = live.get("total_msgs_spooled", 0)
-        bound = live.get("bound_consumers", 0)
-        flows = live.get("active_flows", 0)
-        spooled = live.get("spooled_bytes", 0)
+        try:
+            live = self._cloud.queue_state(sid, msg_vpn)  # live SEMP check
+            keys = ("total_msgs_spooled", "bound_consumers", "active_flows", "spooled_bytes")
+            values = [live[key] for key in keys]
+            if any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   or not math.isfinite(v) or v < 0 for v in values):
+                raise ValueError("missing or invalid queue counters")
+            depth, bound, flows, spooled = values
+        except Exception as e:
+            raise ActuationRefused(
+                f"cannot establish safe deletion of {sid}: live telemetry unavailable or incomplete "
+                f"({type(e).__name__})"
+            ) from e
         if depth or bound or flows or spooled:
             raise ActuationRefused(
                 f"refusing to delete {sid}: not empty (msgs={depth}, consumers={bound}, "

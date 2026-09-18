@@ -6,7 +6,9 @@ and emits JSON conforming to these models. Everything here is pure data + valida
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .benchmarks import BenchmarkSheet
 
 COMPILER_SCHEMA_VERSION = "1"
 
@@ -18,7 +20,7 @@ DELIVERY_MODES = ("direct", "guaranteed")
 class SizeBucket(BaseModel):
     """One measured point on a capacity curve for a (service_class, delivery) pair."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     msg_size_bytes: int = Field(gt=0)
     msg_rate: float = Field(gt=0, description="Sustained max messages/sec at this size (fanout=1).")
@@ -26,7 +28,7 @@ class SizeBucket(BaseModel):
 
 
 class DeliveryCurve(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     size_buckets: list[SizeBucket]
 
@@ -52,7 +54,7 @@ class DeliveryCurve(BaseModel):
 
 
 class ServiceClassCapacity(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     service_class_id: str = Field(
         description="Mission Control ServiceClassId, e.g. ENTERPRISE_10K_HIGHAVAILABILITY"
@@ -60,6 +62,7 @@ class ServiceClassCapacity(BaseModel):
     connections_max: int = Field(gt=0, description="ServiceClass.vpnConnections")
     spool_bytes_max: int = Field(gt=0, description="ServiceClass.vpnMaxSpoolSize, bytes")
     delivery: dict[str, DeliveryCurve]
+    benchmark: BenchmarkSheet | None = None
 
     @field_validator("delivery")
     @classmethod
@@ -73,14 +76,14 @@ class ServiceClassCapacity(BaseModel):
 
 
 class MeasuredRange(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     msg_size_bytes: tuple[int, int]
     fanout: tuple[int, int]
 
 
 class Provenance(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     source_filename: str
     source_sha256: str
@@ -90,12 +93,15 @@ class Provenance(BaseModel):
     platform: str | None = None
     measured_range: MeasuredRange
     notes: list[str] = Field(default_factory=list)
+    broker_version: str | None = None
+    limits_sha256: str | None = None
+    limits_source: str | None = None
 
 
 class CapacityModel(BaseModel):
     """Top-level compiled model. Loaded at runtime; validated on load."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     schema_version: str
     model_version: str
@@ -103,6 +109,18 @@ class CapacityModel(BaseModel):
     synthetic: bool = False
     warning: str | None = Field(default=None, alias="WARNING")
     service_classes: dict[str, ServiceClassCapacity]
+
+    @model_validator(mode="after")
+    def _schema_contract(self) -> CapacityModel:
+        """Reject unsupported versions and prevent measured models falling back to legacy curves."""
+        if self.schema_version not in ("1", "2"):
+            raise ValueError(f"unsupported capacity schema {self.schema_version!r}")
+        if self.schema_version == "2":
+            if self.synthetic or not self.provenance.broker_version or not self.provenance.limits_source:
+                raise ValueError("schema 2 requires measured provenance and a limits source")
+            if any(sc.benchmark is None for sc in self.service_classes.values()):
+                raise ValueError("schema 2 requires benchmark observations for every service class")
+        return self
 
     @field_validator("service_classes")
     @classmethod

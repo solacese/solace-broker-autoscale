@@ -1,6 +1,8 @@
 # Architecture
 
-`solace-autoscale` is entirely **control plane**. No component carries a client message (ADR 0002).
+For the implemented unattended managed-queue workflow, use [Automatic scaling](automatic-scaling.md), including its complete YAML and recovery behavior.
+
+The controller and assignment service are **control plane**. Application adapters keep a local retry buffer and send messages directly to brokers; there is no central message proxy (ADR 0002).
 
 ## Data flow
 
@@ -8,7 +10,7 @@
 performance.xlsx ──(build-time)──▶ capacity/compile.py ──▶ models/*.json (versioned)
                                                                  │
 metrics source ──▶ metrics/*.py ──▶ MetricSample window ─────────┤
-   (SEMPv2 / Cloud / Prometheus / static)                        ▼
+   (SEMPv2 / static; other collectors are placeholders)                        ▼
                                               decision/engine.py  (PURE)
 config.yaml ──▶ config.py ──────────────────────────────▶  ShardDecision
                                                                  │
@@ -32,7 +34,8 @@ config.yaml ──▶ config.py ────────────────
 | `report/*` | Markdown + JSON from one structure | none (returns strings) |
 | `simulator/workload` | Synthetic workload matrix + model validation | none |
 | `portal/shard_advisor` | Event Portal export → shard boundaries | reads export |
-| `assignment/*` | HTTP service + durable placement store | HTTP, SQLite/Postgres |
+| `assignment/*` | HTTP service + durable placement store | HTTP, SQLite (Postgres not implemented) |
+| `controller/*` | Load-aware partition moves, persisted fencing/drain/cutover, optional warm provisioning | SEMP, Cloud, SQLite (opt-in) |
 | `actuator/*` | Solace Cloud API calls behind safety layer | network (opt-in) |
 | `dns/updater` (in `solace_autoscale.dns`) | Tier-0 DNS records per shard | network (opt-in) |
 
@@ -49,7 +52,7 @@ mode it is never constructed.
 ## Interaction with a consumer autoscaler (KEDA)
 
 This tool scales **brokers**. A consumer autoscaler such as the
-[KEDA Solace scaler](https://keda.sh/docs/2.20/scalers/solace-pub-sub/) scales **consumers**. In a
+[KEDA Solace scaler](https://keda.sh/guide/2.20/scalers/solace-pub-sub/) scales **consumers**. In a
 system that runs both, they are two independent control loops observing overlapping signals with no
 awareness of each other - the classic setup for oscillation.
 
@@ -80,3 +83,22 @@ slower one (brokers) cannot chase the faster one (consumers):
 A simulator scenario (`simulator/workload.py::consumer_reaction_window`) models a consumer count
 rising in response to backlog and asserts the decision engine does not oscillate under it; see
 `tests/test_simulator.py`.
+
+## Current integration boundary
+
+The diagram describes the intended composition. The CLI recommendation/monitor paths do not call
+an actuator, maintain a warm pool or execute Terraform. Prometheus and Cloud API metrics collectors
+are placeholders. The separate opt-in `run` controller connects managed queue handover and optional Cloud warm
+provisioning with persistent reconciliation state. See [the simple guide](autoscaler-simple-guide.md).
+
+## Managed automatic path
+
+`run` reads per-partition queue counters, selects a fitting move and advances a persisted migration. It shares ownership state with `serve`. Worker discovery pre-binds destination consumers; broker ingress fencing rejects stale publishers; the outbox retries after cutover. The controller is a separate loop from the pure recommendation engine and uses its own trigger/target settings. See [automatic scaling](automatic-scaling.md).
+
+## Native topics and the application shim
+
+`MessagingClient` derives the key from configured topic levels, selects the recorded owner and
+publishes one owner-prefixed SMF topic. `TopicRegistry` persists subscription groups. `QueueManager`
+installs their native queue subscriptions and fences every group during a partition move.
+Solace performs fanout; subscriber shims discover group queues and restore the logical topic.
+See [native messaging](native-messaging.md) for guarantees and limits.

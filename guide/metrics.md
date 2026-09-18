@@ -28,7 +28,7 @@ Source object: `GET /SEMP/v2/monitor/msgVpns/{vpn}` (verified field names):
 | `egress_msg_rate`     | `averageTxMsgRate`                            | msg/s, VPN tx |
 | `ingress_byte_rate`   | `averageRxByteRate`                           | bytes/s |
 | `egress_byte_rate`    | `averageTxByteRate`                           | bytes/s |
-| `spool_used`          | `msgSpoolUsage` × 1_048_576                   | field is in **MB** → convert to bytes |
+| `spool_used`          | `msgSpoolUsage`                              | already **bytes**; only the maximum quota uses MB |
 | `avg_msg_size`        | derived: `averageRxByteRate / averageRxMsgRate` | falls back to `egress` or 0 when rx rate is 0 |
 
 Connection count has **no scalar field** on the VPN monitor object (only `maxConnectionCount` and

@@ -167,3 +167,7 @@ is **idempotent** (an already-present create / already-absent delete is a conver
 error), and it is **dry-run by default**. `mode: additive` (default) never deletes target-local
 objects; `mode: mirror` makes a target identical to the source. Re-runnable: an edit on the source
 reappears as ops until the targets converge.
+
+## Managed native SMF client
+
+For the short YAML policy, durable local publication and controller-managed queue migration, use the [simple policy guide](simple-policy.md) and [native messaging client](native-messaging.md). The Go AMQP rule/spine path does not implement that durable migration contract.

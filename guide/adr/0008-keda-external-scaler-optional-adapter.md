@@ -9,7 +9,7 @@ multiplying across environments. That rejection was too strong. Kubernetes users
 whether this tool can participate in a KEDA-driven autoscaling setup, and the honest answer is "yes,
 as an adapter, later" - not "no, never".
 
-The obvious Kubernetes-native shape is a [KEDA external scaler](https://keda.sh/docs/2.20/concepts/external-scalers/):
+The obvious Kubernetes-native shape is a [KEDA external scaler](https://keda.sh/guide/2.20/concepts/external-scalers/):
 a gRPC service KEDA polls, which drives a HorizontalPodAutoscaler (HPA). The question is whether the
 *core* of this tool should become that scaler, or whether the scaler should be a thin adapter on top
 of an unchanged, Kubernetes-independent core.

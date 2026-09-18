@@ -8,8 +8,7 @@ sample timestamps. The engine never calls a clock.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..capacity.model import CapacityPoint, lookup
 from ..capacity.schema import CapacityModel
@@ -44,10 +43,16 @@ class DecisionRequest:
 
 # ---- axis demand extractors (raw demand, pre-capacity) --------------------------------------
 
-def _axis_raw_demand(axis: Axis, s: MetricSample, subscribing_brokers: int, mesh: bool) -> float:
+def _axis_raw_demand(axis: Axis, s: MetricSample, subscribing_brokers: int, mesh: bool,
+                     cap: CapacityPoint | None = None) -> float:
     if axis is Axis.messages:
         return s.ingress_msg_rate
     if axis is Axis.bytes:
+        if cap is not None and cap.ingress_byte_rate is not None and cap.egress_byte_rate is not None:
+            egress = s.egress_byte_rate + (_link_bytes(s, subscribing_brokers) if mesh else 0)
+            # Keep direction constraints independent; spare ingress cannot pay for saturated egress.
+            return max(s.ingress_byte_rate / cap.ingress_byte_rate,
+                       egress / cap.egress_byte_rate) * cap.byte_rate
         base = s.ingress_byte_rate + s.egress_byte_rate
         if mesh:
             base += _link_bytes(s, subscribing_brokers)
@@ -55,11 +60,9 @@ def _axis_raw_demand(axis: Axis, s: MetricSample, subscribing_brokers: int, mesh
     if axis is Axis.connections:
         return float(s.connection_count)
     if axis is Axis.spool:
-        base = s.spool_used
-        if mesh:
-            # guaranteed: message spooled at each hop → add link pressure to spool too (§5.3)
-            base += _link_bytes(s, subscribing_brokers)
-        return base
+        # Stored bytes already include observed retained copies. A byte RATE cannot be
+        # added to a byte COUNT without a retention-time model.
+        return s.spool_used
     raise ValueError(axis)
 
 
@@ -91,6 +94,19 @@ def decide(req: DecisionRequest) -> ShardDecision:
             Warning(WarningCode.INSUFFICIENT_WINDOW, "no metric samples provided for this shard")
         ])
 
+    numeric_fields = (
+        "timestamp", "ingress_msg_rate", "egress_msg_rate", "ingress_byte_rate",
+        "egress_byte_rate", "avg_msg_size", "connection_count", "spool_used", "current_brokers",
+    )
+    if (not math.isfinite(req.now) or any(
+        any(not math.isfinite(getattr(s, f)) or getattr(s, f) < 0 for f in numeric_fields)
+        or s.current_brokers < 1 or s.timestamp > req.now
+        for s in shard.samples
+    )):
+        return _no_decision(req, "invalid metric values or future timestamps", [
+            Warning(WarningCode.INVALID_METRICS, "metrics must be finite, nonnegative, "
+                    "not future-dated, and describe at least one broker")
+        ])
     latest = max(shard.samples, key=lambda s: s.timestamp)
 
     # §5.5 / §10: refuse to decide on stale data.
@@ -104,13 +120,46 @@ def decide(req: DecisionRequest) -> ShardDecision:
             )
         ])
 
-    avg_msg_size = _mean([s.avg_msg_size for s in shard.samples if s.avg_msg_size > 0]) or latest.avg_msg_size
+    minutes_to_cap = (
+        req.minutes_to_capacity if req.minutes_to_capacity is not None
+        else hr.default_minutes_to_capacity(cfg.policy.warm_pool)
+    )
+    window_secs = _effective_scale_up_window(cfg, minutes_to_cap)
+    recent = _window_samples(shard.samples, window_secs)
+    avg_msg_size = _mean([s.avg_msg_size for s in recent if s.avg_msg_size > 0]) or latest.avg_msg_size
+    if req.model.schema_version == "2" and avg_msg_size <= 0:
+        avg_msg_size = float(cfg.capacity.message_size_hint or 0)
     delivery = cfg.workload.delivery
 
     # §5.2 capacity lookup
     try:
-        cap = lookup(req.model, cfg.fleet.service_class, avg_msg_size, delivery)
-    except KeyError as e:
+        cap = lookup(req.model, cfg.fleet.service_class, avg_msg_size, delivery,
+                     fanout=max(cfg.capacity.fanout, max(s.fanout_ratio for s in recent)),
+                     scenario=cfg.capacity.scenario)
+        # Validate the full recent workload, not just an average that could hide an unsupported size.
+        if req.model.schema_version == "2":
+            sample_caps = [cap]
+            for sample in recent:
+                idle = not (sample.ingress_msg_rate or sample.egress_msg_rate or
+                            sample.ingress_byte_rate or sample.egress_byte_rate)
+                sample_caps.append(lookup(
+                    req.model, cfg.fleet.service_class,
+                    avg_msg_size if idle else sample.avg_msg_size, delivery,
+                    fanout=max(cfg.capacity.fanout, sample.fanout_ratio), scenario=cfg.capacity.scenario,
+                ))
+            # The mean size can hide a slower large-message interval. Preserve the most
+            # conservative observed direction and message limits throughout this decision window.
+            cap = replace(
+                cap, msg_rate=min(c.msg_rate for c in sample_caps),
+                byte_rate=min(c.byte_rate for c in sample_caps),
+                ingress_byte_rate=min(c.ingress_byte_rate for c in sample_caps
+                                      if c.ingress_byte_rate is not None),
+                egress_byte_rate=min(c.egress_byte_rate for c in sample_caps
+                                     if c.egress_byte_rate is not None),
+                interpolated=any(c.interpolated for c in sample_caps),
+                source_cells=sorted({ref for c in sample_caps for ref in c.source_cells}),
+            )
+    except (KeyError, ValueError) as e:
         return _no_decision(req, f"capacity lookup failed: {e}", [
             Warning(WarningCode.MODEL_EXTRAPOLATION, f"capacity model has no data: {e}")
         ])
@@ -118,7 +167,7 @@ def decide(req: DecisionRequest) -> ShardDecision:
     if cap.interpolated:
         warnings.append(Warning(
             WarningCode.INTERPOLATED_CAPACITY,
-            f"capacity interpolated between measured size buckets at avg_msg_size={avg_msg_size:.0f}B",
+            f"capacity estimated between measured size/fanout points at avg_msg_size={avg_msg_size:.0f}B",
         ))
     if cap.extrapolated:
         lo, hi = cap.measured_size_range
@@ -131,11 +180,6 @@ def decide(req: DecisionRequest) -> ShardDecision:
     # per-broker capacity is what a single broker can take; demand is fleet-wide observed load.
     # Build per-axis results.
     axis_results: dict[str, AxisResult] = {}
-    minutes_to_cap = (
-        req.minutes_to_capacity
-        if req.minutes_to_capacity is not None
-        else hr.default_minutes_to_capacity(cfg.policy.warm_pool)
-    )
     minutes_is_assumption = req.minutes_to_capacity is None
 
     unsafe_flags: list[str] = []
@@ -143,7 +187,7 @@ def decide(req: DecisionRequest) -> ShardDecision:
         axis = Axis(axis_name)
         per_broker_cap = _axis_capacity(axis, cap)
         demand = _mean([
-            _axis_raw_demand(axis, s, shard.subscribing_brokers, mesh) for s in shard.samples
+            _axis_raw_demand(axis, s, shard.subscribing_brokers, mesh, cap) for s in recent
         ])
         demand_ratio = demand / per_broker_cap if per_broker_cap > 0 else math.inf
         configured = getattr(cfg.policy.headroom, axis_name)
@@ -153,9 +197,9 @@ def decide(req: DecisionRequest) -> ShardDecision:
         effective = configured
         if cfg.policy.headroom.mode == "derived":
             def _axis_demand(s: MetricSample, a: Axis = axis) -> float:
-                return _axis_raw_demand(a, s, shard.subscribing_brokers, mesh)
+                return _axis_raw_demand(a, s, shard.subscribing_brokers, mesh, cap)
 
-            growth = hr.peak_growth_rate_per_min(shard.samples, _axis_demand)
+            growth = hr.peak_growth_rate_per_min(recent, _axis_demand)
             dh = hr.derive_headroom(
                 growth, minutes_to_cap, cfg.policy.headroom.safety_factor, minutes_is_assumption
             )
@@ -202,7 +246,7 @@ def decide(req: DecisionRequest) -> ShardDecision:
     # required = ceil(total_demand_on_binding_axis / (threshold * per_broker_capacity))
     per_broker_cap = _axis_capacity(binding_axis, cap)
     total_demand = _mean([
-        _axis_raw_demand(binding_axis, s, shard.subscribing_brokers, mesh) for s in shard.samples
+        _axis_raw_demand(binding_axis, s, shard.subscribing_brokers, mesh, cap) for s in recent
     ])
     denom = binding.effective_threshold * per_broker_cap
     if denom <= 0:
@@ -238,12 +282,10 @@ def decide(req: DecisionRequest) -> ShardDecision:
             WarningCode.MESH_AMPLIFICATION,
             f"mesh topology adds inter-broker link traffic (subscribing_brokers="
             f"{shard.subscribing_brokers}) to the bytes"
-            + (" and spool" if delivery in ("guaranteed", "mixed") else "")
-            + " axes; this cost grows with payload size",
+            + " axis; retained spool copies must be included in observed spool_used",
         ))
 
     # §5.5 insufficient window check
-    window_secs = _effective_scale_up_window(cfg, minutes_to_cap)
     span = latest.timestamp - min(s.timestamp for s in shard.samples)
     if span < window_secs:
         warnings.append(Warning(
@@ -264,13 +306,14 @@ def decide(req: DecisionRequest) -> ShardDecision:
             reason="insufficient window",
             fanout_ratio=latest.fanout_ratio,
             avg_msg_size=avg_msg_size,
+            capacity_source_cells=cap.source_cells,
         )
 
     # decide action with hysteresis + gating (§5.5)
     binding_per_broker_cap = _axis_capacity(binding_axis, cap)
     action, reason = _gate(
         req, binding, required, latest.current_brokers, window_secs, warnings,
-        binding_axis, mesh, binding_per_broker_cap,
+        binding_axis, mesh, binding_per_broker_cap, cap, axis_results,
     )
 
     return ShardDecision(
@@ -286,6 +329,7 @@ def decide(req: DecisionRequest) -> ShardDecision:
         reason=reason,
         fanout_ratio=latest.fanout_ratio,
         avg_msg_size=avg_msg_size,
+        capacity_source_cells=cap.source_cells,
     )
 
 
@@ -305,6 +349,8 @@ def _gate(
     binding_axis: Axis,
     mesh: bool,
     per_broker_cap: float,
+    cap: CapacityPoint,
+    axis_results: dict[str, AxisResult],
 ) -> tuple[Action, str | None]:
     cfg = req.config
 
@@ -315,9 +361,16 @@ def _gate(
             return Action.hold, f"within cooldown ({since:.0f}s < {cfg.policy.cooldown:.0f}s)"
 
     if required > current:
+        if not req.shard.key_subdividable:
+            return Action.hold, "hot shard cannot subdivide; adding brokers cannot relieve its load"
         # scale up only when the binding ratio exceeded its threshold for the whole window (§5.5).
-        if _held_condition(req, binding_axis, mesh, window_secs, per_broker_cap,
-                           lambda ratio: ratio > binding.effective_threshold):
+        samples = _covered_window(req, window_secs)
+        if samples and all(
+            s.current_brokers == current and
+            _axis_raw_demand(binding_axis, s, req.shard.subscribing_brokers, mesh, cap)
+            / (per_broker_cap * current) > binding.effective_threshold
+            for s in samples
+        ):
             return Action.scale_up, None
         return Action.hold, "up condition not held for full scale_up_window"
 
@@ -331,45 +384,59 @@ def _gate(
             ))
             return Action.hold, "scale-down suppressed under committed billing"
         # scale down only when below scale_down_at for the whole scale_down_window (§5.5).
-        if _held_condition(req, binding_axis, mesh, cfg.policy.scale_down_window, per_broker_cap,
-                           lambda ratio: ratio < cfg.policy.scale_down_at):
+        samples = _covered_window(req, cfg.policy.scale_down_window)
+        # Every axis must stay low on the current fleet AND fit on the proposed fleet.
+        # Also check capacity at each observed message size, not only the current average.
+        if samples and all(s.current_brokers == current for s in samples):
+            for s in samples:
+                try:
+                    sample_cap = lookup(req.model, cfg.fleet.service_class,
+                                        s.avg_msg_size or cfg.capacity.message_size_hint or 0,
+                                        cfg.workload.delivery,
+                                        fanout=max(cfg.capacity.fanout, s.fanout_ratio),
+                                        scenario=cfg.capacity.scenario)
+                except (KeyError, ValueError):
+                    return Action.hold, "down window contains workload outside measured benchmark"
+                for axis_name in AXES:
+                    axis = Axis(axis_name)
+                    capacity = min(_axis_capacity(axis, cap), _axis_capacity(axis, sample_cap))
+                    demand = _axis_raw_demand(axis, s, req.shard.subscribing_brokers, mesh, cap)
+                    if axis is Axis.bytes and sample_cap.ingress_byte_rate is not None:
+                        sample_ratio = _axis_raw_demand(axis, s, req.shard.subscribing_brokers,
+                                                        mesh, sample_cap) / sample_cap.byte_rate
+                        demand = max(demand, sample_ratio * capacity)
+                    if (demand / (capacity * current) >= cfg.policy.scale_down_at or
+                            demand / (capacity * required) > axis_results[axis_name].effective_threshold):
+                        return Action.hold, "down condition not held for all axes on current and target fleet"
             return Action.scale_down, None
         return Action.hold, "down condition not held for full scale_down_window"
 
     return Action.hold, "at target broker count"
 
 
-def _held_condition(
-    req: DecisionRequest,
-    axis: Axis,
-    mesh: bool,
-    window_secs: float,
-    per_broker_cap: float,
-    predicate: Callable[[float], bool],
-) -> bool:
-    """True iff ``predicate(demand_ratio)`` holds for every sample within ``window_secs`` of latest.
+def _window_samples(samples: list[MetricSample], window_secs: float) -> list[MetricSample]:
+    """Recent samples plus the boundary observation immediately before the window.
 
-    ``demand_ratio`` is per-sample raw demand / per-broker capacity (capacity is constant across the
-    window, so it is passed in rather than re-looked-up). If the window is not actually covered by
-    samples, this returns False - the condition cannot be shown to have *held* for the full window.
+    Scrapes need not land exactly on the window boundary. Keeping the preceding observation
+    brackets it conservatively, without manufacturing historical samples.
     """
-    samples = sorted(req.shard.samples, key=lambda s: s.timestamp)
-    if not samples:
-        return False
-    latest_ts = samples[-1].timestamp
-    window_start = latest_ts - window_secs
-    windowed = [s for s in samples if s.timestamp >= window_start - 1e-9]
-    if not windowed:
-        return False
-    # The window must be covered: the oldest windowed sample must reach back the full window.
-    if (latest_ts - windowed[0].timestamp) < window_secs - 1e-9:
-        return False
-    for s in windowed:
-        demand = _axis_raw_demand(axis, s, req.shard.subscribing_brokers, mesh)
-        ratio = demand / per_broker_cap if per_broker_cap > 0 else math.inf
-        if not predicate(ratio):
-            return False
-    return True
+    ordered = sorted(samples, key=lambda s: s.timestamp)
+    if not ordered:
+        return []
+    start = ordered[-1].timestamp - window_secs
+    before = [s for s in ordered if s.timestamp <= start]
+    return before[-1:] + [s for s in ordered if s.timestamp > start]
+
+
+def _covered_window(req: DecisionRequest, seconds: float) -> list[MetricSample]:
+    """Require coverage, distinct timestamps and no gap exceeding two scrape intervals."""
+    samples = _window_samples(req.shard.samples, seconds)
+    if not samples or samples[-1].timestamp - samples[0].timestamp < seconds - 1e-9:
+        return []
+    max_gap = 2 * req.config.metrics.scrape_interval
+    if any(not 0 < b.timestamp - a.timestamp <= max_gap for a, b in zip(samples, samples[1:], strict=False)):
+        return []
+    return samples
 
 
 def _no_decision(req: DecisionRequest, reason: str, warnings: list[Warning]) -> ShardDecision:

@@ -1,141 +1,211 @@
-# solace-broker-autoscale
+# Solace broker autoscale
 
-**Autoscale your Solace Cloud brokers as throughput grows, and keep every client pointed at the right broker.**
+**Scale the brokers. Move the workload. Keep related payments together.**
 
-Vertical scaling on Solace Cloud has a ceiling. Once you are on the largest practical service class
-and traffic keeps climbing, there is no bigger broker to buy. This project is the horizontal path:
-run more brokers, spread the load, and route each message to where it belongs.
+This project helps you plan and operate a horizontally scaled Solace Cloud fleet. It combines measured performance profiles, stable business-key routing and an unattended controller that moves managed queue partitions to available capacity.
 
-🔗 **[Overview and examples](https://solacese.github.io/solace-broker-autoscale/)**
+[Explore the project](https://solacese.github.io/solace-broker-autoscale/) · [Routing explained](guide/routing.md) · [Measured profiles](guide/measured-profiles.md) · [Configuration](guide/configuration.md)
 
-> Community project. Not a supported Solace product. No warranty. Apache 2.0.
-> No measured numbers, prices, or customer data are included. You supply your own.
+> Community project, Apache 2.0. Automatic managed-SMF queue handover is tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
 
----
+## Repository layout and supported paths
 
-## Two products, one repo
+- [scaling-controller/](scaling-controller/): Python controller, capacity planning, native SMF client, durable outbox and managed queue migration.
+- [shim/](shim/): Go topic/payload rules, AMQP transport and event-driven topology primitives. Includes bounded asynchronous publishing and application-controlled message settlement.
+- [guide/](guide/): documentation and the GitHub Pages site.
+- [examples/](examples/): short application policies and operator profiles.
 
-The project ships two independent pieces. Use either on its own.
+Use the Python native SMF path for the automatic managed migration described here. The Go rule/spine path is retained and improved, but its in-memory asynchronous queue and topology ownership are not interchangeable with the managed durable outbox and migration protocol. [Production readiness](guide/production-readiness.md) lists the remaining work.
 
-| Product | Folder | Language | What it does |
-|---|---|---|---|
-| **Scaling controller** | [`scaling-controller/`](scaling-controller/) | Python | Reads your capacity model and live metrics, decides how many brokers the workload needs, explains why, and can optionally scale the fleet. This is the `solace-autoscale` command. |
-| **Smart shim** | [`shim/`](shim/) | Go | A client-side library that wraps your app's own AMQP client. Per message, it applies your routing rules, picks the target broker, stamps a partition key, and (optionally) rewrites the address. No proxy in the data path. |
+## Start with a small application policy
 
-The controller changes the *number* of brokers. The shim makes each publisher and subscriber follow
-that change and route each message deterministically across the fleet.
+Use [the short payments YAML](examples/simple/payments.yaml) to choose topics, ordering keys, subscriber groups and broker limits. Keep environment setup in [one operator connection file](examples/simple/connection.yaml). [The simple guide](guide/simple-policy.md) explains each choice and the two service commands.
 
-### Repository layout
-
-```
-scaling-controller/   Python control plane (the solace-autoscale CLI, decision engine, assignment service)
-shim/                 Go smart shim (rule engine, resolver, publisher + listener, real AMQP, CLI demo)
-guide/                Documentation and design records (published to the project site)
-examples/             Ready-to-run config, starting with config.example.yaml
-deploy/               Deployment assets (Terraform, container, KEDA scaler)
-models/               Capacity model files, including the fabricated synthetic sample
-resources/            Inputs you supply (performance workbooks); nothing measured is committed
-scripts/              Helpers, e.g. regenerating the synthetic model
+```bash
+solace-autoscale explain --config examples/simple/payments.yaml --topic payments/account-42/created
 ```
 
----
+**Publishing is asynchronous pub/sub.** The application saves locally and continues. Broker receipts arrive in the background; subscribers process independently. No subscriber reply is required. Guaranteed delivery keeps transport receipts so a payment is never removed from the local buffer merely because it was sent.
 
-## Scaling controller (Python)
+## What you can do
+
+| Need | What the repository provides |
+|---|---|
+| Size a real workload | Import measured Cloud workbooks and keep provider, broker generation, tier, fanout and replay/tracing conditions separate. Trace the answer back to spreadsheet cells. |
+| See which limit is reached | Evaluate message rate, incoming/outgoing bytes, connections and stored messages. Include headroom, sustained windows and cooldown policy. |
+| Plan growth and cost | Explore traffic multipliers and broker counts. Add your own prices to estimate costs; committed and elastic billing behave differently. |
+| Observe the fleet | Collect every active service over SEMP. Refuse incomplete snapshots and show per-broker load alongside totals. |
+| Keep related messages together | Route by a shared business key into fixed partitions. Use stable or weighted rendezvous hashing; preserve durable queue ownership. |
+| Connect existing applications | Return ordinary SMF, AMQP, MQTT and REST endpoints. The Python key router caches partition locations; messages travel directly to brokers. |
+| Explore shard boundaries | Use Event Portal exports to propose traffic groups. The application still supplies its routing key. |
+| Scale while unattended | Detect sustained overload, activate warm brokers, select fitting partitions, fence and drain queues, switch ownership, and recover after restart. Optionally replenish warm capacity through Solace Cloud. |
+
+## Start with your performance profiles
+
+Python 3.11 or later:
+
+```bash
+pip install -e './scaling-controller[compile,service]'
+solace-autoscale profiles import --directory /path/to/workbooks
+solace-autoscale profiles list
+solace-autoscale profiles inspect resources/performance/catalog/PROFILE.json
+```
+
+Compile one matching provider/version generation with explicit HA service limits:
+
+```bash
+solace-autoscale profiles compile \
+  --catalog resources/performance/catalog/PROFILE.json \
+  --service-classes examples/measured/ha-planning-limits.json \
+  --limits-source "Planning defaults; replace with actual deployed VPN limits" \
+  --out models/my-profile.json
+
+solace-autoscale plan --model models/my-profile.json \
+  --service-class enterprise-1k --message-size 1024 \
+  --messages 10000 --fanout 5 --scenario streaming
+```
+
+The example limits file is explicitly for planning. The supplied Cloud test layouts describe HA services, not standalone brokers. Disk size is not the VPN spool limit. Real workbooks, catalogs and models remain local and ignored by Git; the public repository contains invented test data.
+
+For an existing metrics window:
+
+```bash
+solace-autoscale recommend --config your-config.yaml --metrics metrics.json
+solace-autoscale whatif --config your-config.yaml --metrics metrics.json --multipliers 1,2,4
+```
+
+For a fleet, edit [the inventory example](examples/measured/fleet.yaml), set its SEMP credential environment variables, and run:
+
+```bash
+solace-autoscale monitor-fleet --config your-config.yaml --inventory your-fleet.yaml
+```
+
+These commands are read-only. A fresh monitor gathers a full observation window before recommending a change. See [measured profiles](guide/measured-profiles.md) for coverage, assumptions and the complete workflow.
+
+## Publish and subscribe through one API
+
+The native Python shim handles broker selection, connections, durable buffering and subscription discovery. Solace matches topics and fans out to durable group queues. Your application uses business topics:
+
+```python
+client.subscribe(group="ledger", handler=commit_payment)
+client.publish("payments/account-42/created", {"amount": 25}, event_id="payment-123")
+```
+
+YAML chooses business-key, full-topic or whole-family dispatch. It declares subscriber groups and per-shard scaling thresholds. In this example, it extracts `account-42` as the ordering key. The controller moves its partition through preparation, fencing, drainage and cutover; the shim follows automatically. `publish()` confirms local persistence, and subscriber handlers must deduplicate event IDs. Different subscription groups receive independent copies; replicas in one group share exclusive queues.
+
+[Native messaging guide](guide/native-messaging.md) · [Complete YAML](examples/measured/payments-native.yaml) · [Runnable application](examples/payments/native_app.py)
+
+## How messages are spread
+
+The original resolver balanced **client placement counts**. A busy client could still dominate a broker, and unrelated client IDs could send a publisher and its consumer to different brokers.
+
+For lower-level integrations that supply their own business key, use:
+
+```yaml
+assignment:
+  store: ./assignment.db
+  routing: partitioned        # client | partitioned
+  strategy: rendezvous        # least-placements | rendezvous
+  partitions: 128             # Fixed per shard; changing this requires migration.
+  lease_seconds: 300
+  broker_weights: {}          # Optional: {broker-a: 1, broker-b: 2}
+```
+
+A key such as `order-123` maps to a fixed partition with a recorded broker owner. Publishers and consumers agree on that owner. The managed controller creates partition queues; the Python managed adapters buffer rejected messages and pre-bind destination consumers. Generic routing integrations retain responsibility for their own queue conventions.
+
+```python
+from solace_autoscale_client import KeyRouter, Resolver
+
+router = KeyRouter(
+    Resolver("https://assign.example.com", api_key=assignment_api_key),
+    shard="orders", client_id="publisher-1", partitions=128,
+    mode="guaranteed", protocol="smf",
+)
+location = router.resolve_key("order-123")
+# Use location.broker_id to reuse a connection from your application's pool.
+# Publish to the topic for location.partition_id on that broker.
+```
+
+The key router performs local hashing and caches locations for a lease, avoiding a lookup for every message. It is included under `scaling-controller`; see [client setup](guide/native-messaging.md).
+
+## Scale automatically through a burst
+
+The controller measures each managed partition, finds a move that relieves the hot broker and fits on the destination, then performs the handover. Hashing chooses initial owners; measured load chooses migrations.
+
+**Prepare destination → bind consumer → fence old writes → drain and wait → change owner → retry buffered messages.**
+
+A grace period never bypasses outstanding messages or acknowledgments. The old broker rejects stale publishers. The durable outbox retains rejected/uncertain messages; consumers must atomically deduplicate event IDs with their business changes. Other partitions continue during the handover.
+
+```bash
+# First edit the examples, compile a matching real profile, and set credential environment variables.
+pip install -e './scaling-controller[compile,service]'
+pip install -e 'scaling-controller[smf]'
+solace-autoscale serve --config examples/measured/payments-automatic.yaml
+# In a second process:
+solace-autoscale run --config examples/measured/payments-automatic.yaml \
+  --inventory examples/measured/payments-fleet.yaml
+```
+
+Keep managed consumers running so they can bind new destinations. Enable `provisioning.enabled` to replenish warm services automatically, with an explicit region, exact version, token and spending ceiling. The example leaves Cloud creation disabled until those are configured.
+
+[Automatic scaling: walkthrough, YAML and recovery](guide/automatic-scaling.md) · [Validation results](guide/automatic-scaling-validation.md) · [Full config](examples/measured/payments-automatic.yaml) · [Publisher/consumer example](examples/payments/worker.py)
+
+## Choose the workload conditions
+
+```yaml
+capacity:
+  model: models/my-profile.json
+  scenario: worst             # worst | streaming | unspooling | replay | tracing
+  fanout: 5                   # Design floor; observed higher fanout takes precedence.
+workload:
+  delivery: guaranteed        # direct | guaranteed | mixed
+  bottleneck: auto             # auto | messages | bytes | spool | connections
+fleet:
+  service_class: enterprise-1k
+  min_brokers: 1              # Per-shard bounds
+  max_brokers: 8
+actuation:
+  mode: recommend
+  dry_run: true
+```
+
+Replay and tracing were benchmarked separately; their combined cost is not measured. Intermediate size/fanout estimates are labeled. Workloads outside measured coverage produce an explicit refusal, not invented throughput.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `profiles import/list/inspect/compile` | Build and inspect a local measured profile catalog. |
+| `plan` | Size a hypothetical workload without a live broker; show source cells and limits. |
+| `recommend`, `whatif` | Evaluate a metrics window and growth scenarios. |
+| `monitor`, `monitor-fleet` | Observe one broker or a complete inventoried fleet over SEMP. |
+| `serve` | Run assignment and managed partition discovery using the YAML policy. |
+| `run` | Run automatic managed queue handover and optional Cloud warm-pool replenishment. |
+| `simulate` | Exercise the legacy model/decision matrix. Measured profiles have separate coverage tests. |
+| `accuracy` | Report recorded calibration evidence; normal traffic alone does not establish saturation. |
+| `shard-advise` | Suggest traffic groups from an Event Portal export. |
+| `compile` | Legacy fanout-one compiler. Prefer `profiles compile` for the supported Cloud workbooks. |
+
+## Operational boundaries
+
+- SEMP and static collection are implemented. Prometheus and Cloud-API collectors remain placeholders.
+- Assignment transactions support threads/processes on **one host** sharing local SQLite. Multi-host HA needs a shared durable backend.
+- Assignment authentication uses `SOLACE_ASSIGNMENT_API_KEY`; non-loopback startup requires it. Use TLS ingress. The key is service-wide, not tenant-level authorization.
+- Guaranteed placements do not silently change broker or delivery mode. Routing/partition-count changes are rejected against an existing store.
+- Automatic movement supports dedicated, homogeneous fleets with managed guaranteed SMF queues. Arbitrary existing queues, multi-protocol migration, automatic scale-in/deletion and backlog copying are not implemented.
+- A single hot key still needs a finer ordering key or larger tier. Slow consumers can delay a drain; a timeout never discards payments.
+- Protocol adapters do not prove measured throughput for every protocol. Validate the actual workload and message-ordering requirements before production use.
+
+## Documentation and development
+
+[Automatic scaling](guide/automatic-scaling.md) · [Routing](guide/routing.md) · [Profiles](guide/measured-profiles.md) · [Architecture](guide/architecture.md) · [Metrics](guide/metrics.md) · [Safety](guide/safety.md) · [Configuration](guide/configuration.md) · [Client integration](guide/client-integration.md) · [Design decisions](guide/adr/)
 
 ```bash
 cd scaling-controller
-pip install -e '.[compile]'          # installs the solace-autoscale command
+pip install -e '.[dev]'
+pytest -q
+ruff check solace_autoscale tests solace_autoscale_client
+mypy solace_autoscale
 ```
 
-```bash
-# How many brokers does this workload need now?
-solace-autoscale recommend --config ../examples/config.example.yaml --metrics metrics.json
-
-# How many would it need if traffic doubled or quadrupled?
-solace-autoscale whatif --config ../examples/config.example.yaml --metrics metrics.json --multipliers 1,2,4
-```
-
-By default these run against an included sample model (`models/synthetic-v0.json`) whose numbers are
-obviously fabricated. Every report flags the sample model and blocks any real change, so you can see
-the output safely. To use your own numbers, measure your brokers into a workbook (see
-[`guide/benchmark.md`](guide/benchmark.md)), compile it, and point your config at the result:
-
-```bash
-solace-autoscale compile --workbook performance.xlsx \
-    --service-classes models/service-classes.json --out models/mymodel.json
-```
-
-Full commands, settings, and safety controls are in [`scaling-controller/README.md`](scaling-controller/README.md).
-
----
-
-## Smart shim (Go)
-
-Once a workload spans several brokers, where each message goes stops being arbitrary. The shim wraps
-the app's existing AMQP client, so there is no proxy in the data path. Per message it makes one
-decision from rules that combine the Solace topic and the JSON payload, picks the target broker, and
-stamps a partition key on the wire (AMQP `group-id` plus a `saas_partition_key` property). It is not
-round-robin: the same message always routes the same way, so per-key ordering holds, and the listener
-side re-runs the same rules to demultiplex a coherent per-key stream.
-
-```yaml
-# rule spec (JSON on disk, shown here as YAML for readability): first match wins
-default_broker: broker-bulk
-rules:
-  - name: vip-orders                 # topic AND payload
-    when:
-      topic: "orders/>"
-      payload:
-        - { path: priority, op: in, value: [high, urgent] }
-    route:
-      broker: broker-vip
-      key:   "vip.{region}"          # partition key = ordering group, templated from the payload
-      topic: "vip/{topic}"           # optional address rewrite
-  - name: large-orders
-    when: { topic: "orders/>", payload: [ { path: amount, op: gt, value: 1000 } ] }
-    route: { broker: broker-big, key: "big.{region}" }
-```
-
-Predicate operators: `eq ne in nin gt gte lt lte exists missing prefix contains regex`, plus
-`raw_size_gt raw_size_lt raw_prefix` for non-JSON payloads. The rule spec is portable: the Python
-controller's `dispatch-test` and the Go shim read the same JSON, proven by a cross-language golden
-test. Build and try it from [`shim/`](shim/):
-
-```bash
-cd shim
-go test ./...
-go run ./cmd/shim demo          # runs the rule engine + an in-memory transport, offline
-```
-
-See [`shim/README.md`](shim/README.md) for the library API, the `Transport` interface, and the AMQP
-transport.
-
----
-
-## Documentation
-
-- [`guide/architecture.md`](guide/architecture.md) - how the pieces fit together
-- [`guide/capacity-model.md`](guide/capacity-model.md) - the model file and how to build it
-- [`guide/configuration.md`](guide/configuration.md) - every controller setting
-- [`guide/metrics.md`](guide/metrics.md) - where the numbers come from
-- [`guide/rule-spec.md`](guide/rule-spec.md) - the portable dispatch rule spec (Python and Go)
-- [`guide/client-integration.md`](guide/client-integration.md) - connecting clients
-- [`guide/event-spine.md`](guide/event-spine.md) - event-driven, ordering-first reassignment
-- [`guide/safety.md`](guide/safety.md) - the safety controls
-- [`guide/adr/`](guide/adr/) - the design decisions and the reasons for them
-
-## Development
-
-Each product builds and tests on its own:
-
-```bash
-# Python controller
-cd scaling-controller && pip install -e '.[dev]'
-pytest -m "not integration" -q && ruff check . && mypy solace_autoscale
-
-# Go shim
-cd shim && go test ./... && go vet ./...
-```
-
-Contributions are welcome. The decision engine and the rule engine are pure functions (inputs in,
-result out, no I/O). Please keep them that way.
+Live-broker tests use separate protocol clients and a local broker: install `.[integration]` and run `pytest -m integration`. Tests for private measured workbooks run locally; customer performance data is not required by CI.

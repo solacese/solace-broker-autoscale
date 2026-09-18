@@ -6,14 +6,14 @@ Reads ``GET /SEMP/v2/monitor/msgVpns/{vpn}`` for rates + spool, and the clients 
 
 from __future__ import annotations
 
+import math
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from ..decision.types import MetricSample
 from .base import CollectorError, MetricsCollector
-
-MB = 1_048_576
 
 
 def map_vpn_monitor(
@@ -26,11 +26,16 @@ def map_vpn_monitor(
 
     Kept pure so it can be unit-tested against the captured fixture with no network.
     """
-    rx_msg = float(vpn_data.get("averageRxMsgRate", 0.0))
-    tx_msg = float(vpn_data.get("averageTxMsgRate", 0.0))
-    rx_byte = float(vpn_data.get("averageRxByteRate", 0.0))
-    tx_byte = float(vpn_data.get("averageTxByteRate", 0.0))
-    spool_mb = float(vpn_data.get("msgSpoolUsage", 0.0))
+    required = ("averageRxMsgRate", "averageTxMsgRate", "averageRxByteRate",
+                "averageTxByteRate", "msgSpoolUsage")
+    try:
+        values = [vpn_data[k] for k in required]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               or not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError("invalid counters")
+        rx_msg, tx_msg, rx_byte, tx_byte, spool_bytes = map(float, values)
+    except (KeyError, TypeError, ValueError) as e:
+        raise CollectorError("SEMP VPN metrics missing or invalid; refusing to substitute zero load") from e
 
     if rx_msg > 0:
         avg_size = rx_byte / rx_msg
@@ -47,7 +52,7 @@ def map_vpn_monitor(
         egress_byte_rate=tx_byte,
         avg_msg_size=avg_size,
         connection_count=connection_count,
-        spool_used=spool_mb * MB,  # SEMP reports MB → bytes
+        spool_used=spool_bytes,  # monitor msgSpoolUsage is bytes; maxMsgSpoolUsage is MB
         current_brokers=current_brokers,
     )
 
@@ -71,9 +76,15 @@ class SempCollector(MetricsCollector):
     def connection_count(self, msg_vpn: str) -> int:
         # meta.count on the clients collection is the live connection count (no scalar VPN field).
         body = self._get(f"/SEMP/v2/monitor/msgVpns/{msg_vpn}/clients?count=1")
-        return int(body.get("meta", {}).get("count", len(body.get("data", []))))
+        count = body.get("meta", {}).get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise CollectorError("SEMP clients response missing a valid total meta.count")
+        return count
 
     def collect(self, shard_name: str, msg_vpn: str, now: float, current_brokers: int) -> MetricSample:
+        if current_brokers != 1:
+            raise CollectorError("one SEMP endpoint observes one broker; aggregate fleet metrics explicitly")
+        msg_vpn = quote(msg_vpn, safe="")
         vpn = self._get(f"/SEMP/v2/monitor/msgVpns/{msg_vpn}")["data"]
         conns = self.connection_count(msg_vpn)
         return map_vpn_monitor(vpn, conns, now, current_brokers)

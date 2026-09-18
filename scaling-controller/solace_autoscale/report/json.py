@@ -24,6 +24,7 @@ def decision_to_dict(d: ShardDecision) -> dict[str, Any]:
         "fanout_ratio": round(d.fanout_ratio, 4),
         "avg_msg_size_bytes": round(d.avg_msg_size, 2),
         "interpolated": d.interpolated,
+        "capacity_source_cells": d.capacity_source_cells,
         "axes": {
             name: {
                 "demand_ratio": round(ar.demand_ratio, 4),
@@ -70,6 +71,8 @@ def build_report(
         "synthetic_warning": model.warning if model.synthetic else None,
         "provenance": model.provenance.model_dump(),
         "config_hash": config.config_hash(),
+        "capacity_scenario": config.capacity.scenario,
+        "design_fanout_floor": config.capacity.fanout,
         "billing_model": config.billing.model,
         "topology_mode": config.topology.mode,
         "warm_pool_cost": warm_pool_cost_note(config),

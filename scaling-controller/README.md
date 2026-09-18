@@ -5,8 +5,8 @@ when the fleet needs more or fewer of them, and (only when you turn scaling on) 
 decision. It also replicates broker configuration across the fleet and hands clients their broker
 assignment.
 
-This is the Python half of the project. The per-message data path is the native Go shim under
-[`../shim`](../shim), which reads the same portable rule spec this package can emit.
+This is the Python control plane and managed native SMF client. The separate Go AMQP shim under
+[`../shim`](../shim), reads the portable topic/payload rule spec this package can emit. Managed queue migration uses the Python SMF client and its durable outbox.
 
 ## Install
 
@@ -33,7 +33,7 @@ solace-autoscale dispatch-test --config ../examples/config.example.yaml \
 - `solace_autoscale/` the package: `decision`, `capacity`, `metrics`, `actuator`, `assignment`,
   `configsync`, `dispatch` (the pure rule engine the Go shim mirrors), `simulator`, `report`, `dns`.
 - `solace_autoscale_client/` Tier-1 client helpers: the fail-open `Resolver` and per-protocol
-  endpoint adapters. These never carry a message and never vend credentials.
+  endpoint adapters, plus the native SMF publish/subscribe client and durable outbox.
 - `tests/` unit tests (default) and live-broker integration tests (`-m integration`).
 
 ## Verify

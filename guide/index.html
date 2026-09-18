@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>solace-autoscale</title>
-<meta name="description" content="Works out how many Solace Cloud brokers a workload needs, and can scale to match. A community project, not an official product.">
+<meta name="description" content="Plan broker capacity from measured profiles. Route related messages together. Explore the Solace autoscale toolkit in plain English.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Spline+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -285,964 +285,171 @@
   footer { padding: 44px 0 72px; color: var(--ink-faint); font-family: var(--mono); font-size: 12px; }
   footer p { margin: 4px 0; }
   footer a { color: var(--ink-soft); }
-
-  /* ---- smart shim demo ---- */
-  .shim-demo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }
-  @media (max-width: 760px) { .shim-demo { grid-template-columns: 1fr; } }
-  .shim-input, .shim-output { padding: 20px; }
-  .shim-lbl { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
-    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 6px; }
-  .shim-lbl + .shim-field { margin-bottom: 14px; }
-  .shim-field { width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 13px;
-    color: var(--ink); background: var(--bg); border: 1px solid var(--line-strong);
-    border-radius: 8px; padding: 9px 11px; }
-  .shim-field:focus { outline: none; border-color: var(--accent); }
-  .shim-area { resize: vertical; line-height: 1.5; }
-  .shim-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-  .preset { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); cursor: pointer;
-    background: transparent; border: 1px solid var(--line-strong); border-radius: 999px;
-    padding: 5px 12px; }
-  .preset:hover { border-color: var(--accent); color: var(--accent); }
-  .shim-verdict { font-family: var(--mono); font-size: 13px; margin-bottom: 16px; }
-  .shim-verdict .rule-name { display: inline-block; font-weight: 700; padding: 3px 10px;
-    border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
-  .shim-verdict .rule-name.dflt { background: color-mix(in srgb, var(--warn) 18%, transparent);
-    color: var(--warn); }
-  .shim-verdict .verdict-lead { color: var(--ink-faint); margin-right: 8px; }
-  .shim-wire { border-top: 1px solid var(--line); }
-  .wire-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0;
-    border-bottom: 1px solid var(--line); }
-  .wire-k { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
-    color: var(--ink-faint); }
-  .wire-v { font-family: var(--mono); font-size: 13px; color: var(--ink); text-align: right;
-    word-break: break-all; }
-  .wire-v.key { color: var(--accent); font-weight: 700; }
-  .shim-note { color: var(--ink-soft); font-size: 0.9rem; margin: 14px 0 0; min-height: 1.2em; }
-  .shim-note.err { color: var(--warn); }
-  .shim-rules { margin-top: 18px; }
-  .rules-cap { color: var(--ink-faint); font-family: var(--mono); font-size: 12px; margin: 0 0 8px; }
-  .rules-yaml { background: var(--code-bg, var(--bg)); border: 1px solid var(--line);
-    border-radius: 10px; padding: 16px 18px; overflow-x: auto; }
-  .rules-yaml code { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); }
 </style>
 </head>
 <body>
-
-<nav class="nav">
-  <div class="nav-inner">
-    <a class="brand" href="#top"><span class="dot"></span> solace-autoscale</a>
-    <div class="nav-links">
-      <a href="#how">How it works</a>
-      <a href="#readings">Examples</a>
-      <a href="#shim">Smart shim</a>
-      <a href="#start">Quickstart</a>
-      <a href="#customize">Settings</a>
-      <button class="theme-btn" id="themeToggle" type="button" aria-label="Toggle color theme">theme</button>
-      <a class="primary" href="https://github.com/solacese/solace-broker-autoscale">GitHub</a>
-    </div>
-  </div>
-</nav>
-
-<header id="top">
-  <div class="wrap">
-    <p class="eyebrow">for solace cloud brokers</p>
-    <h1>Autoscale your brokers as throughput grows</h1>
-    <p class="standfirst">
-      A single Solace broker can only grow so far. Once you're on the biggest one and traffic keeps
-      climbing, the question changes from "pick a bigger broker" to "how many brokers, and when?"
-      <b>solace-autoscale</b> answers that using capacity numbers you measure from your own brokers,
-      and shows the reason behind every recommendation, never just a number. It advises by default;
-      turning on automatic scaling is a separate, deliberate switch.
-    </p>
-    <figure class="flow-fig">
-      <canvas id="flow" class="flow" width="960" height="400"
-              aria-label="Animation of horizontal scaling: a publisher at the top, using its normal AMQP client with a thin shim, sends messages down through brokers inside a Solace Cloud box to a subscriber at the bottom that uses a normal AMQP client. An autoscaler on the left continuously reads message rate and size from the brokers over SEMP; when they rise past one broker's limit it signals the Solace Cloud box and a second, then a third broker appear side by side, sharing the load. The autoscaler then publishes a topology event on the brokers' own control topics; the shim reacts to the push and moves a small fraction of partition keys to the new broker ordering-first, draining each key on its old broker before cutting over, so per-key order survives the scale event."></canvas>
-      <figcaption id="flowCap" class="flow-cap">One broker, light load</figcaption>
-    </figure>
-    <div class="cta-row">
-      <a class="btn primary" href="#start">Get started</a>
-      <a class="btn" href="https://github.com/solacese/solace-broker-autoscale">View on GitHub</a>
-      <a class="btn" href="#readings">See it in action</a>
-    </div>
-    <div class="meta-row">
-      <span><b>Apache 2.0</b> &middot; free &amp; open source</span>
-      <span><b>Python</b> 3.11+</span>
-      <span><b>Same input, same answer,</b> every time</span>
-      <span><b>Never changes anything</b> unless you ask</span>
-    </div>
-  </div>
-</header>
-
-<!-- HOW IT WORKS -->
-<section id="how">
-  <div class="wrap">
-    <p class="section-label">how it works</p>
-    <h2>Measure once, then get answers you can trust</h2>
-    <p class="lede">
-      Nothing is guessed and nothing is hidden. The capacity numbers come from your own brokers, not
-      from us. The recommendation is worked out the same way every time, and it comes with the full
-      reasoning - so you can still explain it to someone weeks later.
-    </p>
-    <div class="steps">
-      <div class="step">
-        <span class="n">step 1 &middot; measure</span>
-        <h3>Use your own numbers</h3>
-        <p>Feed it a spreadsheet of how your brokers actually perform. It saves that as a dated file
-          it reads later, so you always know which numbers produced which answer.</p>
-      </div>
-      <div class="step">
-        <span class="n">step 2 &middot; recommend</span>
-        <h3>See the why, not just the how many</h3>
-        <p>It checks four things a broker can run out of - message rate, data rate, connections,
-          and stored messages - and tells you which one you'll hit first.</p>
-      </div>
-      <div class="step">
-        <span class="n">step 3 &middot; act (optional)</span>
-        <h3>It only advises, unless you say otherwise</h3>
-        <p>Out of the box it just gives advice - it can't touch your brokers. Letting it scale for
-          you is a separate, deliberate switch, with safety checks that block anything risky.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- THESIS: the capacity curve -->
-<section>
-  <div class="wrap">
-    <p class="section-label">why it's not obvious</p>
-    <h2>Bigger messages cost far more than they look</h2>
-    <p class="lede">
-      One broker can handle about 44,000 small (1&nbsp;KB) messages a second - but only about 439 a
-      second when each message is 200&nbsp;KB. That's why "just add more brokers" is sometimes the wrong
-      call: with big messages you run out of <em>data capacity</em>, and shrinking the message is
-      usually the cheaper fix than buying more brokers.
-    </p>
-    <div class="curve-panel">
-      <figure>
-        <canvas id="curve" class="chart" width="640" height="380" aria-label="Messages per second one broker can handle, as message size grows"></canvas>
-      </figure>
-      <div class="curve-read">
-        <div class="big">44,192 <span>&rarr;</span> 439</div>
-        <div>messages/sec one broker can handle<br>as each message grows from 1&nbsp;KB to 200&nbsp;KB</div>
-        <div class="collapse">
-          The message rate drops about 100&times;, yet the broker is moving roughly the same amount of
-          data (45 &rarr; 90&nbsp;MB/s). It's busy shifting <b>bytes</b>, not messages. At that point more
-          brokers help, but they get expensive fast - so it's worth checking the payload first.
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- THREE READINGS -->
-<section id="readings">
-  <div class="wrap">
-    <p class="section-label">three examples</p>
-    <h2>Three workloads, three different answers</h2>
-    <p class="lede">
-      These are real results from the tool. For each workload, the bars show how full one broker
-      would be on each of the four things it can run out of. The amber line is the safe limit; the
-      highlighted bar is the one you'd hit first - and the reason for the advice.
-    </p>
-    <div class="scenarios" id="scenarios"></div>
-    <div class="track-key">
-      <span><i class="swatch" style="background: color-mix(in srgb, var(--accent) 55%, transparent)"></i> within one broker</span>
-      <span><i class="swatch" style="background: color-mix(in srgb, var(--crit) 62%, transparent)"></i> more than one broker can handle</span>
-      <span><i class="swatch" style="background: var(--warn)"></i> safe limit</span>
-    </div>
-  </div>
-</section>
-
-<!-- smart shim: rule-based dispatch -->
-<section id="shim">
-  <div class="wrap">
-    <p class="section-label">the smart shim</p>
-    <h2>Route each message by topic <em>and</em> payload, not round-robin</h2>
-    <p class="lede">
-      Once a workload spans several brokers, <em>where</em> each message goes stops being arbitrary. The
-      shim wraps the app's existing AMQP client and makes a per-message decision from rules that combine
-      the <b>topic</b> and the <b>payload</b>, picks the target broker, and stamps a <b>partition key</b>
-      on the wire (AMQP <code>group-id</code> plus a <code>saas_partition_key</code> property). The
-      listener side runs the same rules in reverse to demultiplex a coherent per-key stream, so routing
-      is deterministic and verifiable end to end. Type a message below and watch a rule fire.
-    </p>
-    <p class="lede">
-      When the fleet scales, the shim does not poll to find out. The autoscaler publishes a topology
-      snapshot as an <b>event</b> on the brokers' own reserved control topics, and the shim reacts to
-      the push. A scale-up moves only a small fraction of partition keys (rendezvous hashing), and each
-      moved key is reassigned <b>ordering-first</b>: it keeps draining on its old broker until in-flight
-      messages clear, then cuts over to the new owner, stamped with a generation (<code>saas_gen</code>)
-      so the listener releases the key's stream in order. Per-key order survives the scale event.
-    </p>
-
-    <div class="shim-demo">
-      <div class="shim-input card">
-        <label class="shim-lbl" for="shimTopic">topic</label>
-        <input id="shimTopic" class="shim-field" type="text" value="orders/eu/new" spellcheck="false">
-        <label class="shim-lbl" for="shimPayload">payload (JSON)</label>
-        <textarea id="shimPayload" class="shim-field shim-area" spellcheck="false" rows="6">{
-  "priority": "high",
-  "region": "EU",
-  "amount": 240
-}</textarea>
-        <div class="shim-presets">
-          <button type="button" class="preset" data-t="orders/eu/new" data-p='{"priority":"high","region":"EU","amount":240}'>VIP order</button>
-          <button type="button" class="preset" data-t="orders/us/new" data-p='{"priority":"low","region":"US","amount":9999}'>Large order</button>
-          <button type="button" class="preset" data-t="telemetry/eu/temp" data-p='{"reading":21.4}'>Telemetry</button>
-        </div>
-      </div>
-
-      <div class="shim-output card">
-        <div class="shim-verdict" id="shimVerdict"></div>
-        <div class="shim-wire">
-          <div class="wire-row"><span class="wire-k">broker</span><span class="wire-v" id="wBroker">&mdash;</span></div>
-          <div class="wire-row"><span class="wire-k">address</span><span class="wire-v" id="wAddr">&mdash;</span></div>
-          <div class="wire-row"><span class="wire-k">partition key</span><span class="wire-v" id="wKey">&mdash;</span></div>
-          <div class="wire-row"><span class="wire-k">amqp group-id</span><span class="wire-v" id="wGid">&mdash;</span></div>
-          <div class="wire-row"><span class="wire-k">saas_gen</span><span class="wire-v" id="wGen">&mdash;</span></div>
-        </div>
-        <p class="shim-note" id="shimNote"></p>
-      </div>
-    </div>
-
-    <div class="shim-rules">
-      <p class="rules-cap">The rules driving this demo (first match wins; else the default broker):</p>
-      <pre class="rules-yaml"><code>dispatch:
+<nav class="nav" aria-label="Main navigation"><div class="nav-inner">
+<a class="brand" href="#"><span class="dot"></span>solace / autoscale</a>
+<div class="nav-links"><a href="#automation">Autoscaling</a><a href="#routing">Routing</a><a href="#profiles">Profiles</a><a href="#settings">YAML</a><a href="#start">Start</a><a class="primary" href="https://github.com/solacese/solace-broker-autoscale">GitHub ↗</a></div>
+<button class="theme-btn" id="theme-toggle" aria-label="Toggle color theme">◐</button></div></nav>
+<header><div class="wrap">
+<p class="eyebrow">Measured capacity + automatic queue handover</p>
+<h1>More room for messages.<br>Same home for each key.</h1>
+<p class="standfirst">Detect sustained overload, use spare brokers and move managed queue partitions automatically. Keep related payments together while rejected messages wait safely for the new owner.</p>
+<div class="cta-row"><a class="btn primary" href="#routing">Explore message routing ↓</a><a class="btn" href="#start">Try the toolkit</a></div>
+<div class="meta-row"><span><b>Python</b> · open source</span><span><b>SMF · AMQP · MQTT · REST</b> endpoints</span><span><b>Read-only</b> planning & monitoring</span></div>
+<div class="hero-route" aria-label="Business key to partition to broker to queue">
+<div><small>YOUR APPLICATION</small><strong>order-123</strong><span>A shared business key</span></div><b aria-hidden="true">→</b>
+<div><small>STABLE PARTITION</small><strong>Partition 17</strong><span>Keep related messages together</span></div><b aria-hidden="true">→</b>
+<div><small>RECORDED OWNER</small><strong>Broker B</strong><span>Publishers + consumers agree</span></div>
+</div><p class="caption">Illustrative route. The native shim pools messaging connections; messages travel directly to Solace.</p>
+</div></header>
+<main>
+<section><div class="wrap"><p class="section-label">Two client paths, clear boundaries</p><h2>Native SMF automation and a Go rules shim.</h2><p class="lede">The Python client provides durable buffering and managed queue migration. The Go shim adds topic and payload rules, AMQP, asynchronous publication and application-controlled acknowledgement. Its memory-only queue does not yet provide the same restart guarantees.</p><p><a href="https://github.com/solacese/solace-broker-autoscale/tree/main/shim">Explore the Go shim</a> · <a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/production-readiness.md">Read the production release gates</a></p></div></section>
+<section id="native-messaging"><div class="wrap"><p class="section-label">One API for your application</p><h2>Publish a topic. Subscribe to what matters.</h2><p class="lede">The shim finds the broker and keeps connections and consumers in step with the controller. Solace matches native topic subscriptions and delivers each group's copy.</p>
+<div class="two-col"><div class="code-card"><div class="code-label">Application code</div><pre><code>client.subscribe(
+    group="ledger",
+    handler=commit_payment,
+)
+client.publish(
+    "payments/account-42/created",
+    {"amount": 25},
+    event_id="payment-123",
+)</code></pre><p class="caption">Publish saves locally and returns. Broker receipts arrive asynchronously; no subscriber reply is required. Handlers deduplicate event IDs.</p></div><div class="settings-list"><h3>YAML controls what spreads</h3><p>Spread by business key, spread by full topic, or keep a topic family together. Declare subscriber groups and set scaling thresholds and cooldowns per shard.</p><h3>Solace does the fanout</h3><p>Ledger subscribes to all payments; audit subscribes only to created payments. Each group has durable queues. Replicas share a group's exclusive queues.</p><h3>The shim follows the move</h3><p>Bind new receivers, buffer rejected writes, drain old queues and resume on the new owner. Applications keep using the same API.</p></div></div>
+<p><a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/simple-policy.md">Read the simple policy and delivery guide →</a></p></div></section>
+<section id="how"><div class="wrap"><p class="section-label">A toolkit, with connected parts</p><h2>Measure. Route. Rebalance.</h2><p class="lede">Adding a broker is only one part of horizontal scaling. The repository helps you understand the workload and decide where applications connect.</p>
+<div class="steps">
+<article class="step"><span class="n">01 / MEASURED CAPACITY</span><h3>Use the right profile</h3><p>Keep cloud provider, broker generation, service tier, message size and fanout separate. Include streaming, unspooling, replay or tracing.</p></article>
+<article class="step"><span class="n">02 / EXPLAINED DECISIONS</span><h3>Find the actual limit</h3><p>Check messages, incoming and outgoing bytes, connections and stored messages. Show headroom and the limit behind the broker count.</p></article>
+<article class="step"><span class="n">03 / STABLE OWNERSHIP</span><h3>Give each key a home</h3><p>Hash business keys into fixed partitions. Record the owner and let publishers and consumers resolve that same broker.</p></article>
+<article class="step"><span class="n">04 / COMPLETE TELEMETRY</span><h3>Watch the whole fleet</h3><p>Read each active service over SEMP. Show per-broker load and refuse incomplete snapshots instead of treating a missing broker as zero traffic.</p></article>
+<article class="step"><span class="n">05 / GROWTH & COST</span><h3>Try the next traffic peak</h3><p>Explore load multipliers, broker ceilings and your own prices. Separate committed billing from elastic spending.</p></article>
+<article class="step"><span class="n">06 / OPERATIONS</span><h3>Handle the burst automatically</h3><p>Choose a partition that fits. Prepare its new consumer, fence old writes, drain acknowledged work and switch ownership. Replenish warm capacity through the optional Cloud controller.</p></article>
+</div></div></section>
+<section id="routing"><div class="wrap"><p class="section-label">How messages are spread</p><h2>A business key is better than a turn in a queue.</h2><p class="lede">The original resolver balanced client placement counts. That cannot distinguish a quiet client from a very busy one. The new partition option keeps messages for the same order, account or device together.</p>
+<div class="routing-lab"><div class="lab-head"><div><h3>What changes when broker D joins?</h3><p class="caption">Illustrative keys and equal weights. This is a routing demonstration, not a throughput benchmark.</p></div><label>Ownership <select id="ownership"><option value="new">New / unassigned partitions</option><option value="durable">Existing guaranteed partitions</option></select></label></div>
+<div id="key-grid" class="key-grid" aria-label="Illustrative routing keys"></div>
+<div class="lab-bottom"><button id="add-broker" class="btn primary" type="button">Add broker D</button><div id="route-summary" role="status" aria-live="polite"></div></div>
+<div class="legend"><span class="a">● Broker A</span><span class="b">● Broker B</span><span class="c">● Broker C</span><span class="d">● Broker D</span></div>
+</div>
+<div class="steps route-notes"><article class="step"><h3>Same key, same partition</h3><p>Use the smallest business key whose events must stay together. A huge tenant can still become one hot key if you route only by tenant ID.</p></article><article class="step"><h3>New broker, limited change</h3><p>Rendezvous hashing changes only winners that prefer the new broker. Optional weights reflect relative tested capacity, not queue depth.</p></article><article class="step"><h3>Durable queues keep their owner</h3><p>Recorded guaranteed partitions do not move on lease expiry. If every partition is assigned, adding a broker moves zero existing traffic until a controlled migration.</p></article></div>
+<p><a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/routing.md">Read the routing guide, publisher/consumer examples and migration limits →</a></p>
+</div></section>
+<section id="settings"><div class="wrap"><p class="section-label">Choices you can configure today</p><h2>Business rules in a small YAML file.</h2><p class="lede">For native messaging, YAML extracts the business key from the topic. The controller creates group queues and native subscriptions; the shim manages publishing and receiving.</p>
+<div class="two-col"><div class="code-card"><div class="code-label">payments.yaml <button id="copy-yaml" type="button">Copy</button></div><pre><code id="routing-yaml">version: 1
+connection: connection.yaml
+scaling:
+  mode: automatic
+  max_brokers: 4
+  warm_brokers: 1
+workloads:
+  payments:
+    topic: payments/{account}/{event}
+    keep_together: account
+    subscribers:
+      ledger: payments/&gt;
+      audit: payments/*/created
+</code></pre><p class="caption">Keep broker connections and measured capacity in an operator profile. Run explain to inspect these rules, then start serve and run with the same policy.</p></div>
+<div class="settings-list"><h3>Choose how to group traffic</h3><p><code>keep_together: account</code> uses a named topic field. Choose <code>topic</code> for each complete topic or <code>all</code> to keep the entire workload together.</p><h3>Set the capacity ceiling</h3><p><code>max_brokers</code> caps active and warm services per workload. <code>warm_brokers</code> reserves ready capacity within that ceiling.</p><h3>Pause new moves</h3><p><code>mode: paused</code> stops new moves while existing handovers finish safely. Automatic mode responds to sustained measured load.</p><h3>Keep the partition contract stable</h3><p>Changing <code>partitions</code> requires migration. A lease controls the location cache, never the lifetime of a durable queue owner.</p></div></div>
+<p class="notice">Initial ownership uses the selected routing strategy. Enable the automatic controller to move existing managed queues by measured load. A lease never substitutes for broker-enforced fencing and confirmed drainage.</p>
+</div></section>
+<section id="automation"><div class="wrap"><p class="section-label">While you are away</p><h2>A payment burst needs more than a new broker.</h2><p class="lede">The controller selects an existing partition that fits on spare capacity, then moves its ownership through a recorded handover. Other partitions continue processing.</p>
+<div class="routing-lab"><div class="lab-head"><div><h3>Follow one automatic handover</h3><p class="caption">Illustrative 90% load with a 30% partition. No customer measurements or live broker connection.</p></div></div>
+<div class="hero-route" style="margin:0 24px 24px"><div><small>SOURCE A</small><strong id="migration-source">90% load</strong><span id="migration-old">Accepting messages</span></div><b aria-hidden="true">→</b><div><small>PARTITION 17</small><strong id="migration-phase">Burst detected</strong><span id="migration-buffer">Owner: A</span></div><b aria-hidden="true">→</b><div><small>DESTINATION B</small><strong id="migration-target">Warm spare</strong><span id="migration-new">No traffic yet</span></div></div>
+<div class="lab-bottom"><button class="btn primary" id="migration-next" type="button">Next step</button><p id="migration-detail" role="status" aria-live="polite">After a sustained observation window, choose a move that leaves room on both brokers.</p></div></div>
+<div class="two-col"><div class="code-card"><div class="code-label">Enable the managed controller</div><pre><code>automation:
   enabled: true
-  default_broker: broker-bulk
-  rules:
-    - name: vip-orders                 # topic AND payload
-      when:
-        topic: "orders/&gt;"
-        payload:
-          - { path: priority, op: in, value: [high, urgent] }
-      route:
-        broker: broker-vip
-        key:   "vip.{region}"          # partition key = ordering group
-        topic: "vip/{topic}"           # optional address rewrite
-    - name: large-orders
-      when:
-        topic: "orders/&gt;"
-        payload:
-          - { path: amount, op: gt, value: 1000 }
-      route: { broker: broker-big, key: "big.{region}" }</code></pre>
-    </div>
-  </div>
-</section>
+  trigger_utilization: 0.80
+  target_utilization: 0.65
+  migration_grace: 30s
+  empty_settle: 10s
+  migration_timeout: 15m
+policy:
+  warm_pool: 1
+actuation:
+  mode: scale-up-only
+  dry_run: false
+  require_confirmation: false</code></pre><p class="caption">Excerpt. Use the complete configuration and inventory linked below.</p></div><div class="settings-list"><h3>Grace plus drainage</h3><p>Elapsed time never permits abandoning a payment. Queued, stored and unacknowledged messages must all reach zero, and the new consumer must be bound.</p><h3>Buffer and retry</h3><p>The old broker rejects stale publishers. A persistent outbox retains rejected or uncertain messages. Business handlers deduplicate event IDs in their own transaction.</p><h3>Keep spare capacity ready</h3><p>Use warm brokers immediately. Optional Cloud provisioning replaces spares within the broker ceiling. Cold provisioning takes time; the buffer applies backpressure when full.</p><h3>Recover after restart</h3><p>Resume the recorded phase from persistent local state. Before ownership changes, a timeout can recover toward the original queue. After the switch, recovery finishes forward.</p></div></div>
+<p><a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/automatic-scaling.md">Full automatic workflow, YAML, application example and failure behavior →</a></p>
+</div></section>
+<section id="profiles"><div class="wrap"><p class="section-label">Use the actual test conditions</p><h2>A throughput number needs context.</h2><p class="lede">A streaming benchmark is not a replay benchmark. The importer keeps generations separate and carries the original spreadsheet cells into the sizing answer.</p>
+<div class="profile-strip"><span>AWS / Azure / GCP</span><span>HA service tiers</span><span>Size × fanout</span><span>Ingress + egress</span><span>Source cells + hashes</span></div>
+<div class="table-scroll"><table><thead><tr><th>YAML: capacity.scenario</th><th>What it represents</th></tr></thead><tbody>
+<tr><td><code>streaming</code></td><td>Guaranteed delivery with replay and tracing disabled in the test.</td></tr>
+<tr><td><code>unspooling</code></td><td>Streaming alongside a pre-spooled queue being read from disk.</td></tr>
+<tr><td><code>replay</code></td><td>Streaming and unspooling with replay enabled.</td></tr>
+<tr><td><code>tracing</code></td><td>Streaming and unspooling with tracing enabled.</td></tr>
+<tr><td><code>worst</code></td><td>The conservative envelope of all four, where all cover the workload.</td></tr>
+</tbody></table></div>
+<p class="notice">Replay plus tracing together is not measured. Missing fanout rows are not guessed. Intermediate estimates are labeled. Supplied Cloud profiles measure SMF/CCSMP on HA; protocol adapter support is not a performance guarantee for every protocol.</p>
+<p>Real workbooks and compiled results stay local and ignored by Git. The repository ships invented test fixtures, not customer throughput figures. <a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/measured-profiles.md">Profile workflow →</a></p>
+</div></section>
+<section id="start"><div class="wrap"><p class="section-label">Start with a question, not a deployment</p><h2>How many brokers would this workload need?</h2><p class="lede">Import your measurements, compile one matching generation, and size a hypothetical workload. Every command below is read-only with respect to your brokers.</p>
+<div class="code-card"><div class="code-label">terminal · Python 3.11+</div><pre><code>pip install -e './scaling-controller[compile,service]'
+solace-autoscale profiles import --directory /path/to/workbooks
+solace-autoscale profiles list
 
-<!-- COST + WHATIF -->
-<section>
-  <div class="wrap">
-    <p class="section-label">cost &amp; planning</p>
-    <h2>Turn broker counts into dollars - and see what's coming</h2>
-    <p class="lede">
-      A recommendation you can take to a budget meeting needs a price tag and a look ahead. Give it
-      your own prices and it shows the monthly cost. Ask "what if traffic doubles?" and it shows how
-      many brokers you'd need - and where you'd run out of room.
-    </p>
-    <div class="grid2">
-      <div class="card">
-        <h3>Monthly cost as a workload grows</h3>
-        <table>
-          <thead><tr><th>Group</th><th>Brokers</th><th>USD / mo</th><th>Change / mo</th></tr></thead>
-          <tbody>
-            <tr><td>orders</td><td>1 &rarr; 5</td><td>4,200 &rarr; 21,000</td><td><span class="delta-up">+16,800</span></td></tr>
-            <tr><td>plus 1 standby</td><td>+1 idle</td><td>25,200</td><td><span class="delta-up">+21,000</span></td></tr>
-          </tbody>
-        </table>
-        <p class="note">A standby broker still costs money while it sits idle. You supply your own
-          prices - the tool ships none.</p>
-      </div>
-      <div class="card">
-        <h3>Brokers needed if traffic grows</h3>
-        <table>
-          <thead><tr><th>Traffic</th><th>Brokers needed</th><th>Runs out of</th><th>Room left?</th></tr></thead>
-          <tbody>
-            <tr><td>today</td><td>5</td><td>data rate</td><td>yes</td></tr>
-            <tr><td>2&times;</td><td>8</td><td>data rate</td><td class="ceil">full</td></tr>
-            <tr><td>4&times;</td><td>8</td><td>data rate</td><td class="ceil">full</td></tr>
-            <tr><td>8&times;</td><td>8</td><td>data rate</td><td class="ceil">full</td></tr>
-          </tbody>
-        </table>
-        <p class="note">At just 2&times; today's traffic, this workload already maxes out an 8-broker
-          limit. Better to plan for that now than be surprised by it next quarter.</p>
-      </div>
-    </div>
-  </div>
-</section>
+# Choose a catalog and supply actual HA VPN limits.
+solace-autoscale profiles compile \
+  --catalog resources/performance/catalog/PROFILE.json \
+  --service-classes your-ha-limits.json \
+  --limits-source "Deployed VPN limits, checked today" \
+  --out models/my-profile.json
 
-<!-- QUICKSTART -->
-<section id="start">
-  <div class="wrap">
-    <p class="section-label">quickstart</p>
-    <h2>Up and running in three commands</h2>
-    <p class="lede">
-      Before you add your own numbers, it runs on clearly-labelled sample data that can never trigger
-      a real change. Install it, get a recommendation, then look ahead.
-    </p>
-    <pre><code><span class="cmt"># install (Python 3.11+)</span>
-python -m venv .venv &amp;&amp; . .venv/bin/activate
-pip install -e <span class="kw">'.[dev]'</span>
-
-<span class="cmt"># 1. turn your performance spreadsheet into numbers the tool can read</span>
-solace-autoscale compile --workbook performance.xlsx \
-    --service-classes models/service-classes.json --out models/mymodel.json
-
-<span class="cmt"># 2. get a recommendation, with the reasoning and the cost</span>
-solace-autoscale recommend --config config.example.yaml --metrics metrics.json
-
-<span class="cmt"># 3. see what you'd need if traffic doubles or quadruples</span>
-solace-autoscale whatif --config config.example.yaml --metrics metrics.json --multipliers 1,2,4</code></pre>
-    <p class="note">There's more it can do: <b>simulate</b> (stress-test the numbers across many
-      workloads), <b>monitor</b> (watch a live broker and track how accurate its advice was),
-      <b>accuracy</b> (predicted vs. what actually happened), <b>shard-advise</b> (suggest how to
-      split traffic into groups), and <b>serve</b> (point clients at the right broker).</p>
-  </div>
-</section>
-
-<!-- CUSTOMIZE -->
-<section id="customize">
-  <div class="wrap">
-    <p class="section-label">settings</p>
-    <h2>Sensible defaults, and knobs when you need them</h2>
-    <p class="lede">
-      Everything lives in one settings file, and it warns you about typos instead of ignoring them.
-      The defaults are cautious on purpose. Here are a few settings you're most likely to touch:
-    </p>
-    <div class="customize">
-      <div class="knob">
-        <h3>How many brokers are allowed</h3>
-        <code>fleet.min_brokers / max_brokers</code>
-        <p>Set a floor and a ceiling. If a workload needs more than the ceiling, it says so clearly
-          rather than quietly pretending it fits.</p>
-      </div>
-      <div class="knob">
-        <h3>How brokers are connected</h3>
-        <code>topology.mode: sharded | mesh | hybrid</code>
-        <p>If your brokers talk to each other (mesh), it counts that extra traffic - so a setup
-          that's costly with big messages looks costly, as it should.</p>
-      </div>
-      <div class="knob">
-        <h3>How much safety margin</h3>
-        <code>policy.headroom.mode: derived | fixed</code>
-        <p>It can work out the margin for you - leaving room for traffic that keeps rising while a
-          new broker spins up - or you can set a fixed number.</p>
-      </div>
-      <div class="knob">
-        <h3>Prices &amp; cost</h3>
-        <code>billing.model &middot; per_broker_monthly</code>
-        <p>Add your own prices to see monthly cost. If you pay a fixed yearly rate, it won't suggest
-          scaling down (you're paying either way). No prices ship with the tool.</p>
-      </div>
-      <div class="knob">
-        <h3>Where the numbers come from</h3>
-        <code>metrics.source: semp | prometheus | cloud-api | static</code>
-        <p>Read live stats straight from a broker, from Prometheus, from the Cloud API, or from a
-          file. The live-broker reader is checked against a real broker.</p>
-      </div>
-      <div class="knob">
-        <h3>Advise, or actually scale</h3>
-        <code>actuation.mode: recommend | scale-up-only | full</code>
-        <p>Advice-only by default, and it stays that way. Letting it make changes is a deliberate
-          switch - with an off switch, rate limits, and checks before anything is removed.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<footer>
-  <div class="wrap">
-    <p>A community project. Not an official Solace product. No warranty. Apache&nbsp;2.0.</p>
-    <p>It works out its advice the same way every time, and every number on this page is tied to the
-      data that produced it - so results are repeatable and easy to check.</p>
-    <p><a href="https://github.com/solacese/solace-broker-autoscale">github.com/solacese/solace-broker-autoscale</a></p>
-  </div>
-</footer>
-
+solace-autoscale plan --model models/my-profile.json \
+  --service-class enterprise-1k --message-size 1024 \
+  --messages 10000 --fanout 5 --scenario streaming</code></pre></div>
+<p class="caption">The workload inputs above are illustrative. Physical spool disk size is not the configured VPN spool limit.</p>
+<div class="steps"><article class="step"><h3>Have a metrics window?</h3><p><code>recommend</code> explains the current target. <code>whatif</code> explores growth. Headroom and sustained windows help avoid reacting to a short spike.</p></article><article class="step"><h3>Have a fleet to observe?</h3><p><code>monitor-fleet</code> reads an explicit inventory with credential environment references. It checks provider/version/tier against the selected profile.</p></article><article class="step"><h3>Need a shard plan?</h3><p><code>shard-advise</code> uses an Event Portal export to suggest traffic groups. Applications still choose the business key and implement the routing convention.</p></article></div>
+</div></section>
+<section id="readiness"><div class="wrap"><p class="section-label">What works, and what remains</p><h2>Useful now. Clear about its boundaries.</h2>
+<div class="two-col"><article class="step"><span class="n">IMPLEMENTED</span><h3>Planning, observation and assignment</h3><p>Measured imports with provenance. Direction-aware capacity calculations. Complete fleet snapshots. Fixed key partitions. Weighted rendezvous. Durable single-host SQLite transactions. Python lease caching. One publish/subscribe API with native topic fanout and durable publisher retry. Automatic load-aware handover, restart recovery and optional warm-pool replenishment.</p></article><article class="step"><span class="n">VALIDATE BEFORE ROLLOUT</span><h3>Production validation and wider scope</h3><p>Managed SMF handover passed a real two-broker test; Cloud creation is mock-tested. Production Cloud permissions, networking and workload performance still need validation. Multi-host controller HA, automatic scale-in, backlog copying and arbitrary existing queues are outside this implementation.</p></article></div>
+<p class="notice">A hot key, a slow consumer, and an undersized broker are different problems. More brokers cannot fix all three. Validate your real workload, queue ownership and recovery requirements before production use.</p>
+</div></section>
+<section id="docs"><div class="wrap"><p class="section-label">Go deeper when you need to</p><h2>Follow the question that brought you here.</h2><div class="doc-links"><a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/automatic-scaling.md"><strong>How does it scale while I am away?</strong><span>Managed queues, grace periods and durable recovery</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/routing.md"><strong>Where do messages go?</strong><span>Keys, partitions, owners and migration</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/measured-profiles.md"><strong>Can I trust this capacity estimate?</strong><span>Measurement scope and source provenance</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/configuration.md"><strong>What can I change?</strong><span>YAML configuration reference</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/architecture.md"><strong>How does it fit together?</strong><span>Control plane, clients and broker fleet</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/safety.md"><strong>What prevents unsafe changes?</strong><span>Actuator guards and operational limits</span></a>
+<a href="https://github.com/solacese/solace-broker-autoscale/blob/main/guide/client-integration.md"><strong>How do my apps connect?</strong><span>Protocol adapters and key routing</span></a>
+</div></div></section>
+</main><footer><div class="wrap">Solace broker autoscale · Community project · Apache 2.0 · Not an officially supported Solace product.<br><a href="https://github.com/solacese/solace-broker-autoscale">Source, tests and documentation on GitHub ↗</a></div></footer>
+<style>
+h1 { max-width: 21ch; } h3 { font-family:var(--display); }
+.hero-route {margin-top:38px;display:flex;align-items:center;gap:20px;padding:28px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.hero-route>div{flex:1;display:flex;flex-direction:column;gap:8px}.hero-route small{font:11px var(--mono);color:var(--accent)}.hero-route strong{font:600 24px var(--display)}.hero-route span{font-size:13px;color:var(--ink-soft)}.hero-route>b{font-size:24px;color:var(--accent)}
+.caption{font-size:13px;color:var(--ink-soft)}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}.code-card,.routing-lab{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}.code-label{display:flex;justify-content:space-between;align-items:center;background:var(--panel-sunk);padding:12px 20px;font:12px var(--mono);border-bottom:1px solid var(--line)}.code-card pre{padding:20px;margin:0;overflow:auto;font:13px/1.8 var(--mono)}.code-card>.caption{padding:0 20px 14px}.code-label button{background:var(--panel);border:1px solid var(--line);border-radius:5px;color:var(--ink);padding:5px 12px;cursor:pointer}.settings-list h3{font-size:16px;margin:0 0 5px}.settings-list p{margin:0 0 20px;color:var(--ink-soft);font-size:14px}.notice{padding:18px 20px;background:var(--panel-sunk);border-left:3px solid var(--accent);color:var(--ink-soft);font-size:14px;margin-top:28px}code{font-family:var(--mono);font-size:.9em;overflow-wrap:anywhere}.profile-strip{display:flex;gap:10px;flex-wrap:wrap;margin:26px 0}.profile-strip span{border:1px solid var(--line);background:var(--panel);padding:7px 12px;border-radius:20px;font:12px var(--mono)}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:15px;border-bottom:1px solid var(--line);font-size:14px}tbody tr:last-child td{font-weight:400}.lab-head{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:24px}.lab-head h3{margin:0}.lab-head .caption{margin-bottom:0}.lab-head label{font:12px var(--mono);min-width:230px}.lab-head select{display:block;width:100%;margin-top:8px;border:1px solid var(--line);border-radius:6px;padding:9px;background:var(--panel-sunk);color:var(--ink)}.key-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;padding:0 24px 24px}.key-tile{padding:12px 5px;border-radius:7px;font:12px var(--mono);text-align:center;border:1px solid currentColor;transition:background .25s}.key-tile small{display:block;margin-top:6px;font-size:10px}.a{color:#167762}.b{color:#476bbc}.c{color:#a36b17}.d{color:#a252ac}.key-tile.a{background:#e3f4ee}.key-tile.b{background:#e6edff}.key-tile.c{background:#fff1d5}.key-tile.d{background:#f8e9ff}.lab-bottom{display:flex;align-items:center;gap:24px;padding:0 24px 20px}.lab-bottom button{cursor:pointer;white-space:nowrap}.lab-bottom [role=status]{font-size:14px;color:var(--ink-soft)}.legend{padding:14px 24px;background:var(--panel-sunk);display:flex;gap:25px;font:12px var(--mono)}.route-notes{margin-top:24px}.doc-links{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.doc-links a{padding:20px;border:1px solid var(--line);border-radius:9px;background:var(--panel);text-decoration:none}.doc-links strong,.doc-links span{display:block}.doc-links span{font-size:13px;color:var(--ink-soft);margin-top:8px}footer{padding:32px 0;font-size:13px;color:var(--ink-soft)}button:focus-visible,select:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:720px){.hero-route{flex-direction:column;align-items:flex-start}.hero-route>b{transform:rotate(90deg)}.two-col{grid-template-columns:1fr}.lab-head{flex-direction:column;align-items:stretch}.key-grid{grid-template-columns:repeat(3,1fr)}.lab-bottom{flex-direction:column;align-items:flex-start}.doc-links{grid-template-columns:1fr}.nav-inner{gap:6px;padding:10px 12px}.nav-links a{padding:6px;font-size:10px}.brand{font-size:10px}.nav-links a[href="#profiles"],.nav-links a[href="#start"]{display:none}.legend{gap:12px;flex-wrap:wrap}}
+section[id]{scroll-margin-top:100px}.routing-lab+.two-col{margin-top:24px}
+@media(max-width:420px){.nav-links a[href="#settings"]{display:none}.nav-links a{white-space:nowrap}}
+@media(prefers-reduced-motion:reduce){.key-tile{transition:none}}
+</style>
 <script>
-  // ---- theme toggle (persisted) ----
-  (function () {
-    const root = document.documentElement;
-    const btn = document.getElementById("themeToggle");
-    let stored = null;
-    try { stored = localStorage.getItem("sa-theme"); } catch (e) { /* private mode */ }
-    if (stored === "dark" || stored === "light") root.setAttribute("data-theme", stored);
-    btn.addEventListener("click", () => {
-      const dark = getComputedStyle(root).getPropertyValue("--ground").trim() === "#0e1116";
-      const next = dark ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-      try { localStorage.setItem("sa-theme", next); } catch (e) { /* ignore */ }
-      drawCurve();
-    });
-  })();
+'use strict';
 
-  const CURVE = [
-    {size: 512, rate: 50842}, {size: 1024, rate: 44192}, {size: 2048, rate: 29057},
-    {size: 8192, rate: 8328}, {size: 65536, rate: 1284}, {size: 204800, rate: 439}
-  ];
+const migrationSteps = [
+ ['90% load','Accepting messages','Burst detected','Owner: A','Warm spare','No traffic yet','After a sustained observation window, choose a move that leaves room on both brokers.'],
+ ['90% load','Accepting messages','Prepare B','Owner: A','Queue ready','Consumer bound','Create the destination queue with ingress disabled. Wait for a consumer before fencing A.'],
+ ['Draining','New writes rejected','Fence A','New payments buffered','Ready','Ingress disabled','The old broker rejects stale publishers. Only this partition pauses new writes; other partitions continue.'],
+ ['Queue empty','All work acknowledged','Grace + settle','Buffered work retained','Ready','Consumer still bound','Wait for the minimum grace and a continuously empty source. An outstanding acknowledgment blocks the switch.'],
+ ['60% load','Old queue stays fenced','Change owner','Owner: B','30% planned load','Open incoming messages','Persist ownership atomically, recheck the source, and enable the destination. Restart recovery resumes this phase.'],
+ ['60% load','Other partitions continue','Retry on B','Buffer drains with ACKs','30% load','Processing payments','Publishers resolve B and retry. Measure fresh load before the next move; optionally replenish the warm pool.']
+];
+let migrationStep=0;
+document.getElementById('migration-next').addEventListener('click',()=>{
+ migrationStep=(migrationStep+1)%migrationSteps.length;
+ ['migration-source','migration-old','migration-phase','migration-buffer','migration-target','migration-new','migration-detail'].forEach((id,i)=>document.getElementById(id).textContent=migrationSteps[migrationStep][i]);
+ document.getElementById('migration-next').textContent=migrationStep===5?'Restart example':'Next step';
+});
 
-  const SCENARIOS = [
-    {
-      tag: "example 1", title: "Steady orders, small messages",
-      input: "25k msg/s &middot; 1 KB each",
-      action: "Add a broker", cls: "up", from: 1, to: 2,
-      why: "One broker is over its limit - but not on message count. It's the amount of data that's too high. The fix is a second broker, not a bigger one.",
-      badge: null,
-      axes: [
-        {name: "message rate", ratio: 0.57, thr: 0.75, bind: false},
-        {name: "data rate", ratio: 1.13, thr: 0.75, bind: true},
-        {name: "connections", ratio: 0.15, thr: 0.85, bind: false},
-        {name: "stored msgs", ratio: 0.24, thr: 0.60, bind: false}
-      ]
-    },
-    {
-      tag: "example 2", title: "Orders, and still growing",
-      input: "60k msg/s &middot; rising steadily",
-      action: "Add brokers", cls: "up", from: 1, to: 5,
-      why: "Data rate is more than 3&times; what one broker can take. And because traffic is still climbing while new brokers start up, it leaves an extra safety margin on its own.",
-      badge: {cls: "warn", text: "extra margin added for rising traffic"},
-      axes: [
-        {name: "message rate", ratio: 1.61, thr: 0.75, bind: false},
-        {name: "data rate", ratio: 3.21, thr: 0.75, bind: true},
-        {name: "connections", ratio: 0.15, thr: 0.85, bind: false},
-        {name: "stored msgs", ratio: 0.24, thr: 0.60, bind: false}
-      ]
-    },
-    {
-      tag: "example 3", title: "Large media files, 200 KB",
-      input: "700 msg/s &middot; big messages",
-      action: "Shrink the message first", cls: "stop", from: 1, to: 5,
-      why: "The messages are so large you're way past the data limit. Before paying for 5 brokers, try sending a small link instead of the whole file - often about 10&times; cheaper.",
-      badge: {cls: "crit", text: "try shrinking the message"},
-      axes: [
-        {name: "message rate", ratio: 1.59, thr: 0.75, bind: false},
-        {name: "data rate", ratio: 3.19, thr: 0.75, bind: true},
-        {name: "connections", ratio: 0.15, thr: 0.85, bind: false},
-        {name: "stored msgs", ratio: 0.24, thr: 0.60, bind: false}
-      ]
-    }
-  ];
-
-  // ---- render scenario cards ----
-  (function () {
-    const host = document.getElementById("scenarios");
-    const MAX = 3.6; // bar scale ceiling (ratio units)
-    for (const s of SCENARIOS) {
-      const card = document.createElement("div");
-      card.className = "scn";
-      const badge = s.badge ? `<span class="badge ${s.badge.cls}">${s.badge.text}</span>` : "";
-      const axes = s.axes.map(a => {
-        const over = a.ratio > 1;
-        const pct = Math.min(100, (a.ratio / MAX) * 100);
-        const thrPct = Math.min(100, (a.thr / MAX) * 100);
-        const val = a.ratio.toFixed(2) + "&times;";
-        return `<div class="axis-row">
-          <span class="axis-name ${a.bind ? "bind" : ""}">${a.name}${a.bind ? " &#9666;" : ""}</span>
-          <span class="track">
-            <span class="fill ${over ? "over" : "ok"}" style="width:${pct}%"></span>
-            <span class="thresh" style="left:${thrPct}%"></span>
-          </span>
-          <span class="axis-val ${over ? "over" : ""}">${val}</span>
-        </div>`;
-      }).join("");
-      card.innerHTML = `
-        <div class="scn-head">
-          <span class="scn-tag">${s.tag}</span>
-          <h3 class="scn-title">${s.title}</h3>
-          <span class="scn-input">${s.input}</span>
-        </div>
-        <div class="scn-body">
-          <div class="verdict">
-            <span class="action ${s.cls}">${s.action}</span>
-            <span class="brokers">brokers <b>${s.from} &rarr; ${s.to}</b> &middot; runs out of <b>data rate</b> first</span>
-            <span class="why">${s.why}</span>
-            ${badge}
-          </div>
-          <div class="axes">${axes}</div>
-        </div>`;
-      host.appendChild(card);
-    }
-  })();
-
-  // ---- capacity curve (log-log, endpoint emphasized) -- redrawn on theme change ----
-  function drawCurve() {
-    const cv = document.getElementById("curve");
-    if (!cv) return;
-    const ctx = cv.getContext("2d");
-    const css = getComputedStyle(document.documentElement);
-    const trace = css.getPropertyValue("--trace").trim();
-    const line = css.getPropertyValue("--line-strong").trim();
-    const ink = css.getPropertyValue("--ink-faint").trim();
-    const warn = css.getPropertyValue("--warn").trim();
-    const W = cv.width, H = cv.height, pad = {l: 58, r: 18, t: 20, b: 46};
-    const x0 = pad.l, x1 = W - pad.r, y0 = H - pad.b, y1 = pad.t;
-    const lg = v => Math.log10(v);
-    const xs = CURVE.map(d => lg(d.size)), ys = CURVE.map(d => lg(d.rate));
-    const xmin = Math.min(...xs), xmax = Math.max(...xs);
-    const ymin = Math.min(...ys), ymax = Math.max(...ys);
-    const px = v => x0 + (lg(v) - xmin) / (xmax - xmin) * (x1 - x0);
-    const py = v => y0 - (lg(v) - ymin) / (ymax - ymin) * (y0 - y1);
-
-    ctx.clearRect(0, 0, W, H);
-    ctx.font = "11px 'IBM Plex Mono', monospace";
-    ctx.textBaseline = "middle";
-
-    ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1;
-    [1000, 10000, 100000].forEach(r => {
-      if (r < Math.pow(10, ymin) || r > Math.pow(10, ymax)) return;
-      const y = py(r); ctx.globalAlpha = 0.5;
-      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
-      ctx.globalAlpha = 1; ctx.textAlign = "right";
-      ctx.fillText((r / 1000) + "k", x0 - 8, y);
-    });
-    ctx.textAlign = "center";
-    CURVE.forEach(d => {
-      const lbl = d.size >= 1024 ? (d.size / 1024) + "K" : d.size + "B";
-      ctx.fillText(lbl, px(d.size), y0 + 16);
-    });
-
-    const grad = ctx.createLinearGradient(0, y1, 0, y0);
-    grad.addColorStop(0, trace + "44"); grad.addColorStop(1, trace + "00");
-    ctx.beginPath(); ctx.moveTo(px(CURVE[0].size), y0);
-    CURVE.forEach(d => ctx.lineTo(px(d.size), py(d.rate)));
-    ctx.lineTo(px(CURVE[CURVE.length - 1].size), y0); ctx.closePath();
-    ctx.fillStyle = grad; ctx.fill();
-
-    ctx.beginPath();
-    CURVE.forEach((d, i) => i ? ctx.lineTo(px(d.size), py(d.rate)) : ctx.moveTo(px(d.size), py(d.rate)));
-    ctx.strokeStyle = trace; ctx.lineWidth = 2.5; ctx.stroke();
-
-    CURVE.forEach((d, i) => {
-      const emph = i === 0 || i === CURVE.length - 1;
-      ctx.beginPath(); ctx.arc(px(d.size), py(d.rate), emph ? 5 : 3, 0, Math.PI * 2);
-      ctx.fillStyle = emph ? warn : trace; ctx.fill();
-      ctx.strokeStyle = css.getPropertyValue("--panel").trim(); ctx.lineWidth = 2; ctx.stroke();
-    });
-    ctx.fillStyle = css.getPropertyValue("--ink").trim();
-    ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "left";
-    ctx.fillText("44k @1KB", px(CURVE[1].size) + 8, py(CURVE[1].rate) - 4);
-    ctx.textAlign = "right";
-    ctx.fillText("439 @200KB", px(CURVE[5].size) - 8, py(CURVE[5].rate) - 10);
-  }
-  drawCurve();
-  // redraw when the OS theme changes (system mode)
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawCurve);
-
-  // ---- hero: horizontal scaling. Publisher (top) -> brokers in a Solace Cloud box that grows
-  //      sideways -> subscriber (bottom); an autoscaler on the left signals each new broker. ----
-  (function () {
-    const cv = document.getElementById("flow");
-    if (!cv) return;
-    const ctx = cv.getContext("2d");
-    const cap = document.getElementById("flowCap");
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    // Logical drawing size; the backing store is scaled to the element's real pixels for crispness.
-    const W = 960, H = 400;
-    function fit() {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const cssW = cv.clientWidth || W;
-      const cssH = Math.round(cssW * H / W);
-      cv.width = Math.round(cssW * dpr);
-      cv.height = Math.round(cssH * dpr);
-      ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
-    }
-    fit();
-    window.addEventListener("resize", fit);
-
-    function C() {
-      const s = getComputedStyle(document.documentElement);
-      const g = n => s.getPropertyValue(n).trim();
-      return {
-        panel: g("--panel"), sunk: g("--panel-sunk"), ink: g("--ink"),
-        soft: g("--ink-soft"), faint: g("--ink-faint"), line: g("--line-strong"),
-        accent: g("--accent"), warn: g("--warn"), crit: g("--crit"),
-      };
-    }
-
-    // brokers/load/size/rate are end-of-phase targets; each phase eases from the previous phase.
-    const PHASES = [
-      { cap: "One broker, light load",                    dur: 3.0, brokers: 1, load: 0.30, size: 0.25, rate: 1.0 },
-      { cap: "Message rate and size climbing...",         dur: 3.4, brokers: 1, load: 1.03, size: 0.95, rate: 2.6 },
-      { cap: "Autoscaler adds a second broker",           dur: 3.0, brokers: 2, load: 0.62, size: 0.95, rate: 2.6 },
-      { cap: "Load keeps rising...",                      dur: 2.6, brokers: 2, load: 0.99, size: 1.0,  rate: 3.4 },
-      { cap: "Scaled out to three - load shared, safely", dur: 4.2, brokers: 3, load: 0.66, size: 1.0,  rate: 3.4 },
-    ];
-    // After the last phase, HOLD three brokers briefly then fade the whole scene out and loop back
-    // to one broker. Scaling only ever goes UP; the loop is a fade, never a scale-down.
-    const HOLD = 1.2;                        // hold the settled 3-broker state
-    const FADE = 1.0;                        // fade the scene out before restarting
-    const TOTAL = PHASES.reduce((a, p) => a + p.dur, 0) + HOLD + FADE;
-    // wall-clock start time of each phase, for timing the autoscaler signal to the scale-out moment
-    const PHASE_START = []; { let a = 0; for (const p of PHASES) { PHASE_START.push(a); a += p.dur; } }
-
-    const lerp = (a, b, t) => a + (b - a) * t;
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    const ease = t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-
-    // vertical layout: publisher row, broker row (in the cloud box), subscriber row
-    const pubY = 66, brokerY = 196, subY = 322;
-    const cx = W / 2;
-    const BW = 96, BH = 66, BGAP = 30;       // broker box size + horizontal gap between brokers
-    const ascX = 96;                          // autoscaler column (left of the cloud box)
-
-    function brokerXs(n) {
-      const span = (n - 1) * (BW + BGAP);
-      const out = [];
-      for (let i = 0; i < n; i++) out.push(cx - span / 2 + i * (BW + BGAP));
-      return out;
-    }
-
-    function rr(x, y, w, h, r) {
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
-      else ctx.rect(x, y, w, h);
-    }
-
-    function node(x, y, r, fill, stroke, label, c, below, sub) {
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = fill; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = stroke; ctx.stroke();
-      ctx.textAlign = "center";
-      if (label) {
-        const ly = y + (below ? r + 20 : -(r + (sub ? 26 : 12)));
-        ctx.fillStyle = c.soft; ctx.font = "13px 'IBM Plex Mono', monospace";
-        ctx.fillText(label, x, ly);
-      }
-      if (sub) {
-        // secondary line: the app keeps its own messaging API; the shim only steers it
-        const sy = y + (below ? r + 36 : -(r + 12));
-        ctx.fillStyle = c.faint; ctx.font = "11px 'IBM Plex Mono', monospace";
-        ctx.fillText(sub, x, sy);
-      }
-    }
-
-    function brokerBox(x, y, load, alpha, c) {
-      ctx.globalAlpha = alpha;
-      rr(x - BW / 2, y - BH / 2, BW, BH, 10);
-      ctx.fillStyle = c.panel; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = c.line; ctx.stroke();
-      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
-      ctx.fillText("broker", x, y - 8);
-      const over = load > 1;
-      const mx = x - BW / 2 + 12, my = y + BH / 2 - 18, mw = BW - 24, mh = 9;
-      rr(mx, my, mw, mh, 4); ctx.fillStyle = c.sunk; ctx.fill();
-      rr(mx, my, Math.min(1, load) * mw, mh, 4);
-      ctx.fillStyle = over ? c.crit : (load > 0.82 ? c.warn : c.accent); ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-
-    let dots = [], signals = [], semp = [];   // semp: metric pulses travelling brokers -> autoscaler
-    let lastSpawn = 0, lastElapsed = 0, firedFor = -1, rr_i = 0, lastSemp = 0;  // rr_i: round-robin broker index
-
-    function stateAt(t) {
-      let acc = 0;
-      for (let i = 0; i < PHASES.length; i++) {
-        if (t < acc + PHASES[i].dur) {
-          const local = (t - acc) / PHASES[i].dur, e = ease(local);
-          const prev = i === 0 ? PHASES[0] : PHASES[i - 1];
-          // fade IN over the first ~0.6s of the loop so the restart is a fade, not a pop
-          const fadeIn = i === 0 ? clamp((t) / 0.6, 0, 1) : 1;
-          return {
-            idx: i, cap: PHASES[i].cap, brokers: PHASES[i].brokers, prevBrokers: prev.brokers,
-            grow: local, load: lerp(prev.load, PHASES[i].load, e),
-            size: lerp(prev.size, PHASES[i].size, e), rate: lerp(prev.rate, PHASES[i].rate, e),
-            fade: fadeIn,
-          };
-        }
-        acc += PHASES[i].dur;
-      }
-      // HOLD then FADE OUT the settled three-broker scene (no scale-down); the loop wrap restarts it
-      const last = PHASES[PHASES.length - 1];
-      const tail = t - acc;
-      const fade = tail < HOLD ? 1 : 1 - ease(clamp((tail - HOLD) / FADE, 0, 1));
-      return {
-        idx: PHASES.length, cap: last.cap, brokers: last.brokers, prevBrokers: last.brokers,
-        grow: 1, load: last.load, size: last.size, rate: last.rate, fade,
-      };
-    }
-
-    // message path: publisher (top) -> its broker (middle) -> subscriber (bottom), curved in x
-    function pathPoint(bx, p) {
-      const topX = cx, botX = cx;
-      if (p < 0.5) {                          // publisher -> broker
-        const tt = ease(p / 0.5), y = lerp(pubY + 16, brokerY, tt);
-        const qx = lerp(topX, bx, ease(clamp(p / 0.4, 0, 1)));
-        return { x: qx, y };
-      } else {                                // broker -> subscriber
-        const tt = ease((p - 0.5) / 0.5), y = lerp(brokerY, subY - 16, tt);
-        const qx = lerp(bx, botX, ease(clamp((p - 0.55) / 0.4, 0, 1)));
-        return { x: qx, y };
-      }
-    }
-
-    function draw(elapsed) {
-      const c = C();
-      const t = ((elapsed % TOTAL) + TOTAL) % TOTAL;
-      if (t < lastElapsed) { dots = []; signals = []; semp = []; firedFor = -1; rr_i = 0; }  // clean loop restart
-      lastElapsed = t;
-      ctx.clearRect(0, 0, W, H);
-
-      const st = stateAt(t);
-      const xs = brokerXs(st.brokers);
-      const appear = st.brokers > st.prevBrokers ? ease(clamp(st.grow * 1.8, 0, 1)) : 1;
-      const alphaFor = i => (i >= st.prevBrokers && st.brokers > st.prevBrokers) ? appear : 1;
-
-      // ---- Solace Cloud box around the brokers (grows sideways as brokers are added) ----
-      const halfSpan = ((st.brokers - 1) * (BW + BGAP)) / 2;
-      const boxL = cx - halfSpan - BW / 2 - 22, boxR = cx + halfSpan + BW / 2 + 22;
-      const boxT = brokerY - BH / 2 - 30, boxB = brokerY + BH / 2 + 16;
-      rr(boxL, boxT, boxR - boxL, boxB - boxT, 14);
-      ctx.fillStyle = c.sunk; ctx.globalAlpha = 0.5; ctx.fill(); ctx.globalAlpha = 1;
-      ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]); ctx.strokeStyle = c.line; ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = c.faint; ctx.font = "11px 'IBM Plex Mono', monospace"; ctx.textAlign = "left";
-      ctx.fillText("SOLACE CLOUD", boxL + 12, boxT + 16);
-
-      // ---- autoscaler (left): reads rate + size from the brokers via SEMP, and signals scale-out ----
-      const ascY = brokerY;
-      const dt2 = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
-
-      // fire a scale-out command when we enter a phase that adds a broker
-      if (!reduce && (st.idx === 2 || st.idx === 4) && firedFor !== st.idx && st.grow < 0.15) {
-        firedFor = st.idx;
-        signals.push({ t: 0, targetX: boxL });
-      }
-      signals.forEach(s => { if (!reduce) s.t += 0.9 * dt2; });
-      signals = signals.filter(s => s.t < 1.2);
-
-      // steady SEMP scrape: metric pulses travel FROM the brokers TO the autoscaler, always on
-      if (!reduce && elapsed - lastSemp > 0.9) { lastSemp = elapsed; semp.push({ t: 0 }); }
-      semp.forEach(s => { if (!reduce) s.t += 0.6 * dt2; });
-      semp = semp.filter(s => s.t < 1);
-
-      // monitoring link (brokers -> autoscaler), dashed, drawn under the pulses
-      const linkY = ascY + 40;
-      ctx.strokeStyle = c.line; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6; ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.moveTo(boxL, brokerY + 8); ctx.lineTo(boxL, linkY); ctx.lineTo(ascX, linkY); ctx.lineTo(ascX, ascY + 30);
-      ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
-      ctx.fillStyle = c.faint; ctx.font = "10px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
-      ctx.fillText("SEMP: rate + size", (ascX + boxL) / 2, linkY + 14);
-
-      // autoscaler box (accent border when a scrape or a command is in flight)
-      const ascActive = signals.some(s => s.t < 0.9) || semp.length > 0;
-      rr(ascX - 42, ascY - 30, 84, 60, 10);
-      ctx.fillStyle = c.panel; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = ascActive ? c.accent : c.line; ctx.stroke();
-      ctx.fillStyle = c.ink; ctx.font = "600 12px 'IBM Plex Mono', monospace"; ctx.textAlign = "center";
-      ctx.fillText("auto", ascX, ascY - 4);
-      ctx.fillText("scaler", ascX, ascY + 12);
-
-      // SEMP metric pulses: brokers -> (down, across, up) -> autoscaler, following the dashed link
-      semp.forEach(s => {
-        const p = clamp(s.t, 0, 1);
-        // three legs along the L-shaped link, equal thirds
-        let x, y;
-        if (p < 0.34) { const tt = p / 0.34; x = boxL; y = lerp(brokerY + 8, linkY, tt); }
-        else if (p < 0.66) { const tt = (p - 0.34) / 0.32; x = lerp(boxL, ascX, tt); y = linkY; }
-        else { const tt = (p - 0.66) / 0.34; x = ascX; y = lerp(linkY, ascY + 30, tt); }
-        ctx.globalAlpha = 0.75; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-        ctx.fillStyle = c.soft; ctx.fill(); ctx.globalAlpha = 1;
-      });
-
-      // command pulses travelling from the autoscaler to the cloud box (scale-out)
-      signals.forEach(s => {
-        const p = clamp(s.t, 0, 1), x = lerp(ascX + 44, s.targetX - 2, ease(p));
-        ctx.globalAlpha = (1 - p) * 0.9;
-        ctx.beginPath(); ctx.arc(x, ascY, 5, 0, Math.PI * 2); ctx.fillStyle = c.accent; ctx.fill();
-        ctx.globalAlpha = 1;
-      });
-
-      // ---- connecting lines: publisher -> each broker -> subscriber ----
-      ctx.lineWidth = 1.5; ctx.strokeStyle = c.line;
-      xs.forEach((bx, i) => {
-        ctx.globalAlpha = 0.4 * alphaFor(i);
-        ctx.beginPath();
-        for (let k = 0; k <= 40; k++) { const pt = pathPoint(bx, k / 40); k ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y); }
-        ctx.stroke();
-      });
-      ctx.globalAlpha = 1;
-
-      // ---- messages: each bound to ONE broker, flowing top -> broker -> bottom ----
-      if (!reduce) {
-        const dt = Math.max(0, Math.min(0.05, elapsed - (draw._last || elapsed)));
-        draw._last = elapsed;
-        const interval = 0.4 / st.rate;
-        if (elapsed - lastSpawn > interval) {
-          lastSpawn = elapsed;
-          // round-robin so messages are spread EVENLY across the brokers, not clumped
-          const broker = rr_i % st.brokers; rr_i++;
-          dots.push({ t: 0, broker, r: lerp(2.5, 7, st.size) });
-        }
-        dots.forEach(d => { d.t += 0.5 * dt; });
-        dots = dots.filter(d => d.t < 1);
-      }
-      dots.forEach(d => {
-        if (d.broker >= st.brokers) d.broker = st.brokers - 1;
-        const pt = pathPoint(xs[d.broker], Math.min(1, d.t));
-        ctx.beginPath(); ctx.arc(pt.x, pt.y, d.r, 0, Math.PI * 2);
-        ctx.fillStyle = c.accent; ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
-      });
-
-      // ---- nodes ----
-      node(cx, pubY, 20, c.accent, c.accent, "publisher", c, false, "AMQP client + shim");
-      node(cx, subY, 20, c.panel, c.line, "subscriber", c, true, "AMQP client");
-      xs.forEach((bx, i) => brokerBox(bx, brokerY, st.load, alphaFor(i), c));
-
-      // ---- HUD ----
-      ctx.textAlign = "left"; ctx.font = "12px 'IBM Plex Mono', monospace"; ctx.fillStyle = c.faint;
-      const msgs = Math.round(lerp(8, 95, (st.rate - 1) / 2.4));
-      const kb = Math.round(lerp(1, 200, st.size));
-      ctx.fillText("rate ~" + msgs + "k msg/s", 22, H - 24);
-      ctx.fillText("size ~" + kb + " KB", 22, H - 9);
-
-      // ---- scene fade-out before the loop restarts (fade toward the card background) ----
-      if (st.fade < 1) {
-        ctx.globalAlpha = 1 - st.fade;
-        ctx.fillStyle = c.panel;
-        ctx.fillRect(0, 0, W, H);
-        ctx.globalAlpha = 1;
-      }
-
-      if (cap && cap.textContent !== st.cap) cap.textContent = st.cap;
-    }
-
-    if (reduce) {
-      draw(PHASE_START[PHASES.length - 1] + PHASES[PHASES.length - 1].dur * 0.6);  // static: 3 brokers
-    } else {
-      let start = null;
-      requestAnimationFrame(function frame(ts) {
-        if (start === null) start = ts;
-        draw((ts - start) / 1000);
-        requestAnimationFrame(frame);
-      });
-    }
-  })();
-
-  // ---- smart shim demo: a faithful JS port of the pure rule engine ----
-  (function () {
-    const topicEl = document.getElementById("shimTopic");
-    const payEl   = document.getElementById("shimPayload");
-    if (!topicEl || !payEl) return;
-
-    const DEFAULT_BROKER = "broker-bulk";
-    const RULES = [
-      { name: "vip-orders", topic: "orders/>",
-        payload: [{ path: "priority", op: "in", value: ["high", "urgent"] }],
-        route: { broker: "broker-vip", key: "vip.{region}", topic: "vip/{topic}" } },
-      { name: "large-orders", topic: "orders/>",
-        payload: [{ path: "amount", op: "gt", value: 1000 }],
-        route: { broker: "broker-big", key: "big.{region}" } },
-    ];
-
-    // topic match: '*' one level, '>' rest
-    function topicMatches(pat, top) {
-      if (pat === top) return true;
-      const p = pat.split("/"), t = top.split("/");
-      for (let i = 0; i < p.length; i++) {
-        if (p[i] === ">") return i < t.length;
-        if (i >= t.length) return false;
-        if (p[i] === "*") continue;
-        if (p[i] !== t[i]) return false;
-      }
-      return p.length === t.length;
-    }
-    function getPath(obj, path) {
-      let cur = obj;
-      for (const seg of path.split(".")) {
-        if (cur && typeof cur === "object" && seg in cur) cur = cur[seg];
-        else return undefined;
-      }
-      return cur;
-    }
-    function evalPred(pred, obj) {
-      const a = getPath(obj, pred.path), v = pred.value;
-      switch (pred.op) {
-        case "exists": return a !== undefined;
-        case "missing": return a === undefined;
-      }
-      if (a === undefined) return false;
-      switch (pred.op) {
-        case "eq":  return a === v;
-        case "ne":  return a !== v;
-        case "in":  return Array.isArray(v) && v.includes(a);
-        case "nin": return Array.isArray(v) && !v.includes(a);
-        case "gt":  return typeof a === "number" && a > v;
-        case "gte": return typeof a === "number" && a >= v;
-        case "lt":  return typeof a === "number" && a < v;
-        case "lte": return typeof a === "number" && a <= v;
-        case "prefix": return typeof a === "string" && a.startsWith(v);
-        default: return false;
-      }
-    }
-    function render(tpl, topic, obj) {
-      let out = tpl.replace(/\{([^{}]+)\}/g, (_, ref) => {
-        if (ref === "topic") return topic;
-        const val = getPath(obj, ref);
-        return (val === undefined || val === null) ? "" : String(val);
-      });
-      return out.replace(/\.{2,}/g, ".").replace(/^\.|\.$/g, "");
-    }
-    function decide(topic, obj) {
-      for (const r of RULES) {
-        if (!topicMatches(r.topic, topic)) continue;
-        if (!r.payload.every(p => evalPred(p, obj))) continue;
-        const addr = r.route.topic ? render(r.route.topic, topic, obj) : topic;
-        const key  = r.route.key ? (render(r.route.key, topic, obj) || null) : null;
-        return { broker: r.route.broker, address: addr, key, rule: r.name, matched: true };
-      }
-      return { broker: DEFAULT_BROKER, address: topic, key: null, rule: "default", matched: false };
-    }
-
-    const $ = id => document.getElementById(id);
-    function run() {
-      const topic = topicEl.value.trim();
-      const note = $("shimNote");
-      let obj;
-      try { obj = payEl.value.trim() ? JSON.parse(payEl.value) : {}; }
-      catch (e) {
-        note.textContent = "payload is not valid JSON; non-JSON payloads still route by raw size/prefix rules";
-        note.className = "shim-note err";
-        obj = {};
-      }
-      const d = decide(topic, obj);
-      const cls = d.matched ? "" : "dflt";
-      $("shimVerdict").innerHTML =
-        `<span class="verdict-lead">rule fired</span>` +
-        `<span class="rule-name ${cls}">${d.rule}</span>`;
-      $("wBroker").textContent = d.broker;
-      $("wAddr").textContent = "topic://" + d.address;
-      const keyEl = $("wKey"), gidEl = $("wGid");
-      keyEl.textContent = d.key || "(none)";
-      keyEl.className = d.key ? "wire-v key" : "wire-v";
-      gidEl.textContent = d.key || "(none)";
-      // The generation the message is published under: the current topology generation the shim last
-      // applied from the event spine. Fixed here (no live fleet in the demo) to show the wire shape.
-      $("wGen").textContent = d.key ? "7" : "(none)";
-      if (!note.classList.contains("err") || obj !== null) {
-        if (d.matched) {
-          note.textContent = "Same message, same route, every time. The listener side re-runs these rules to demux the "
-            + (d.key ? '"' + d.key + '"' : "") + " stream.";
-          note.className = "shim-note";
-        } else {
-          note.textContent = "No rule matched → the default broker. No key, no address rewrite.";
-          note.className = "shim-note";
-        }
-      }
-    }
-    topicEl.addEventListener("input", run);
-    payEl.addEventListener("input", run);
-    for (const b of document.querySelectorAll(".preset")) {
-      b.addEventListener("click", () => {
-        topicEl.value = b.getAttribute("data-t");
-        try { payEl.value = JSON.stringify(JSON.parse(b.getAttribute("data-p")), null, 2); }
-        catch { payEl.value = b.getAttribute("data-p"); }
-        run();
-      });
-    }
-    run();
-  })();
-</script>
-</body>
-</html>
+const root=document.documentElement;
+document.getElementById('theme-toggle').addEventListener('click',()=>{root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';});
+document.getElementById('copy-yaml').addEventListener('click',async e=>{try{await navigator.clipboard.writeText(document.getElementById('routing-yaml').textContent);e.target.textContent='Copied';}catch{e.target.textContent='Select text to copy';}});
+let added=false; let renderVersion=0;
+async function score(key,broker){const data=new TextEncoder().encode(JSON.stringify(['orders',key,broker]));const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',data));let value=0;for(let i=0;i<6;i++)value=value*256+bytes[i];return -Math.log((value+1)/(2**48+1));}
+async function owner(key,count){const scores=await Promise.all(Array.from({length:count},(_,i)=>score(key,String.fromCharCode(65+i))));return scores.indexOf(Math.min(...scores));}
+async function renderRouting(){const version=++renderVersion;const mode=document.getElementById('ownership').value;const grid=document.getElementById('key-grid');let changed=0;const tiles=[];for(let i=0;i<24;i++){const key='partition:'+i;const before=await owner(key,3);const after=added&&mode==='new'?await owner(key,4):before;if(before!==after)changed++;const tile=document.createElement('div');tile.className='key-tile '+['a','b','c','d'][after];tile.textContent='Partition '+i;const label=document.createElement('small');label.textContent='Broker '+String.fromCharCode(65+after)+(before!==after?' · new winner':'');tile.appendChild(label);tiles.push(tile);}if(version!==renderVersion)return;grid.replaceChildren(...tiles);document.getElementById('add-broker').textContent=added?'Remove broker D':'Add broker D';document.getElementById('route-summary').textContent=!added?'Three brokers. Each partition has a stable preferred owner.':mode==='durable'?'0 existing owners changed. Guaranteed queues stay put; enable the managed controller below to perform a controlled migration.':changed+' of 24 hash winners now prefer D. No keys move between A, B and C. Recorded guaranteed owners still take precedence.';}
+document.getElementById('add-broker').addEventListener('click',()=>{added=!added;renderRouting();});document.getElementById('ownership').addEventListener('change',renderRouting);
+renderRouting().catch(()=>{document.getElementById('route-summary').textContent='Open over HTTPS or localhost to run the routing demonstration.';});
+</script></body></html>

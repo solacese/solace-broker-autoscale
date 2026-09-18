@@ -61,7 +61,7 @@ func NewSubscriber(tport dispatch.Transport, sink TopologySink) *Subscriber {
 func (s *Subscriber) Run(ctx context.Context, uri, source string) error {
 	recv, err := s.tport.Receiver(ctx, uri, source)
 	if err != nil {
-		return fmt.Errorf("spine subscribe %s on %s: %w", source, uri, err)
+		return fmt.Errorf("spine subscribe %s: %w", source, err)
 	}
 	defer recv.Close()
 
@@ -74,6 +74,12 @@ func (s *Subscriber) Run(ctx context.Context, uri, source string) error {
 			return fmt.Errorf("spine receive: %w", err)
 		}
 		s.handle(msg)
+		// Malformed control events are reported and discarded; valid ones are applied before ACK.
+		if msg.Ack != nil {
+			if err := msg.Ack(ctx); err != nil {
+				return fmt.Errorf("spine acknowledge: %w", err)
+			}
+		}
 	}
 }
 

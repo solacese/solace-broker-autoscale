@@ -1,0 +1,30 @@
+# Run from repository root. Supply your own compiled model using profiles compile.
+fleet:
+  service_class: enterprise-1k
+  min_brokers: 1
+  max_brokers: 8
+capacity:
+  model: models/aws-10.8.1.241.json
+  scenario: worst
+  fanout: 1
+metrics:
+  source: semp
+  scrape_interval: 10s
+  staleness_limit: 30s
+policy:
+  headroom:
+    mode: fixed
+    messages: 0.75
+    bytes: 0.75
+    connections: 0.85
+    spool: 0.60
+  scale_up_window: 30s
+  scale_down_window: 45m
+  cooldown: 15m
+billing:
+  model: committed
+actuation:
+  mode: recommend
+  dry_run: true
+accuracy:
+  record: false

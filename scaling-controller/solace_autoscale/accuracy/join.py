@@ -17,6 +17,8 @@ from .recorder import AccuracyRecorder
 
 
 def nearest_bucket(model: CapacityModel, service_class: str, delivery: str, size: float) -> int:
+    if delivery == "mixed":
+        delivery = "guaranteed"
     curve = model.service_classes[service_class].delivery[delivery]
     return min((b.msg_size_bytes for b in curve.size_buckets), key=lambda s: abs(s - size))
 
@@ -31,6 +33,9 @@ def record_observed_capacity(
     ts: float,
     *,
     saturation_floor: float = 0.85,
+    saturation_confirmed: bool = False,
+    scenario: str = "worst",
+    fanout: float = 1.0,
 ) -> int:
     """For each axis where the observed load is a meaningful capacity signal, record observed vs
     predicted per-broker capacity.
@@ -40,9 +45,15 @@ def record_observed_capacity(
     ``saturation_floor`` - below that, the load says nothing about the ceiling. Returns how many
     axis observations were recorded.
     """
-    if sample.current_brokers <= 0:
+    # High load relative to OUR prediction is circular evidence, not measured saturation.
+    # Ordinary monitoring records recommendations, but cannot label offered load as capacity.
+    if not saturation_confirmed or sample.current_brokers <= 0:
         return 0
-    cap = lookup(model, service_class, sample.avg_msg_size, delivery)
+    try:
+        cap = lookup(model, service_class, sample.avg_msg_size, delivery,
+                     fanout=max(fanout, sample.fanout_ratio), scenario=scenario)
+    except (KeyError, ValueError):
+        return 0
     bucket = nearest_bucket(model, service_class, delivery, sample.avg_msg_size)
     recorded = 0
     for axis_name in AXES:
@@ -50,7 +61,7 @@ def record_observed_capacity(
         predicted = _axis_capacity(axis, cap)
         if predicted <= 0:
             continue
-        demand = _axis_raw_demand(axis, sample, sample.current_brokers, mesh=False)
+        demand = _axis_raw_demand(axis, sample, sample.current_brokers, mesh=False, cap=cap)
         observed_per_broker = demand / sample.current_brokers
         utilisation = observed_per_broker / predicted
         if utilisation < saturation_floor:

@@ -8,7 +8,7 @@ import pytest
 
 from solace_autoscale.metrics.cloud_api import CloudApiCollector
 from solace_autoscale.metrics.prometheus import PrometheusCollector
-from solace_autoscale.metrics.semp import MB, map_vpn_monitor
+from solace_autoscale.metrics.semp import map_vpn_monitor
 from solace_autoscale.metrics.static import StaticCollector
 
 from .conftest import CONTROLLER
@@ -29,8 +29,8 @@ def test_semp_mapping_from_captured_fixture():
     assert s.egress_msg_rate == vpn["averageTxMsgRate"]
     assert s.ingress_byte_rate == vpn["averageRxByteRate"]
     assert s.egress_byte_rate == vpn["averageTxByteRate"]
-    # spool converts MB → bytes
-    assert s.spool_used == vpn["msgSpoolUsage"] * MB
+    # monitor msgSpoolUsage is already bytes (confirmed via live /monitor/spec)
+    assert s.spool_used == vpn["msgSpoolUsage"]
 
 
 def test_semp_avg_size_zero_when_idle():
@@ -45,7 +45,7 @@ def test_semp_avg_size_derived():
            "averageTxByteRate": 102400, "msgSpoolUsage": 10}
     s = map_vpn_monitor(vpn, 5, now=1.0, current_brokers=1)
     assert s.avg_msg_size == pytest.approx(1024.0)
-    assert s.spool_used == 10 * MB
+    assert s.spool_used == 10
 
 
 def test_static_collector(tmp_path):
@@ -71,3 +71,12 @@ def test_stub_collectors_raise_not_implemented():
         with pytest.raises(NotImplementedError) as e:
             coll.collect("s", "vpn", 1.0, 1)
         assert "not implemented" in str(e.value)
+
+
+@pytest.mark.parametrize('data', [{}, {'averageRxMsgRate': 0},
+                                  {'averageRxMsgRate': float('nan'), 'averageTxMsgRate': 0,
+                                   'averageRxByteRate': 0, 'averageTxByteRate': 0, 'msgSpoolUsage': 0}])
+def test_partial_vpn_metrics_do_not_turn_into_zero_load(data):
+    from solace_autoscale.metrics.base import CollectorError
+    with pytest.raises(CollectorError):
+        map_vpn_monitor(data, 0, now=1, current_brokers=1)

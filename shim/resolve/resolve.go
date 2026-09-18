@@ -12,6 +12,7 @@ package resolve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,7 @@ type Fetcher func(ctx context.Context, url string) ([]byte, error)
 // Resolver resolves (shard, client, mode) to an Assignment with a fail-open cache.
 type Resolver struct {
 	BaseURL string
+	APIKey  string // bearer token; never returned in assignments
 	Timeout time.Duration
 	Fetch   Fetcher          // nil -> a default net/http fetcher
 	Now     func() time.Time // nil -> time.Now
@@ -61,7 +63,7 @@ type Resolver struct {
 	topo map[string]*topology.Topology
 }
 
-type cacheKey struct{ shard, client, mode string }
+type cacheKey struct{ shard, client, mode, protocol string }
 
 // New returns a Resolver pointed at the assignment service base URL with sensible defaults.
 func New(baseURL string) *Resolver {
@@ -83,7 +85,7 @@ func (r *Resolver) Resolve(ctx context.Context, shard, client, mode, protocol st
 	if mode == "" {
 		mode = "direct"
 	}
-	key := cacheKey{shard, client, mode}
+	key := cacheKey{shard, client, mode, protocol}
 
 	body, err := r.fetch(ctx, shard, client, mode, protocol)
 	if err == nil {
@@ -99,6 +101,10 @@ func (r *Resolver) Resolve(ctx context.Context, shard, client, mode, protocol st
 		}
 	}
 
+	var rejection *HTTPError
+	if errors.As(err, &rejection) && rejection.Status < 500 {
+		return Assignment{}, err // authorization and policy refusals cannot use cached ownership
+	}
 	if cached, ok := r.cached(key); ok {
 		return cached, nil // fail open
 	}
@@ -194,7 +200,7 @@ func (r *Resolver) fetchTopology(ctx context.Context, shard string) ([]byte, err
 	if r.Fetch != nil {
 		return r.Fetch(ctx, full)
 	}
-	return defaultFetch(ctx, full, r.Timeout)
+	return defaultFetch(ctx, full, r.Timeout, r.APIKey)
 }
 
 func (r *Resolver) fetch(ctx context.Context, shard, client, mode, protocol string) ([]byte, error) {
@@ -210,10 +216,10 @@ func (r *Resolver) fetch(ctx context.Context, shard, client, mode, protocol stri
 	if r.Fetch != nil {
 		return r.Fetch(ctx, full)
 	}
-	return defaultFetch(ctx, full, r.Timeout)
+	return defaultFetch(ctx, full, r.Timeout, r.APIKey)
 }
 
-func defaultFetch(ctx context.Context, full string, timeout time.Duration) ([]byte, error) {
+func defaultFetch(ctx context.Context, full string, timeout time.Duration, apiKey string) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -223,13 +229,16 @@ func defaultFetch(ctx context.Context, full string, timeout time.Duration) ([]by
 	if err != nil {
 		return nil, err
 	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("assignment service returned %s", resp.Status)
+		return nil, &HTTPError{Status: resp.StatusCode}
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -248,4 +257,11 @@ func (r *Resolver) cached(key cacheKey) (Assignment, bool) {
 	defer r.mu.Unlock()
 	a, ok := r.cache[key]
 	return a, ok
+}
+
+// HTTPError distinguishes authoritative refusals from temporary service outages.
+type HTTPError struct{ Status int }
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("assignment service returned HTTP %d", e.Status)
 }

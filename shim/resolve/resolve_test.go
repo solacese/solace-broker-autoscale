@@ -89,3 +89,24 @@ func TestResolveRejectsEmptyAssignment(t *testing.T) {
 		t.Error("expected error for assignment with no broker/endpoints and no cache")
 	}
 }
+
+func TestAuthorizationRejectionDoesNotReuseCachedAssignment(t *testing.T) {
+	r := New("https://unused")
+	r.Fetch = func(context.Context, string) ([]byte, error) { return []byte(assignBody), nil }
+	if _, err := r.Resolve(context.Background(), "s", "c", "guaranteed", "amqp"); err != nil {
+		t.Fatal(err)
+	}
+	r.Fetch = func(context.Context, string) ([]byte, error) { return nil, &HTTPError{Status: 401} }
+	if _, err := r.Resolve(context.Background(), "s", "c", "guaranteed", "amqp"); err == nil {
+		t.Fatal("authorization rejection reused cache")
+	}
+}
+func TestProtocolCacheCannotSupplyAnotherProtocol(t *testing.T) {
+	r := New("https://unused")
+	r.Fetch = func(context.Context, string) ([]byte, error) { return []byte(assignBody), nil }
+	r.Resolve(context.Background(), "s", "c", "guaranteed", "amqp")
+	r.Fetch = func(context.Context, string) ([]byte, error) { return nil, errors.New("offline") }
+	if _, err := r.Resolve(context.Background(), "s", "c", "guaranteed", "mqtt"); err == nil {
+		t.Fatal("cross-protocol cached assignment")
+	}
+}
