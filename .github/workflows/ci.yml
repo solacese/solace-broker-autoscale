@@ -144,16 +144,31 @@ jobs:
         run: |
           for spec in "a 18081 15556 15672" "b 18082 15557 15673"; do
             set -- $spec
-            docker run -d --name migration-$1 --shm-size=1g -p $2:8080 -p $3:55555 -p $4:5672 \
+            docker run -d --name migration-$1 --shm-size=1g --ulimit core=-1 --ulimit nofile=2448:1048576 \
+              -p $2:8080 -p $3:55555 -p $4:5672 \
               -e username_admin_globalaccesslevel=admin -e username_admin_password=admin \
               solace/solace-pubsub-standard:latest
           done
           for port in 18081 18082; do
             B=http://127.0.0.1:$port/SEMP/v2/config
-            for i in $(seq 1 90); do
-              curl -fsS -u admin:admin "$B/about/api" >/dev/null && break
+            ready=false
+            for i in $(seq 1 60); do
+              if curl -fsS -u admin:admin "$B/about/api" >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              if [ "$(docker inspect -f '{{.State.Running}}' migration-a)" != true ] ||
+                 [ "$(docker inspect -f '{{.State.Running}}' migration-b)" != true ]; then
+                break
+              fi
               sleep 3
             done
+            if [ "$ready" != true ]; then
+              docker inspect -f '{{.Name}} {{json .State}}' migration-a migration-b
+              docker logs --tail 100 migration-a
+              docker logs --tail 100 migration-b
+              exit 1
+            fi
             curl -fsS -u admin:admin -X PATCH "$B/msgVpns/default/clientUsernames/default" \
               -H 'Content-Type: application/json' -d '{"enabled":true,"password":"default"}'
             curl -fsS -u admin:admin -X PATCH "$B/msgVpns/default" \
@@ -175,3 +190,9 @@ jobs:
         env:
           SOLACE_GO_AMQP_URI: amqp://default:default@127.0.0.1:15672
         run: go test -race ./...
+      - name: Broker diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs --tail 100 migration-a || true
+          docker logs --tail 100 migration-b || true
