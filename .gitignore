@@ -56,3 +56,6 @@ OneDrive_*/
 *.audit.jsonl
 *.ledger.db*
 assignment.db-*
+
+# Local manager demo binaries, traces and durable payment state
+state/

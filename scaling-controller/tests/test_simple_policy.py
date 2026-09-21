@@ -54,3 +54,23 @@ def test_paused_and_bad_policy(tmp_path):
 def test_backlog_is_not_treated_as_movable_capacity():
     loads = [PartitionLoad("payments", 0, "a", 0.1, 0.1, spool=0.95)]
     assert propose_move(loads, ["a", "b"], trigger=0.8, target=0.65, excluded=set()) is None
+
+
+def test_minimal_subscriber_list_and_scaling_defaults(tmp_path):
+    path = policy_file(tmp_path, scaling={}, workloads={"payments": {
+        "topic": "payments/{account}/{event}", "keep_together": "account",
+        "subscribers": ["ledger", "audit"],
+    }})
+    cfg = load_config(path)
+    assert cfg.fleet.max_brokers == 4
+    assert cfg.policy.warm_pool == 1
+    assert cfg.messaging.routes[0].key_levels == [1]
+    assert {g.group: g.topics for g in cfg.messaging.subscriptions} == {
+        "audit": ["payments/*/*"], "ledger": ["payments/*/*"],
+    }
+    assert cfg.automation.shards["payments"].enabled
+    with pytest.raises(ValueError, match="duplicate subscriber"):
+        load_config(policy_file(tmp_path, workloads={"payments": {
+            "topic": "payments/{account}/{event}", "keep_together": "account",
+            "subscribers": ["ledger", "ledger"],
+        }}))

@@ -13,20 +13,27 @@ Use [payments.yaml](../examples/simple/payments.yaml):
 ```yaml
 version: 1
 connection: connection.yaml
-scaling:
-  mode: automatic
-  max_brokers: 4
-  warm_brokers: 1
 workloads:
   payments:
     topic: payments/{account}/{event}
     keep_together: account
-    subscribers:
-      ledger: payments/>
-      audit: payments/*/created
+    subscribers: [ledger, audit]
 ```
 
-This means: keep one account's payments on the same partition; spread independent accounts across available brokers; give ledger every payment and audit only created payments. The controller uses sustained measured load to move eligible partitions. Adding a broker does not randomly redistribute every message.
+This means: keep one account's payments on the same partition; spread independent accounts across available brokers; give ledger and audit every matching payment. A subscriber list means each group receives the workload topic pattern. The controller uses sustained measured load to move eligible partitions. Adding a broker does not randomly redistribute every message.
+
+
+The defaults are automatic scaling, a maximum of four active/warm brokers per workload, and one desired warm reserve. Omit those settings unless changing them. For filtered subscribers, use the map form:
+
+```yaml
+subscribers:
+  ledger: payments/>
+  audit: payments/*/created
+```
+
+To change scaling defaults, add `scaling: {max_brokers: 3, warm_brokers: 1}` or `scaling: {mode: paused}` at the top level. Keep `keep_together` explicit: choosing an ordering boundary is a business decision.
+
+Both [the Python client](native-messaging.md) and [the managed Go client](go-messaging.md) consume this policy. The Go client uses AMQP 1.0; it follows the same persisted owners and group queues.
 
 | Choice | Meaning |
 |---|---|
@@ -74,7 +81,7 @@ See [the complete application](../examples/payments/native_app.py) for client co
 - During fencing or an outage, unconfirmed messages stay on disk. Receipts, including negative receipts, wake the delivery worker without waiting for the next controller poll.
 - A transient controller outage can use known ownership for up to five minutes after its last successful fetch. After that, delivery waits and the buffer remains durable. Authorization or incompatible-policy errors pause delivery.
 - The buffer is bounded. Full storage raises backpressure rather than discarding accepted events. It survives process restart on the same disk, not loss of that disk.
-- Each consumer group receives its own copy through native Solace subscriptions. Handler execution uses a shared pool of eight workers; handlers must be bounded and must atomically deduplicate event IDs with their business transaction.
+- Each consumer group receives its own copy through native Solace subscriptions. The Python client uses eight handler workers; the Go client processes one handler per queue link; handlers must be bounded and must atomically deduplicate event IDs with their business transaction.
 - Existing backlog drains on the original broker. A slow consumer or one indivisible hot account is not solved by adding brokers. Grace periods and spare capacity make short bursts manageable; Cloud creation is not instantaneous.
 
 Delivery is at least once. A lost receipt can cause a retry and duplicate; this is why event IDs and idempotent handlers matter. `flush()` is an optional wait for broker acceptance, useful during tests or controlled shutdown, not something to call after every event. `close()` preserves unsent data.

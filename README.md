@@ -6,16 +6,22 @@ This project helps you plan and operate a horizontally scaled Solace Cloud fleet
 
 [Explore the project](https://solacese.github.io/solace-broker-autoscale/) · [Routing explained](guide/routing.md) · [Measured profiles](guide/measured-profiles.md) · [Configuration](guide/configuration.md)
 
-> Community project, Apache 2.0. Automatic managed-SMF queue handover is tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
+> Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
 
 ## Repository layout and supported paths
 
 - [scaling-controller/](scaling-controller/): Python controller, capacity planning, native SMF client, durable outbox and managed queue migration.
-- [shim/](shim/): Go topic/payload rules, AMQP transport and event-driven topology primitives. Includes bounded asynchronous publishing and application-controlled message settlement.
+- [shim/](shim/): Go managed AMQP client with a durable outbox, topic routing, subscription discovery and migration recovery; also retains the portable rules and event-spine tools.
 - [guide/](guide/): documentation and the GitHub Pages site.
 - [examples/](examples/): short application policies and operator profiles.
 
-Use the Python native SMF path for the automatic managed migration described here. The Go rule/spine path is retained and improved, but its in-memory asynchronous queue and topology ownership are not interchangeable with the managed durable outbox and migration protocol. [Production readiness](guide/production-readiness.md) lists the remaining work.
+Use the Python native SMF client or the [managed Go AMQP client](guide/go-messaging.md) with the same business YAML and recorded queue ownership. The older Go rules/spine path remains separate. [Production readiness](guide/production-readiness.md) lists qualification still needed.
+
+## Show it working
+
+Run `./scripts/manager-demo.sh` for a real two-broker payment burst and publisher crash/recovery demo. It produces an offline HTML presentation with a replay, seven-line policy and reconciled counts. [Setup and two-minute presenter notes](examples/manager-demo/README.md).
+
+The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. The reduced demo capacity is explicitly labelled; this is functional evidence, not a benchmark.
 
 ## Start with a small application policy
 

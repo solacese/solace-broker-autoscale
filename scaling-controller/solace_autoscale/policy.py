@@ -27,7 +27,7 @@ class Scaling(_Base):
 class Workload(_Base):
     topic: str
     keep_together: str | list[str]
-    subscribers: dict[str, str | list[str]] = Field(min_length=1)
+    subscribers: dict[str, str | list[str]] | list[str] = Field(min_length=1)
 
 
 class Policy(_Base):
@@ -81,7 +81,13 @@ def compile_policy(raw: dict, path: Path) -> Config:
                 raise ValueError(f"{name}: keep_together must name topic fields, 'topic', or 'all'")
             rule["key_levels"] = [fields[n] for n in names]
         routes.append(rule)
-        for group, patterns in workload.subscribers.items():
+        # A list means each group receives this workload's complete topic pattern.
+        subscribers = workload.subscribers
+        if isinstance(subscribers, list):
+            if len(set(subscribers)) != len(subscribers):
+                raise ValueError(f"{name}: duplicate subscriber group")
+            subscribers = {g: rule["pattern"] for g in subscribers}
+        for group, patterns in subscribers.items():
             values = [patterns] if isinstance(patterns, str) else patterns
             groups.setdefault(group, set()).update(values)
     effective = cfg.model_dump(mode="json")

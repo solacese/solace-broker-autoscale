@@ -230,7 +230,10 @@ class ManagedConsumers:
             pending = flow["pending"]
             if pending is None:
                 return
-            envelope = json.loads(pending.get_payload_as_string())
+            payload = pending.get_payload_as_string()
+            if payload is None:
+                payload = pending.get_payload_as_bytes()  # AMQP data sections map to binary SMF payloads.
+            envelope = json.loads(payload)
             self.handler(envelope["event_id"], envelope["payload"])
             flow["receiver"].ack(pending)
             flow["pending"] = None

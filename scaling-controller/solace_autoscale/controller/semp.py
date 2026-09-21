@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -188,6 +189,8 @@ class QueueManager:
             return
         base = "/SEMP/v2/config/msgVpns/" + quote(self.vpns[broker], safe="")
         profile = "autoscale-" + self.fleet_id
+        if len(profile) > 32:
+            profile = "autoscale-" + hashlib.sha256(self.fleet_id.encode()).hexdigest()[:22]
         body = {
             "clientProfileName": profile,
             "allowGuaranteedMsgSendEnabled": True,

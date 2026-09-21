@@ -1,5 +1,15 @@
 # Smart shim (Go)
 
+## Managed pub/sub: the recommended automatic-scaling path
+
+Use **`messaging.Open`**, **`client.Publish`** and **`client.Subscribe`** with the [seven-line business policy](../examples/simple/payments.yaml). Publications are accepted on disk, broker receipts run in the background, and native subscriptions follow the controller's persisted owners through migration. Restart with the same outbox to recover accepted work.
+
+See the [Go API and guarantees](../guide/go-messaging.md), [runnable application](cmd/payments-demo/main.go), and [manager demo](../examples/manager-demo/README.md). The live test kills the publisher with 24 pending payments and reconciles all 112 accepted IDs in ledger and audit after migration.
+
+## Portable rules and event spine
+
+The packages described below remain available for existing applications and offline exploration. Their memory-only async publisher is distinct from the durable `messaging` client. Do not use topology hashing to bypass managed queue ownership.
+
 The smart shim is a thin client-side library that sits next to your application's own AMQP client.
 For every message it decides three things from the topic and payload, using a set of rules you write:
 

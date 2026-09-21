@@ -69,3 +69,47 @@ func TestRealBrokerRedeliversUntilApplicationAcknowledges(t *testing.T) {
 		t.Fatal("acknowledged message redelivered")
 	}
 }
+
+func TestRealReceiversShareConnectionAndCloseIndependently(t *testing.T) {
+	uri := os.Getenv("SOLACE_GO_AMQP_URI")
+	if uri == "" {
+		t.Skip("set SOLACE_GO_AMQP_URI for real broker test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tr := New()
+	a, err := tr.Receiver(ctx, uri, "queue://q-go-settlement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := tr.Receiver(ctx, uri, "queue://q-go-settlement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if a.(*receiver).conn != b.(*receiver).conn {
+		t.Fatal("receiver connections were not pooled")
+	}
+	if err = a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sender, err := tr.Sender(ctx, uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	if err = sender.Send(ctx, dispatch.Message{Address: "topic://autoscale/go/settlement", Body: []byte("pooled")}); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := b.Receive(ctx)
+	if err != nil {
+		t.Fatal("closing one link broke the other", err)
+	}
+	if string(msg.Body) != "pooled" {
+		t.Fatal(string(msg.Body))
+	}
+	if err = msg.Ack(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

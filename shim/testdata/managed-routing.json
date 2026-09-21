@@ -1,0 +1,42 @@
+[
+  {
+    "account": "account-42",
+    "key": "[\"account-42\"]",
+    "partition": 60
+  },
+  {
+    "account": "é",
+    "key": "[\"\\u00e9\"]",
+    "partition": 39
+  },
+  {
+    "account": "日本",
+    "key": "[\"\\u65e5\\u672c\"]",
+    "partition": 36
+  },
+  {
+    "account": "💳",
+    "key": "[\"\\ud83d\\udcb3\"]",
+    "partition": 6
+  },
+  {
+    "account": "<>&",
+    "key": "[\"<>&\"]",
+    "partition": 31
+  },
+  {
+    "account": "quote\"back\\slash",
+    "key": "[\"quote\\\"back\\\\slash\"]",
+    "partition": 12
+  },
+  {
+    "account": "",
+    "key": "[\"\\u007f\"]",
+    "partition": 35
+  },
+  {
+    "account": "line separator",
+    "key": "[\"line\\u2028separator\"]",
+    "partition": 75
+  }
+]

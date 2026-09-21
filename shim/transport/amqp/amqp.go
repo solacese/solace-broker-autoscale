@@ -5,17 +5,20 @@
 //
 // A connection URI carries everything needed to dial one broker, for example
 // amqps://user:pass@host.messaging.solace.cloud:5671. The scheme selects TLS (amqps) or plaintext
-// (amqp); any userinfo becomes SASL PLAIN credentials. One Transport dials a fresh connection per
-// Sender/Receiver call; the shim's own connection cache keeps that to one sender per (broker, uri).
+// (amqp); any userinfo becomes SASL PLAIN credentials. Sender connections are cached by the shim.
+// Receiver links share one session and connection per URI, so partitions do not multiply connections.
 package amqp
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	goamqp "github.com/Azure/go-amqp"
 	"github.com/solacese/solace-broker-autoscale/shim/dispatch"
@@ -27,6 +30,14 @@ type Transport struct {
 	// TLSConfig is applied to amqps connections. Nil uses a default config (server cert verified
 	// against the system roots). Set this to pin certificates or, in a lab, to skip verification.
 	TLSConfig *tls.Config
+	mu        sync.Mutex
+	receivers map[string]*receiverSession
+}
+
+type receiverSession struct {
+	conn    *goamqp.Conn
+	session *goamqp.Session
+	refs    int
 }
 
 // New returns a ready AMQP transport.
@@ -71,23 +82,39 @@ func (t *Transport) Sender(ctx context.Context, uri string) (dispatch.Sender, er
 	return &sender{conn: conn, link: link}, nil
 }
 
-// Receiver opens a connection, session, and receiver link bound to source (a topic or queue).
+// Receiver opens a link bound to source, sharing the endpoint connection/session with other receivers.
 func (t *Transport) Receiver(ctx context.Context, uri, source string) (dispatch.Receiver, error) {
-	conn, err := t.dial(ctx, uri)
-	if err != nil {
-		return nil, err
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.receivers == nil {
+		t.receivers = map[string]*receiverSession{}
 	}
-	session, err := conn.NewSession(ctx, nil)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("open session: %w", err)
+	pooled := t.receivers[uri]
+	if pooled == nil {
+		conn, err := t.dial(ctx, uri)
+		if err != nil {
+			return nil, err
+		}
+		session, err := conn.NewSession(ctx, nil)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		pooled = &receiverSession{conn: conn, session: session}
+		t.receivers[uri] = pooled
 	}
-	link, err := session.NewReceiver(ctx, source, nil)
+	link, err := pooled.session.NewReceiver(ctx, source, &goamqp.ReceiverOptions{Credit: 1})
 	if err != nil {
-		_ = conn.Close()
+		var ce *goamqp.ConnError
+		var se *goamqp.SessionError
+		if pooled.refs == 0 || errors.As(err, &ce) || errors.As(err, &se) {
+			delete(t.receivers, uri)
+			_ = pooled.conn.Close()
+		}
 		return nil, fmt.Errorf("open receiver on %q: %w", source, err)
 	}
-	return &receiver{conn: conn, link: link}, nil
+	pooled.refs++
+	return &receiver{conn: pooled.conn, link: link, transport: t, pool: pooled, uri: uri}, nil
 }
 
 type sender struct {
@@ -120,17 +147,39 @@ func (s *sender) Send(ctx context.Context, msg dispatch.Message) error {
 func (s *sender) Close() error { return s.conn.Close() }
 
 type receiver struct {
-	conn *goamqp.Conn
-	link *goamqp.Receiver
+	conn      *goamqp.Conn
+	link      *goamqp.Receiver
+	transport *Transport
+	pool      *receiverSession
+	uri       string
+	closeOnce sync.Once
 }
 
 func (r *receiver) Receive(ctx context.Context) (dispatch.Message, error) {
 	m, err := r.link.Receive(ctx, nil)
 	if err != nil {
+		var ce *goamqp.ConnError
+		var se *goamqp.SessionError
+		if errors.As(err, &ce) || errors.As(err, &se) {
+			r.transport.mu.Lock()
+			if r.transport.receivers[r.uri] == r.pool {
+				delete(r.transport.receivers, r.uri)
+			}
+			r.transport.mu.Unlock()
+		}
 		return dispatch.Message{}, err
 	}
 	// Receiving is not successful application processing. Leave settlement to the caller.
-	out := dispatch.Message{Body: m.GetData()}
+	body := bytes.Join(m.Data, nil)
+	if len(m.Data) == 0 {
+		switch value := m.Value.(type) {
+		case string:
+			body = []byte(value)
+		case []byte:
+			body = value
+		}
+	}
+	out := dispatch.Message{Body: body}
 	var mu sync.Mutex
 	settled := false
 	settle := func(ctx context.Context, accept bool) error {
@@ -171,4 +220,25 @@ func (r *receiver) Receive(ctx context.Context) (dispatch.Message, error) {
 	return out, nil
 }
 
-func (r *receiver) Close() error { return r.conn.Close() }
+func (r *receiver) Close() error {
+	var result error
+	r.closeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		result = r.link.Close(ctx)
+		cancel()
+		t := r.transport
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		r.pool.refs--
+		if r.pool.refs == 0 {
+			if t.receivers[r.uri] == r.pool {
+				delete(t.receivers, r.uri)
+			}
+			err := r.conn.Close()
+			if result == nil {
+				result = err
+			}
+		}
+	})
+	return result
+}

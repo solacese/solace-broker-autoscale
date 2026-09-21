@@ -54,7 +54,7 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
   compile-synthetic-model:
     # §6: the compiler runs in CI. Here it recompiles the synthetic placeholder from its generator
@@ -190,6 +190,8 @@ jobs:
         env:
           SOLACE_GO_AMQP_URI: amqp://default:default@127.0.0.1:15672
         run: go test -race ./...
+      - name: Prove managed Go publisher crash recovery and native fanout
+        run: pytest tests/test_integration_go_managed.py -m integration -q
       - name: Broker diagnostics on failure
         if: failure()
         run: |
