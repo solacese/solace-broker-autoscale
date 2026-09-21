@@ -42,6 +42,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          cache-dependency-path: shim/go.sum
       - name: Format
         # gofmt -l lists files that are not gofmt-clean; any output fails the job.
         run: |
@@ -175,11 +176,14 @@ jobs:
               -H 'Content-Type: application/json' \
               -d '{"authenticationBasicEnabled":true,"authenticationBasicType":"internal","maxMsgSpoolUsage":1500,"serviceAmqpPlainTextEnabled":true}'
           done
+      - name: Wait for message spools and durable queue operations
+        run: python ../scripts/wait-solace-queues.py 18081 18082
       - name: Prove queue handover, publisher NACK, durable retry and restart
         run: pytest tests/test_integration_migration.py tests/test_integration_native_topics.py -m integration -q
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          cache-dependency-path: shim/go.sum
       - name: Prepare Go settlement queue
         run: |
           B=http://127.0.0.1:18081/SEMP/v2/config/msgVpns/default/queues
