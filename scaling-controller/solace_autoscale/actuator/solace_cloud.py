@@ -95,8 +95,12 @@ class SolaceCloudClient:
 
     # ---- CloudClient protocol ----------------------------------------------------------------
 
+    def create_service_request(self, body: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+        """Issue create and retain the complete operation so callers can journal resourceId."""
+        return self._post("/api/v2/missionControl/eventBrokerServices", body, idempotency_key)
+
     def create_service(self, body: dict[str, Any], idempotency_key: str) -> str:
-        resp = self._post("/api/v2/missionControl/eventBrokerServices", body, idempotency_key)
+        resp = self.create_service_request(body, idempotency_key)
         return str(resp["data"]["id"])  # operation id (202 OperationResponse)
 
     def delete_service(self, service_id: str, idempotency_key: str) -> str:

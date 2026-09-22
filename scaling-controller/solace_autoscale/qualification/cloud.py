@@ -237,11 +237,16 @@ class QualificationRunner:
             record["create_attempted_at"] = _utc()
             self.journal.save()
             try:
-                operation_id = self.cloud.create_service(payload, record["idempotency_key"])
-                record["create_operation_id"] = operation_id
-                self.journal.save()
-                operation = self._wait_operation(operation_id)
+                response = self.cloud.create_service_request(payload, record["idempotency_key"])
+                operation = response["data"]
+                operation_id = str(operation["id"])
                 service_id = str(operation.get("resourceId", ""))
+                record["create_operation_id"] = operation_id
+                if service_id:
+                    record["service_id"] = service_id
+                self.journal.save()
+                operation = self._wait_operation(operation_id, service_id or None)
+                service_id = str(operation.get("resourceId", service_id))
             except httpx.HTTPError as exc:
                 error_body: Any = {}
                 if isinstance(exc, httpx.HTTPStatusError):

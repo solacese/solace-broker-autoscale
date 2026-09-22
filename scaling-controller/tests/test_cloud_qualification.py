@@ -76,7 +76,7 @@ class Cloud:
     def list_service_classes(self):
         return {"data": [{"id": "ENTERPRISE_100K_HIGHAVAILABILITY"}]}
 
-    def create_service(self, body, key):
+    def create_service_request(self, body, key):
         index = len(self.created) + 1
         service_id = f"svc-{index}"
         operation_id = f"create-{index}"
@@ -86,7 +86,7 @@ class Cloud:
                    "allowedActions": ["delete"]}
         service["eventBrokerServiceVersion"] = service.pop("eventBrokerVersion")
         self.services.append(service)
-        return operation_id
+        return {"data": {"id": operation_id, "resourceId": service_id, "status": "PENDING"}}
 
     def delete_service(self, service_id, key):
         self.deleted.append((service_id, key))
