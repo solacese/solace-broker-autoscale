@@ -163,6 +163,8 @@ class Lab:
                     time.sleep(0.5)
         self.registry.mark_ready(list(self.registry.groups()))
         self.store = ControllerStore(self.db)
+        for p in range(partitions):
+            self.store.mark_partition_ready("payments", p)
         self.engine = MigrationEngine(self.store, self.queues, AutomationConfig(
             poll_interval=1, migration_grace=2, empty_settle=1, migration_timeout=120,
         ))

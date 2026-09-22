@@ -27,6 +27,7 @@ from solace_autoscale.assignment.store import (  # noqa: E402
     OptimisticLockError,
     Placement,
 )
+from solace_autoscale.config import AssignmentConfig  # noqa: E402
 
 
 def _endpoints(host: str) -> dict:
@@ -66,6 +67,57 @@ def test_assignment_returns_per_protocol_map(tmp_path):
     assert body["lease_seconds"] == 300
     # never a credential
     assert "password" not in body and "token" not in body
+
+
+def test_managed_assignment_waits_for_controller_bootstrap(tmp_path):
+    store = AssignmentStore(tmp_path / "a.db")
+    _seed(store, n=1)
+    client = TestClient(create_app(
+        store,
+        policy=AssignmentConfig(routing="partitioned", partitions=1),
+        fleet_id="payments",
+    ))
+    response = client.get(
+        "/assignment",
+        params={"shard": "shard-a", "client_id": "c1", "mode": "guaranteed", "partition": 0},
+    )
+    assert response.status_code == 503
+    assert "not ready" in response.json()["detail"]
+    store.close()
+
+
+def test_managed_assignment_waits_when_placement_exists_but_queue_is_not_ready(tmp_path):
+    store = AssignmentStore(tmp_path / "a.db")
+    _seed(store, n=1)
+    store.ensure_routing("partitioned", 1)
+    assign(store, "shard-a", "partition:0", "guaranteed", 1, 300)
+    client = TestClient(create_app(
+        store,
+        policy=AssignmentConfig(routing="partitioned", partitions=1),
+        fleet_id="payments",
+    ))
+    response = client.get(
+        "/assignment",
+        params={"shard": "shard-a", "client_id": "c1", "mode": "guaranteed", "partition": 0},
+    )
+    assert response.status_code == 503
+    store.close()
+
+
+def test_initial_assignment_respects_allowed_broker_ids(tmp_path):
+    store = AssignmentStore(tmp_path / "a.db")
+    _seed(store, n=2)
+    assignment = assign(
+        store,
+        "shard-a",
+        "c1",
+        "guaranteed",
+        1,
+        300,
+        allowed_broker_ids=frozenset({"shard-a-01"}),
+    )
+    assert assignment.broker.broker_id == "shard-a-01"
+    store.close()
 
 
 def test_guaranteed_placement_is_sticky(tmp_path):

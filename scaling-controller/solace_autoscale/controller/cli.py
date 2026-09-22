@@ -17,9 +17,51 @@ from ..assignment.store import AssignmentStore
 from ..capacity.model import load_model
 from ..config import load_config
 from ..metrics.fleet import load_inventory
+from .features import contract_digest, feature_contract, placement_contract
 from .provisioning import CloudProvisioner
 from .runtime import Controller
 from .semp import QueueManager
+from .store import ControllerStore
+
+
+@click.command("adopt-feature-contract")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--inventory", "inventory_path", required=False, type=click.Path(exists=True, path_type=Path))
+@click.option("--yes", is_flag=True, help="Confirm that the displayed contract describes existing state.")
+def adopt_feature_contract(config_path: Path, inventory_path: Path | None, yes: bool) -> None:
+    """Explicitly attest feature requirements for a pre-contract assignment database."""
+    cfg = load_config(config_path)
+    inventory_path = inventory_path or (Path(cfg.inventory) if cfg.inventory else None)
+    if inventory_path is None:
+        raise click.ClickException("set inventory in the connection profile or pass --inventory")
+    inventory = load_inventory(inventory_path)
+    shards = sorted({b.shard for b in inventory.brokers if b.role in ("active", "warm")})
+    contract = feature_contract(cfg, shards, deployment_mode=inventory.deployment_mode)
+    broker_contract = placement_contract(inventory)
+    digest = contract_digest({"features": contract, "placement": broker_contract})
+    click.echo(json.dumps({
+        "digest": digest, "feature_contract": contract, "placement_contract": broker_contract
+    }, indent=2))
+    if not yes:
+        raise click.ClickException("review the contract, then rerun with --yes to attest existing state")
+    store = AssignmentStore(cfg.assignment.store)
+    try:
+        controller_store = ControllerStore(store)
+        if controller_store.pending():
+            raise click.ClickException("finish pending migrations before adopting a feature contract")
+        with store.transaction():
+            if store.feature_contract() is not None or store.placement_contract() is not None:
+                raise click.ClickException(
+                    "placement contracts already exist; adoption never overwrites them"
+                )
+            store.ensure_feature_contract(contract, adopt_existing=True)
+            store.ensure_placement_contract(broker_contract, adopt_existing=True)
+            controller_store.event(
+                time.time(), "feature-contract-adopted", {"digest": digest, "shards": shards}
+            )
+    finally:
+        store.close()
+    click.echo(f"adopted feature contract {digest}")
 
 
 @click.command("run")
@@ -43,7 +85,9 @@ def run_controller(config_path: Path, inventory_path: Path | None, once: bool) -
         except BlockingIOError as exc:
             raise click.ClickException("another controller owns this local state database") from exc
         connections = {}
-        for endpoint in inventory.brokers:
+        scaling_brokers = [b for b in inventory.brokers if b.role in ("active", "warm")]
+        for endpoint in scaling_brokers:
+            assert endpoint.username_env and endpoint.password_env and endpoint.base_url
             user, password = os.environ.get(endpoint.username_env), os.environ.get(endpoint.password_env)
             if not user or not password:
                 raise click.ClickException(f"missing SEMP credential variables for {endpoint.broker_id}")
@@ -52,7 +96,7 @@ def run_controller(config_path: Path, inventory_path: Path | None, once: bool) -
         queues = QueueManager(
             cfg.automation.fleet_id,
             connections,
-            {b.broker_id: b.msg_vpn for b in inventory.brokers},
+            {b.broker_id: b.msg_vpn for b in scaling_brokers},
             cfg.automation.queue_spool_mb,
         )
         try:

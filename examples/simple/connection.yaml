@@ -16,6 +16,16 @@ assignment:
 automation:
   fleet_id: payments
   poll_interval: 10s
+  # Advanced feature evidence is declared here, not in the business policy.
+  # This baseline uses no broker transactions, DR replication, replay or tracing.
+  # Declaring any of them pins the workload until its migration safety is qualified.
+  shards:
+    payments:
+      features:
+        transactions: none
+        replication: none
+        replay: false
+        tracing: false
 policy:
   scale_up_window: 30s
   cooldown: 15m

@@ -167,7 +167,7 @@ solace-autoscale run --config examples/measured/payments-automatic.yaml \
 
 Keep managed consumers running so they can bind new destinations. Enable `provisioning.enabled` to replenish warm services automatically, with an explicit region, exact version, token and spending ceiling. The example leaves Cloud creation disabled until those are configured.
 
-[Automatic scaling: walkthrough, YAML and recovery](guide/automatic-scaling.md) · [Validation results](guide/automatic-scaling-validation.md) · [Full config](examples/measured/payments-automatic.yaml) · [Publisher/consumer example](examples/payments/worker.py)
+[Automatic scaling: walkthrough, YAML and recovery](guide/automatic-scaling.md) · [Feature-aware placement boundary](guide/feature-aware-placement.md) · [Validation results](guide/automatic-scaling-validation.md) · [Full config](examples/measured/payments-automatic.yaml) · [Publisher/consumer example](examples/payments/worker.py)
 
 ## Choose the workload conditions
 
@@ -201,6 +201,8 @@ Replay and tracing were benchmarked separately; their combined cost is not measu
 | `serve` | Run assignment and managed partition discovery using the YAML policy. |
 | `run` | Run automatic managed queue handover and optional Cloud warm-pool replenishment. |
 | `simulate` | Exercise the legacy model/decision matrix. Measured profiles have separate coverage tests. |
+| `placement-compare` | Compare the constrained next-move planner with a bounded exact synthetic oracle. |
+| `adopt-feature-contract` | Explicitly attest feature and placement constraints for pre-contract durable state. |
 | `accuracy` | Report recorded calibration evidence; normal traffic alone does not establish saturation. |
 | `shard-advise` | Suggest traffic groups from an Event Portal export. |
 | `compile` | Legacy fanout-one compiler. Prefer `profiles compile` for the supported Cloud workbooks. |

@@ -79,3 +79,44 @@ def test_warm_spare_is_not_reported_as_active_capacity(monkeypatch):
     assert snapshot.shards['orders'].current_brokers == 1
     assert set(snapshot.brokers) == {'a'}
     collector.close()
+
+
+def test_inventory_validates_capabilities_and_failure_domains():
+    data = inventory().model_dump()
+    data["brokers"][0]["capabilities"] = ["guaranteed", "specialized"]
+    data["brokers"][0]["failure_domains"] = {"zone": "one"}
+    data["brokers"][1]["failure_domains"] = {"zone": "two"}
+    data["placement"] = {
+        "shards": {
+            "orders": {
+                "required_capabilities": ["guaranteed"],
+                "allowed_failure_domains": {"zone": ["one", "two"]},
+                "max_partitions_per_broker": 8,
+                "max_partitions_per_domain": {"zone": 8},
+                "spread_by": ["zone"],
+                "pinned_partitions": [3],
+            }
+        }
+    }
+    parsed = FleetInventory.model_validate(data)
+    assert parsed.placement.shards["orders"].pinned_partitions == frozenset({3})
+    data["brokers"][1]["failure_domains"] = {}
+    with pytest.raises(ValueError, match="each constrained failure domain"):
+        FleetInventory.model_validate(data)
+
+
+def test_disaster_recovery_endpoint_is_not_reported_as_active_capacity(monkeypatch):
+    monkeypatch.setenv('TEST_USER', 'fixture-user')
+    monkeypatch.setenv('TEST_PASSWORD', 'fixture-password')
+    inv = inventory()
+    inv.brokers[1].role = 'dr'
+    inv.brokers[1].base_url = None
+    inv.brokers[1].username_env = None
+    inv.brokers[1].password_env = None
+    collector = FleetCollector(inv)
+    sample = MetricSample(100, 1, 1, 1000, 1000, 1000, 1, 0, 1)
+    monkeypatch.setattr(collector.collectors['a'], 'collect', lambda *args: sample)
+    snapshot = collector.collect(100)
+    assert snapshot.shards['orders'].current_brokers == 1
+    assert set(snapshot.brokers) == {'a'}
+    collector.close()

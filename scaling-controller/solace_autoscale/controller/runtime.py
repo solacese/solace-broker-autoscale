@@ -19,8 +19,16 @@ from ..capacity.model import lookup
 from ..capacity.schema import CapacityModel
 from ..config import Config, ShardScalingPolicy
 from ..metrics.fleet import FleetInventory
+from .features import assess_migration, feature_contract, placement_contract, requirements_for
 from .migration import MigrationEngine
-from .planner import PartitionLoad, propose_move
+from .planner import (
+    BrokerCandidate,
+    LoadVector,
+    PlacementBundle,
+    PlacementConstraints,
+    PlacementProblem,
+    plan_next_move,
+)
 from .semp import QueueManager, QueueStatus
 from .store import ControllerStore
 
@@ -30,6 +38,7 @@ class ControlResult:
     state: str
     detail: str
     migrations: int
+    explanation: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,22 +74,54 @@ class Controller:
             raise ValueError(
                 "unattended controller requires require_confirmation: false in its explicit config"
             )
-        if config.messaging.enabled and {r.shard for r in config.messaging.routes} != {
-            b.shard for b in inventory.brokers
-        }:
-            raise ValueError("native messaging workloads must exactly match inventoried shards")
+        scaling_shards = {b.shard for b in inventory.brokers if b.role in ("active", "warm")}
+        if config.messaging.enabled and {r.shard for r in config.messaging.routes} != scaling_shards:
+            raise ValueError("native messaging workloads must exactly match scaling-capacity shards")
         self.config, self.model, self.inventory = config, model, inventory
         self.assignments, self.queues = assignments, queues
-        assignments.ensure_routing(config.assignment.routing, config.assignment.partitions)
-        assignments.ensure_managed_namespace(config.automation.fleet_id)
         self.store = ControllerStore(assignments)
+        shards = sorted(scaling_shards)
+        self.scaling_brokers = {
+            b.broker_id: b for b in inventory.brokers if b.role in ("active", "warm")
+        }
+        inventory_ids = set(self.scaling_brokers)
+        with assignments.transaction():
+            assignments.ensure_feature_contract(
+                feature_contract(config, shards, deployment_mode=inventory.deployment_mode)
+            )
+            assignments.ensure_routing(config.assignment.routing, config.assignment.partitions)
+            assignments.ensure_managed_namespace(config.automation.fleet_id)
+            referenced = {
+                row["broker_id"] for row in assignments._conn.execute("SELECT broker_id FROM placements")
+            }
+            referenced.update(
+                value for row in assignments._conn.execute(
+                    "SELECT source,target FROM migrations WHERE phase NOT IN ('complete','rolled-back')"
+                ) for value in row
+            )
+            cloud_ids = set()
+            if config.provisioning.enabled and assignments._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cloud_capacity'"
+            ).fetchone():
+                cloud_ids = {
+                    row["service_id"] for row in assignments._conn.execute(
+                        "SELECT service_id FROM cloud_capacity WHERE service_id IS NOT NULL"
+                    )
+                }
+            missing = referenced - inventory_ids - cloud_ids
+            if missing:
+                raise ValueError(
+                    "owned or migrating brokers are absent from scaling inventory: "
+                    + ", ".join(sorted(missing))
+                )
+            assignments.ensure_placement_contract(placement_contract(inventory))
         self.topics = TopicRegistry(assignments)
         self.topics.contract(config.messaging.routing_contract())
         if config.messaging.enabled:
             for group in config.messaging.subscriptions:
                 self.topics.register(group.group, group.topics)
-        if set(config.automation.shards) - {b.shard for b in inventory.brokers}:
-            raise ValueError("scaling overrides must name inventoried shards")
+        if set(config.automation.shards) - scaling_shards:
+            raise ValueError("scaling overrides must name scaling-capacity shards")
         self._prepared_groups: tuple[str, ...] = ()
         if config.messaging.enabled:
             if {r.shard for r in config.messaging.routes} - {b.shard for b in inventory.brokers}:
@@ -92,6 +133,8 @@ class Controller:
         self.overloaded_since: dict[str, float] = {}
         self.last_migration_at: float | None = None
         for endpoint in inventory.brokers:
+            if endpoint.role == "dr":
+                continue
             if "smf" not in endpoint.endpoints:
                 raise ValueError(
                     f"{endpoint.broker_id}: an SMF endpoint is required for automatic routing"
@@ -104,6 +147,13 @@ class Controller:
                 raise ValueError(
                     "inventoried broker identity changed; existing queue ownership must be preserved"
                 )
+            if stored is not None and endpoint.role == "active" and stored.state == BrokerState.WARM:
+                assignments.set_broker_state(endpoint.broker_id, BrokerState.ACTIVE)
+                stored = assignments.get_broker(endpoint.broker_id)
+            if stored is not None and endpoint.role == "warm" and stored.state not in (
+                BrokerState.WARM, BrokerState.ACTIVE
+            ):
+                raise ValueError("inventoried warm broker has incompatible durable runtime state")
             if stored is None:
                 assignments.upsert_broker(
                     Broker(
@@ -131,16 +181,56 @@ class Controller:
             override.cooldown if override.cooldown is not None else self.config.policy.cooldown,
         )
 
+    def _eligible_broker_ids(self, shard: str) -> frozenset[str]:
+        """Filter initial owners through the same static capability/domain constraints as moves."""
+        placement = self.inventory.placement.shards.get(shard)
+        required = placement.required_capabilities if placement else frozenset()
+        allowed = placement.allowed_failure_domains if placement else {}
+        broker_limit = placement.max_partitions_per_broker if placement else None
+        domain_limits = placement.max_partitions_per_domain if placement else {}
+        endpoints = [
+            broker for broker in self.inventory.brokers
+            if broker.shard == shard and broker.role == "active"
+        ]
+        counts = {
+            broker.broker_id: sum(
+                placement.mode == "guaranteed" and placement.client_id.startswith("partition:")
+                for placement in self.assignments.placements_on_broker(broker.broker_id)
+            )
+            for broker in endpoints
+        }
+        domain_counts: dict[str, dict[str, int]] = {
+            key: defaultdict(int) for key in domain_limits
+        }
+        for broker in endpoints:
+            for key in domain_limits:
+                value = broker.failure_domains.get(key)
+                if value is not None:
+                    domain_counts[key][value] += counts[broker.broker_id]
+        return frozenset(
+            broker.broker_id
+            for broker in endpoints
+            if required <= broker.capabilities
+            and all(broker.failure_domains.get(key) in values for key, values in allowed.items())
+            and (broker_limit is None or counts[broker.broker_id] < broker_limit)
+            and all(
+                broker.failure_domains.get(key) is not None
+                and domain_counts[key][broker.failure_domains[key]] < limit
+                for key, limit in domain_limits.items()
+            )
+        )
+
     def bootstrap(self, now: float) -> None:
         """Provision managed partition queues on their durable initial owners; never touch other names."""
         if Path(self.config.actuation.kill_switch_file).exists():
             return
         if self.config.messaging.enabled:
             for broker in self.inventory.brokers:
-                self.queues.configure_native(broker.broker_id)
+                if broker.role in ("active", "warm"):
+                    self.queues.configure_native(broker.broker_id)
         groups = tuple(self.topics.groups())
         pending = {(m.shard, m.partition) for m in self.store.pending()}
-        for shard in sorted({b.shard for b in self.inventory.brokers}):
+        for shard in sorted({b.shard for b in self.inventory.brokers if b.role in ("active", "warm")}):
             for partition in range(self.config.assignment.partitions):
                 if (shard, partition) in pending:
                     continue
@@ -153,6 +243,7 @@ class Controller:
                     self.config.assignment.lease_seconds,
                     strategy=self.config.assignment.strategy,
                     broker_weights=self.config.assignment.broker_weights,
+                    allowed_broker_ids=self._eligible_broker_ids(shard),
                 )
                 self.store.event(
                     now,
@@ -160,6 +251,7 @@ class Controller:
                     {"broker": placement.broker.broker_id, "shard": shard, "partition": partition},
                 )
                 self.queues.prepare(placement.broker.broker_id, shard, partition, enabled=True)
+                self.store.mark_partition_ready(shard, partition)
 
         if self.config.messaging.enabled and not pending:
             self.topics.mark_ready(list(groups))
@@ -181,12 +273,12 @@ class Controller:
             self.bootstrap(now)
             self.previous.clear()
             self.overloaded_since.clear()
-        loads: list[PartitionLoad] = []
+        loads: list[PlacementBundle] = []
         scrape_started = time.monotonic()
         observations: dict[tuple[str, int], tuple[float, QueueStatus, str]] = {}
         try:
             owners = {}
-            for shard in sorted({b.shard for b in self.inventory.brokers}):
+            for shard in sorted({b.shard for b in self.inventory.brokers if b.role in ("active", "warm")}):
                 for partition in range(self.config.assignment.partitions):
                     owner = self.assignments.get_placement(shard, f"partition:{partition}")
                     if not owner:
@@ -226,7 +318,17 @@ class Controller:
                             raise ValueError(
                                 "idle partition with backlog requires capacity.message_size_hint"
                             )
-                        loads.append(PartitionLoad(shard, partition, owner.broker_id, 0, 0))
+                        loads.append(
+                            PlacementBundle(
+                                f"{shard}/partition:{partition}",
+                                shard,
+                                partition,
+                                owner.broker_id,
+                                LoadVector(),
+                                resident=LoadVector(spool=status.spool_bytes),
+                                queue_ids=tuple(sorted(self.topics.groups(shard))) or ("default",),
+                            )
+                        )
                         continue
                     cap = lookup(
                         self.model,
@@ -238,18 +340,22 @@ class Controller:
                     )
                     assert cap.ingress_byte_rate is not None and cap.egress_byte_rate is not None
                     loads.append(
-                        PartitionLoad(
+                        PlacementBundle(
+                            f"{shard}/partition:{partition}",
                             shard,
                             partition,
                             owner.broker_id,
-                            rate / cap.msg_rate,
-                            max(
-                                byte_rate / cap.ingress_byte_rate,
-                                # Native counters already include each group's stored copy.
-                                byte_rate * (1 if self.config.messaging.enabled else
-                                             self.config.capacity.fanout) / cap.egress_byte_rate,
+                            LoadVector(
+                                rate / cap.msg_rate,
+                                max(
+                                    byte_rate / cap.ingress_byte_rate,
+                                    # Native counters already include each group's stored copy.
+                                    byte_rate * (1 if self.config.messaging.enabled else
+                                                 self.config.capacity.fanout) / cap.egress_byte_rate,
+                                ),
                             ),
-                            spool=status.spool_bytes / cap.spool_bytes,
+                            resident=LoadVector(spool=status.spool_bytes / cap.spool_bytes),
+                            queue_ids=tuple(sorted(self.topics.groups(shard))) or ("default",),
                         )
                     )
         except Exception as exc:
@@ -264,11 +370,15 @@ class Controller:
             return ControlResult("no-decision", "partition scrape exceeded staleness limit", 0)
         if len(loads) != len(observations):
             return ControlResult("observing", "collecting counter-delta history", 0)
-        totals: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+        totals: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
+        for broker_id, endpoint in self.scaling_brokers.items():
+            totals[broker_id] = list(endpoint.fixed_load.model_dump().values())
         for load in loads:
-            for i, value in enumerate((load.messages, load.bytes, load.spool)):
-                totals[load.broker_id][i] += value
-        broker_shards = {load.broker_id: load.shard for load in loads}
+            for i, value in enumerate(load.total.values):
+                totals[load.current_broker][i] += value
+        broker_shards = {
+            broker_id: endpoint.shard for broker_id, endpoint in self.scaling_brokers.items()
+        }
         hot = {
             broker for broker, vector in totals.items()
             if self.scaling_policy(broker_shards[broker]).enabled
@@ -283,41 +393,139 @@ class Controller:
             return ControlResult("observing", "no sustained broker overload", 0)
         if self.store.started_since(now - 3600) >= self.config.automation.max_migrations_per_hour:
             return ControlResult("limited", "hourly migration limit reached", 0)
+        pinned: dict[str, str] = {}
+        proposals = []
         for shard in sorted({load.shard for load in loads}):
             scaling = self.scaling_policy(shard)
-            if not scaling.enabled:
-                continue
-            candidates = [
-                b
-                for b in self.assignments.brokers_for_shard(shard)
-                if b.state in (BrokerState.ACTIVE, BrokerState.WARM)
-            ]
-            active = [b for b in candidates if b.state == BrokerState.ACTIVE]
-            warm = [b for b in candidates if b.state == BrokerState.WARM]
-            # Warm capacity can be activated only within the active per-shard broker ceiling.
-            allowed = active + warm[: max(0, self.config.fleet.max_brokers - len(active))]
             shard_loads = [load for load in loads if load.shard == shard]
-            excluded = {
-                (load.shard, load.partition)
-                for load in shard_loads if load.broker_id not in sustained
-            }
-            excluded |= self.store.recently_moved(now - scaling.cooldown)
-            move = propose_move(
-                shard_loads,
-                [b.broker_id for b in allowed],
-                trigger=scaling.trigger_utilization,
-                target=scaling.target_utilization,
-                excluded=excluded,
+            if not scaling.enabled or not any(load.current_broker in sustained for load in shard_loads):
+                continue
+            requirements = requirements_for(self.config, shard)
+            eligibility = assess_migration(
+                requirements,
+                deployment_mode=self.inventory.deployment_mode,
+                target_role="active",
             )
-            if move:
-                partition_load, destination = move
-                target = self.assignments.get_broker(destination)
-                assert target is not None
-                if target.state == BrokerState.WARM:
-                    self.store.event(now, "activate-warm-service", {"broker": destination})
-                    self.assignments.set_broker_state(destination, BrokerState.ACTIVE)
-                self.store.begin(shard, partition_load.partition, partition_load.broker_id, destination, now)
-                return ControlResult("migration-planned", "moving measured load to spare capacity", 1)
+            if not eligibility.allowed:
+                pinned[shard] = eligibility.reason
+                continue
+            stored = {
+                broker.broker_id: broker for broker in self.assignments.brokers_for_shard(shard)
+            }
+            candidates = []
+            for broker_id in sorted(self.scaling_brokers):
+                endpoint = self.scaling_brokers[broker_id]
+                broker = stored.get(broker_id)
+                if endpoint.shard != shard or endpoint.role not in ("active", "warm") or broker is None:
+                    continue
+                if not assess_migration(
+                    requirements,
+                    deployment_mode=self.inventory.deployment_mode,
+                    target_role=endpoint.role,
+                ).allowed:
+                    continue
+                candidates.append(
+                    BrokerCandidate(
+                        broker_id,
+                        shard,
+                        endpoint.role,
+                        broker.state.value,
+                        endpoint.capabilities,
+                        tuple(sorted(endpoint.failure_domains.items())),
+                        LoadVector(**endpoint.fixed_load.model_dump()),
+                    )
+                )
+            placement = self.inventory.placement.shards.get(shard)
+            required = placement.required_capabilities if placement else frozenset()
+            allowed_domains = tuple(
+                sorted((key, tuple(sorted(values))) for key, values in (
+                    placement.allowed_failure_domains.items() if placement else ()
+                ))
+            )
+            domain_limits = tuple(sorted(
+                placement.max_partitions_per_domain.items() if placement else ()
+            ))
+            pinned_partitions = placement.pinned_partitions if placement else frozenset()
+            excluded = {
+                load.bundle_id for load in shard_loads if load.current_broker not in sustained
+            }
+            excluded.update(
+                f"{name}/partition:{partition}"
+                for name, partition in self.store.recently_moved(now - scaling.cooldown)
+            )
+            excluded.update(f"{shard}/partition:{partition}" for partition in pinned_partitions)
+            problem = PlacementProblem(
+                shard,
+                tuple(sorted(shard_loads, key=lambda load: load.bundle_id)),
+                tuple(candidates),
+                PlacementConstraints(
+                    scaling.trigger_utilization,
+                    scaling.target_utilization,
+                    self.config.fleet.max_brokers,
+                    required,
+                    allowed_domains,
+                    placement.max_partitions_per_broker if placement else None,
+                    domain_limits,
+                    placement.spread_by if placement else (),
+                ),
+                frozenset(excluded),
+            )
+            outcome = plan_next_move(problem)
+            if outcome.proposal:
+                severity = max(
+                    max(totals[load.current_broker])
+                    for load in shard_loads if load.current_broker in sustained
+                )
+                proposals.append((-severity, outcome.proposal, requirements))
+        if proposals:
+            _, proposal, requirements = min(
+                proposals,
+                key=lambda item: (
+                    item[0], item[1].after, item[1].shard,
+                    item[1].partition, item[1].destination,
+                ),
+            )
+            target = self.assignments.get_broker(proposal.destination)
+            assert target is not None
+            endpoint = self.scaling_brokers[proposal.destination]
+            decision = assess_migration(
+                requirements,
+                deployment_mode=self.inventory.deployment_mode,
+                target_role=endpoint.role,
+            )
+            if not decision.allowed:
+                raise ValueError(f"migration compatibility changed: {decision.reason}")
+            explanation = {
+                "bundle": proposal.bundle_id,
+                "source": proposal.source,
+                "destination": proposal.destination,
+                "queue_count": proposal.after.moved_queue_count,
+                "before": proposal.before.__dict__,
+                "after": proposal.after.__dict__,
+                "rejections": dict(proposal.rejection_counts),
+            }
+            self.store.begin(
+                proposal.shard,
+                proposal.partition,
+                proposal.source,
+                proposal.destination,
+                now,
+                activate_warm=target.state == BrokerState.WARM,
+                explanation=explanation,
+            )
+            return ControlResult(
+                "migration-planned", "moving measured load to spare capacity", 1, explanation
+            )
+        if pinned:
+            self.store.event(now, "feature-pinned", {"shards": pinned})
+            return ControlResult(
+                "feature-pinned",
+                "migration refused: " + ", ".join(
+                    f"{shard} ({reason})" for shard, reason in sorted(pinned.items())
+                ),
+                0,
+                {"pinned_shards": dict(sorted(pinned.items()))},
+            )
         self.store.event(now, "capacity-shortfall", {"brokers": sorted(sustained)})
         return ControlResult(
             "capacity-shortfall", "no fitting destination or partition; replenish warm capacity", 0

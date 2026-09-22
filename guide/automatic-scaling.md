@@ -69,6 +69,8 @@ actuation:
 
 The automatic planner uses `capacity.scenario`, `capacity.fanout`, `capacity.message_size_hint`, and the imported profile. It uses its own trigger/target settings; `policy.headroom` belongs to the recommendation commands. Queue counter deltas give average message size per partition and interval. Use conservative scenarios and verify representative message-size distributions. `message_size_hint` supplies the design size for idle queues with backlog.
 
+Before load scoring, the controller applies the [feature-aware placement boundary](feature-aware-placement.md). Advanced operator profiles can declare transactions, DR replication, replay and tracing under `automation.shards.<name>.features`. Unqualified features return `feature-pinned`; they do not activate a warm service or start a migration. Inventory `role: dr` identifies protection capacity and is never considered active/warm scaling capacity.
+
 ## Run the three parts
 
 1. Compile a profile matching the actual provider, broker version, HA service class and deployed VPN limits. The example limits are planning defaults; replace them before actuation.

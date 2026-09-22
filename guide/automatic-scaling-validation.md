@@ -28,7 +28,7 @@ Cloud tests use mocks. They cover persistent unique-name retries after an uncert
 - Replace planning-default VPN limits with the actual deployed limits before actuation. The genuine throughput data does not establish those configuration limits.
 - Test sustained representative traffic, payload distributions and failure scenarios. The reference synchronous publisher and thread-per-flow consumer have not been performance qualified for the benchmark throughput.
 - Use a dedicated homogeneous managed fleet; unmanaged traffic and connection pressure are outside this partition planner. Provide upstream backpressure, persistent local disks and transactional business idempotency.
-- Configure external monitoring of JSON states such as `capacity-shortfall`, `no-decision`, `retry` and `limited`.
+- Configure external monitoring of JSON states such as `capacity-shortfall`, `feature-pinned`, `no-decision`, `retry` and `limited`.
 - Multi-host controller HA, automatic broker deletion/scale-in, arbitrary queue adoption and backlog copying remain outside this implementation.
 
 The private verification report and compiled measured models remain ignored under `resources/` and `models/`. Public examples use illustrative loads and invented fixtures. No production Cloud resources were created, modified or deleted in this validation. No GitHub publication was performed; the reviewed source remains in the local working tree on `codex/autoscaler-reliability`.

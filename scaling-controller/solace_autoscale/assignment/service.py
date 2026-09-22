@@ -123,6 +123,14 @@ def create_app(
                 headers={"Retry-After": "1"},
             )
         try:
+            if fleet_id and policy.routing == "partitioned" and mode == "guaranteed":
+                assert partition_id is not None
+                if not migrations.partition_ready(shard, partition_id):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="managed partition not ready; wait for controller bootstrap",
+                        headers={"Retry-After": "1"},
+                    )
             result = assign(
                 store,
                 shard,

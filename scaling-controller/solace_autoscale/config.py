@@ -293,6 +293,15 @@ class AssignmentConfig(_Base):
         return values
 
 
+class PlacementFeatures(_Base):
+    """Operator-declared broker features whose migration safety needs explicit evidence."""
+
+    transactions: Literal["none", "local", "xa"] = "none"
+    replication: Literal["none", "disaster-recovery"] = "none"
+    replay: bool = False
+    tracing: bool = False
+
+
 class ShardScalingPolicy(_Base):
     """Per-shard overrides for automatic movement; in-flight moves still finish safely."""
 
@@ -301,6 +310,7 @@ class ShardScalingPolicy(_Base):
     target_utilization: float | None = Field(default=None, gt=0, lt=1)
     scale_up_window: float | None = Field(default=None, gt=0)
     cooldown: float | None = Field(default=None, ge=0)
+    features: PlacementFeatures = Field(default_factory=PlacementFeatures)
 
     @field_validator("scale_up_window", "cooldown", mode="before")
     @classmethod

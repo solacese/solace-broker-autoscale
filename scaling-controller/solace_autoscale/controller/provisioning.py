@@ -148,18 +148,28 @@ class CloudProvisioner:
         if cfg.messaging.enabled:
             c.queues.configure_native(sid)
         if not any(b.broker_id == sid for b in c.inventory.brokers):
-            c.inventory.brokers.append(
-                BrokerEndpoint(
-                    broker_id=sid,
-                    shard=row["shard"],
-                    msg_vpn=vpn["msgVpnName"],
-                    base_url=base,
-                    username_env="CLOUD_MANAGED",
-                    password_env="CLOUD_MANAGED",
-                    endpoints=endpoints,
-                    role="warm",
+            placement = c.inventory.placement.shards.get(row["shard"])
+            if placement and (
+                placement.required_capabilities
+                or placement.allowed_failure_domains
+                or placement.max_partitions_per_domain
+                or placement.spread_by
+            ):
+                raise ValueError(
+                    "Cloud provisioning cannot infer required capabilities or failure domains"
                 )
+            provisioned = BrokerEndpoint(
+                broker_id=sid,
+                shard=row["shard"],
+                msg_vpn=vpn["msgVpnName"],
+                base_url=base,
+                username_env="CLOUD_MANAGED",
+                password_env="CLOUD_MANAGED",
+                endpoints=endpoints,
+                role="warm",
             )
+            c.inventory.brokers.append(provisioned)
+            c.scaling_brokers[sid] = provisioned
         if c.assignments.get_broker(sid) is None:
             c.assignments.upsert_broker(
                 Broker(sid, row["shard"], vpn["msgVpnName"], BrokerState.WARM, endpoints)
@@ -176,6 +186,8 @@ class CloudProvisioner:
         matches = {s["name"]: s for s in self.cloud.find_by_name_prefix(self.prefix)}
         for row in rows:
             service = matches.get(row["name"])
+            if row["status"] == "refused":
+                continue
             if row["status"] == "ready":
                 if row["service_id"] not in c.queues.connections:
                     if service is None or not self._attach_ready(row, service):
@@ -190,11 +202,25 @@ class CloudProvisioner:
                 return "waiting for Cloud and SEMP readiness"
             if not metrics_fresh:
                 return "creation deferred: no complete fresh workload observation"
-            return self._issue(row, now)
+            result = self._issue(row, now)
+            if result.startswith("create refused: Cloud provisioning cannot infer placement facts"):
+                self._set(row["name"], "refused")
+                continue
+            return result
         if not metrics_fresh:
             return "warm replenishment waiting for fresh workload telemetry"
-        for shard in sorted({b.shard for b in c.inventory.brokers}):
+        refused = []
+        for shard in sorted({b.shard for b in c.inventory.brokers if b.role in ("active", "warm")}):
             brokers = c.assignments.brokers_for_shard(shard)
+            placement = c.inventory.placement.shards.get(shard)
+            if placement and (
+                placement.required_capabilities
+                or placement.allowed_failure_domains
+                or placement.max_partitions_per_domain
+                or placement.spread_by
+            ):
+                refused.append(shard)
+                continue
             warm = sum(b.state == BrokerState.WARM for b in brokers)
             if warm >= cfg.policy.warm_pool or len(brokers) >= cfg.fleet.max_brokers:
                 continue
@@ -207,12 +233,22 @@ class CloudProvisioner:
                 )
                 c.store.event(now, "cloud-capacity-intent", {"name": name, "shard": shard})
             return self._issue(self._rows()[-1], now)
+        if refused:
+            return "create refused: Cloud provisioning cannot infer placement facts for " + ", ".join(refused)
         return "warm pool satisfied or total capacity ceiling reached"
 
     def _issue(self, row: dict, now: float) -> str:
         c, cfg = self.controller, self.controller.config
         # The spending ceiling includes both active and warm services.
         live = c.assignments.brokers_for_shard(row["shard"])
+        placement = c.inventory.placement.shards.get(row["shard"])
+        if placement and (
+            placement.required_capabilities
+            or placement.allowed_failure_domains
+            or placement.max_partitions_per_domain
+            or placement.spread_by
+        ):
+            return "create refused: Cloud provisioning cannot infer placement facts"
         if len(live) >= cfg.fleet.max_brokers:
             return "total provisioned capacity ceiling reached"
         op = Operation(

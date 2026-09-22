@@ -25,7 +25,7 @@ import click
 
 from . import __version__
 from .capacity.cli import plan, profiles
-from .controller.cli import run_controller
+from .controller.cli import adopt_feature_contract, run_controller
 from .metrics.fleet_cli import monitor_fleet
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ main.add_command(profiles)
 main.add_command(plan)
 main.add_command(monitor_fleet)
 main.add_command(run_controller)
+main.add_command(adopt_feature_contract)
 
 
 @main.command()
@@ -151,6 +152,18 @@ def whatif(config_path: str, metrics_path: str, multipliers: str, now: float | N
             click.echo(f"| {p.multiplier:g}× | {p.recommended_brokers} | {p.binding_axis} | "
                        f"{p.action} | {ceil} |")
         click.echo("")
+
+
+@main.command("placement-compare")
+@click.option("--manifest", "manifest_path", required=True, type=click.Path(exists=True, path_type=Path))
+def placement_compare(manifest_path: Path) -> None:
+    """Compare the live next-move planner with a bounded exact synthetic oracle."""
+    from .simulator.placement import compare_manifest, load_manifest
+
+    try:
+        click.echo(_json.dumps(compare_manifest(load_manifest(manifest_path)), indent=2))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.command()
@@ -391,6 +404,7 @@ def explain_policy(config_path: str, topic: str | None, as_json: bool) -> None:
     from .assignment.routing import partition_for
     from .assignment.topics import matches, validate_topic
     from .config import load_config
+    from .controller.features import requirements_for
     try:
         cfg = load_config(config_path)
         report: dict = {
@@ -401,6 +415,13 @@ def explain_policy(config_path: str, topic: str | None, as_json: bool) -> None:
             "delivery": "guaranteed, asynchronous broker receipts, at least once",
             "partitions_per_shard": cfg.assignment.partitions,
             "migration": cfg.automation.model_dump(mode="json"),
+            "feature_requirements": {
+                shard: requirements_for(cfg, shard).__dict__
+                for shard in sorted({
+                    *cfg.automation.shards,
+                    *(route.shard for route in cfg.messaging.routes),
+                })
+            },
             "messaging": cfg.messaging.model_dump(mode="json"),
             "note": "Current broker ownership requires the running assignment service.",
         }

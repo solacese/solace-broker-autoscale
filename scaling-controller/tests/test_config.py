@@ -28,6 +28,46 @@ def test_unknown_top_level_key_rejected():
         Config.model_validate({"nope": {}})
 
 
+def test_feature_requirements_accept_explicit_supported_vocabulary():
+    cfg = Config.model_validate(
+        {
+            "automation": {
+                "shards": {
+                    "payments": {
+                        "features": {
+                            "transactions": "local",
+                            "replication": "disaster-recovery",
+                            "replay": True,
+                            "tracing": True,
+                        }
+                    }
+                }
+            }
+        }
+    )
+    assert cfg.automation.shards["payments"].features.transactions == "local"
+
+
+def test_unknown_feature_requirement_rejected():
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {"automation": {"shards": {"payments": {"features": {"magic": True}}}}}
+        )
+
+
+def test_effective_shard_thresholds_are_validated():
+    with pytest.raises(ValidationError, match="target_utilization must be below"):
+        Config.model_validate(
+            {
+                "automation": {
+                    "trigger_utilization": 0.8,
+                    "target_utilization": 0.65,
+                    "shards": {"payments": {"trigger_utilization": 0.5}},
+                }
+            }
+        )
+
+
 @pytest.mark.parametrize("value,secs", [
     ("30s", 30), ("3m", 180), ("45m", 2700), ("1h", 3600), ("30", 30), (30, 30), ("500ms", 0.5),
 ])

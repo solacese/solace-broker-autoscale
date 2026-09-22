@@ -83,6 +83,7 @@ def test_native_topic_fanout_and_migration_with_single_application_api(tmp_path,
     queues.configure_native("b")
     assign(db, "payments", "partition:0", "guaranteed", 1, 1)
     state = ControllerStore(db)
+    state.mark_partition_ready("payments", 0)
     gate = threading.Event()
     ledger, audit, stock = [], [], []
 

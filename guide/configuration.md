@@ -117,5 +117,20 @@ Native routes also accept `dispatch: by-key | by-topic | single`. Only `by-key` 
 `messaging.subscriptions` declares durable `{group, topics}` definitions;
 `messaging.allow_dynamic_groups: false` restricts registration to YAML-declared groups.
 `automation.shards.<name>` overrides `enabled`, `trigger_utilization`, `target_utilization`,
-`scale_up_window` and `cooldown` for an inventoried shard. Omitted values inherit globals.
-These settings take effect on process restart; routing contracts cannot change silently.
+`scale_up_window` and `cooldown` for an inventoried shard. It also accepts the operator-owned
+`features` contract: `transactions: none | local | xa`, `replication: none | disaster-recovery`,
+`replay` and `tracing`. Omitted features default to the currently qualified managed-queue baseline;
+`capacity.scenario: replay | tracing` also declares that feature. Broker transactions, DR
+replication, replay, tracing and replay+tracing are pinned until their state and combined capacity
+have explicit migration evidence. A measured scenario is capacity evidence, not migration proof.
+
+Inventory roles are `active`, `warm` and `dr`. Only active services are measured as current capacity;
+warm services may be activated by the controller. A DR peer is recorded separately and is never a
+placement destination or warm-pool slot. Active/warm entries may declare `capabilities`, `failure_domains`, and a normalized `fixed_load`
+reservation for load that cannot safely be attributed to a movable partition. `placement.shards.<name>` can require capabilities, restrict domain values, cap
+partitions per broker/domain, pin partition numbers and request soft spreading across named domains.
+Every referenced domain must be present on every scaling-capacity broker in that shard.
+
+These settings take effect on process restart. Routing and feature contracts are persisted; changing
+an existing shard's ordering or broker-feature boundary requires an explicit migration. Additive
+shards are allowed.

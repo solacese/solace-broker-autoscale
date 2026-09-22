@@ -128,6 +128,35 @@ def test_drain_timeout_rolls_back_without_forcing_data_movement(setup):
     assert q.states["a"].messages == 10
 
 
+def test_begin_activates_warm_target_atomically(setup):
+    db, state, _, _ = setup
+    # Replace the fixture's existing intent so this test can create one with warm activation.
+    db._conn.execute("DELETE FROM migrations")
+    db._conn.commit()
+    db.set_broker_state("b", BrokerState.WARM)
+    move = state.begin("orders", 0, "a", "b", 101, activate_warm=True)
+    assert move.phase == "preparing"
+    assert db.get_broker("b").state == BrokerState.ACTIVE
+
+
+def test_failed_begin_does_not_consume_warm_target(setup):
+    db, state, _, _ = setup
+    db.set_broker_state("b", BrokerState.WARM)
+    with pytest.raises(ValueError, match="source must own"):
+        state.begin("orders", 0, "wrong", "b", 101, activate_warm=True)
+    assert db.get_broker("b").state == BrokerState.WARM
+
+
+def test_rollback_restores_activated_warm_target(setup):
+    db, state, policy, q = setup
+    db._conn.execute("DELETE FROM migrations")
+    db._conn.commit()
+    db.set_broker_state("b", BrokerState.WARM)
+    move = state.begin("orders", 0, "a", "b", 100, activate_warm=True)
+    state.update(move, 101, phase="rolled-back")
+    assert db.get_broker("b").state == BrokerState.WARM
+
+
 def test_ownership_commit_never_reopens_source_on_activation_timeout(setup):
     db, state, policy, q = setup
     engine = MigrationEngine(state, q, policy)
@@ -161,14 +190,18 @@ def test_load_planner_fits_the_target_instead_of_round_robin():
     )  # An indivisible hot partition cannot fit anywhere.
 
 
-@pytest.mark.parametrize("override,expected", [
-    ({}, True),
-    ({"enabled": False}, False),
-    ({"trigger_utilization": .95}, False),
-    ({"scale_up_window": "60s"}, False),
-    ({"target_utilization": .2}, False),
+@pytest.mark.parametrize("override,expected,expected_state", [
+    ({}, True, "migration-planned"),
+    ({"enabled": False}, False, "observing"),
+    ({"trigger_utilization": .95}, False, "observing"),
+    ({"scale_up_window": "60s"}, False, "observing"),
+    ({"target_utilization": .2}, False, "capacity-shortfall"),
+    ({"features": {"transactions": "local"}}, False, "feature-pinned"),
+    ({"features": {"replay": True, "tracing": True}}, False, "feature-pinned"),
 ])
-def test_controller_dispatches_partitions_after_a_sustained_burst(tmp_path, override, expected):
+def test_controller_dispatches_partitions_after_a_sustained_burst(
+    tmp_path, override, expected, expected_state
+):
     from solace_autoscale.capacity.benchmarks import BenchmarkPoint, BenchmarkSheet, BenchmarkWorkbook
     from solace_autoscale.capacity.profile_model import compile_profile
     from solace_autoscale.config import Config
@@ -235,7 +268,7 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(tmp_path, over
                     "endpoints": {"smf": f"tcps://{b}"},
                     "role": role,
                 }
-                for b, role in [("a", "active"), ("b", "warm")]
+                for b, role in [("a", "active"), ("b", "warm"), ("backup", "dr")]
             ],
         }
     )
@@ -257,6 +290,7 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(tmp_path, over
     q = PartitionQueues()
     c = Controller(cfg, model, inv, db, q)
     c.bootstrap(100)
+    assert not any(broker == "backup" for broker, _ in q.states)
     assert c.tick(100).state == "observing"
     for now in [110, 120, 130, 140]:
         for key, status in list(q.states.items()):
@@ -268,13 +302,14 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(tmp_path, over
                 )
         result = c.tick(now)
     if not expected:
-        assert result.state != "migration-planned"
+        assert result.state == expected_state
         assert not c.store.pending()
         assert db.get_broker("b").state == BrokerState.WARM
         db.close()
         return
     assert result.state == "migration-planned"
     assert db.get_broker("b").state == BrokerState.ACTIVE
+    assert db.get_broker("backup") is None
     for now in [150, 160, 170, 180, 190, 200]:
         c.tick(now)
     assert not c.store.pending()

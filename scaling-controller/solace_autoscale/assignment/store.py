@@ -160,6 +160,102 @@ class AssignmentStore:
             self._conn.execute("INSERT INTO routing_settings VALUES ('managed_namespace',?)", (fleet_id,))
 
     @_transactional
+    def feature_contract(self) -> dict[str, object] | None:
+        row = self._conn.execute(
+            "SELECT value FROM routing_settings WHERE name='feature_contract'"
+        ).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    @_transactional
+    def ensure_feature_contract(
+        self, contract: dict[str, object], *, adopt_existing: bool = False
+    ) -> None:
+        """Allow additive shards but never silently attest existing durable ownership."""
+        value = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+        row = self._conn.execute(
+            "SELECT value FROM routing_settings WHERE name='feature_contract'"
+        ).fetchone()
+        if row is None:
+            existing = any(
+                self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                for table in ("placements", "migrations", "controller_events")
+                if self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+            )
+            if existing and not adopt_existing:
+                raise ValueError(
+                    "existing durable state has no feature contract; run adopt-feature-contract"
+                )
+            self._conn.execute("INSERT INTO routing_settings VALUES ('feature_contract',?)", (value,))
+            return
+        previous = json.loads(row["value"])
+        prior_shards = previous.get("shards", {})
+        current_shards = contract.get("shards", {})
+        unchanged = (
+            all(previous.get(key) == contract.get(key) for key in (
+                "schema", "bundle_scope", "cross_partition_transactions", "deployment_mode"
+            ))
+            and isinstance(prior_shards, dict)
+            and isinstance(current_shards, dict)
+            and all(current_shards.get(shard) == features for shard, features in prior_shards.items())
+        )
+        if not unchanged:
+            raise ValueError("feature contract changed; migrate broker-local state explicitly")
+        if previous != contract:
+            self._conn.execute(
+                "UPDATE routing_settings SET value=? WHERE name='feature_contract'", (value,)
+            )
+
+    @_transactional
+    def placement_contract(self) -> dict[str, object] | None:
+        row = self._conn.execute(
+            "SELECT value FROM routing_settings WHERE name='placement_contract'"
+        ).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    @_transactional
+    def ensure_placement_contract(
+        self, contract: dict[str, object], *, adopt_existing: bool = False
+    ) -> None:
+        """Allow new brokers while preserving every recorded capability/domain assertion."""
+        value = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+        row = self._conn.execute(
+            "SELECT value FROM routing_settings WHERE name='placement_contract'"
+        ).fetchone()
+        if row is None:
+            existing = self._conn.execute("SELECT 1 FROM placements LIMIT 1").fetchone()
+            if existing and not adopt_existing:
+                raise ValueError(
+                    "existing durable state has no broker placement contract; "
+                    "run adopt-feature-contract"
+                )
+            self._conn.execute("INSERT INTO routing_settings VALUES ('placement_contract',?)", (value,))
+            return
+        previous = json.loads(row["value"])
+        prior_brokers = previous.get("brokers", {})
+        current_brokers = contract.get("brokers", {})
+        prior_placement = previous.get("placement", {})
+        current_placement = contract.get("placement", {})
+        prior_shards = prior_placement.get("shards", {}) if isinstance(prior_placement, dict) else {}
+        current_shards = current_placement.get("shards", {}) if isinstance(current_placement, dict) else {}
+        unchanged = (
+            previous.get("schema") == contract.get("schema")
+            and isinstance(prior_brokers, dict)
+            and isinstance(current_brokers, dict)
+            and isinstance(prior_shards, dict)
+            and isinstance(current_shards, dict)
+            and all(current_brokers.get(broker) == facts for broker, facts in prior_brokers.items())
+            and all(current_shards.get(shard) == rules for shard, rules in prior_shards.items())
+        )
+        if not unchanged:
+            raise ValueError("broker placement contract changed; migrate ownership explicitly")
+        if previous != contract:
+            self._conn.execute(
+                "UPDATE routing_settings SET value=? WHERE name='placement_contract'", (value,)
+            )
+
+    @_transactional
     def upsert_broker(self, broker: Broker) -> None:
         self._conn.execute(
             """INSERT INTO brokers (broker_id, shard, msg_vpn, state, endpoints)
