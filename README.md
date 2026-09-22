@@ -1,4 +1,4 @@
-# Solace broker autoscale
+# Solace Broker Autoscale (`solace-broker-autoscale`)
 
 **Scale the brokers. Move the workload. Keep related payments together.**
 
@@ -9,6 +9,17 @@ This project helps you plan and operate a horizontally scaled Solace Cloud fleet
 > Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
 
 For development and the next feature-aware placement phase, start with the [agent handoff](guide/agent-handoff.md).
+
+## Get the repository
+
+The repository is **[solacese/solace-broker-autoscale](https://github.com/solacese/solace-broker-autoscale)**. Use `solace-broker-autoscale` as the checkout folder:
+
+```bash
+git clone https://github.com/solacese/solace-broker-autoscale.git
+cd solace-broker-autoscale
+```
+
+The installed command is still named `solace-autoscale`, and the Python package is `solace_autoscale`. These are names within this project, not separate repositories. Run the root-level setup and demo commands below from this checkout.
 
 ## Repository layout and supported paths
 
