@@ -65,3 +65,5 @@ Enterprise 100K is a service class with connection and resource limits, not a me
 6. Delete only the test services after authorized cleanup, verify deletion, and retain redacted reports with configuration/model digests. Keep raw account data and credentials out of Git.
 
 A successful single-service behavior test is useful but does not qualify splitting, disaster recovery, or production readiness. Machine sizing and load-generator placement must be sufficient to identify the broker bottleneck instead of measuring a laptop or WAN link.
+
+The [22 September Enterprise 100K qualification attempt](cloud-qualification-2026-09-22.md) stopped before allocation because the organization had reached its 100K service limit. It therefore produced no measured before/after numbers; the examples above remain explicitly synthetic.

@@ -1,0 +1,35 @@
+{
+  "status": "authorization-required",
+  "region": "eks-us-east-1a",
+  "service_class": "ENTERPRISE_100K_HIGHAVAILABILITY",
+  "broker_version": "10.26.0.8894-14",
+  "budget_eur": 2000,
+  "billing_basis": "replace-with-authorized-basis",
+  "price_eur_per_hour": null,
+  "max_runtime_minutes": 180,
+  "cleanup_timeout_minutes": 60,
+  "delete_test_services_after_run": true,
+  "service_count": 2,
+  "services_created": [],
+  "purpose": "Isolated baseline and managed split behavior test, not production qualification",
+  "requests": [
+    {
+      "name": "replace-with-unique-qualification-a",
+      "serviceClassId": "ENTERPRISE_100K_HIGHAVAILABILITY",
+      "datacenterId": "eks-us-east-1a",
+      "eventBrokerVersion": "10.26.0.8894-14",
+      "msgVpnName": "autoscale-test",
+      "redundancyGroupSslEnabled": true,
+      "locked": false
+    },
+    {
+      "name": "replace-with-unique-qualification-b",
+      "serviceClassId": "ENTERPRISE_100K_HIGHAVAILABILITY",
+      "datacenterId": "eks-us-east-1a",
+      "eventBrokerVersion": "10.26.0.8894-14",
+      "msgVpnName": "autoscale-test",
+      "redundancyGroupSslEnabled": true,
+      "locked": false
+    }
+  ]
+}

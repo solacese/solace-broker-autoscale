@@ -19,6 +19,8 @@ Python SMF and Go AMQP now share the controller's persisted partition ownership 
 
 Start with one isolated workload, spare capacity and a small canary. Expand only after the gates pass. Automatic scale-in, copying stored backlog and arbitrary existing queues remain outside the initial supported scope.
 
+The 22 September 2026 Enterprise 100K Cloud attempt passed region/version/service discovery but was blocked before allocation by the organization's 100K service-class limit. No service was created, so it adds control-plane validation but no throughput or Cloud handover evidence. See [the qualification record](cloud-qualification-2026-09-22.md).
+
 ## Improvements included in the main integration
 
 - Kept main's Go rules, topology, event spine, Mission Control identifiers and reorganized folders.

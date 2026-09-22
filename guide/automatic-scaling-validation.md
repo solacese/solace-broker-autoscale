@@ -20,7 +20,9 @@ The live migration test starts with ten payments accepted on the original broker
 
 Additional tests cover pending acknowledgments, unavailable telemetry, continuous-empty timing, missing destination consumers, pre-commit rollback, forward recovery after commit, measured load selection, warm activation, assignment concurrency, persistent routing contracts, outbox recovery and backpressure, and independent-partition progress when another partition is rejected.
 
-Cloud tests use mocks. They cover persistent unique-name retries after an uncertain create result, backoff, kill-switch refusal, service identity/region/class/version mismatch rejection, and successful SEMP readiness attachment. The response shape was checked against the official [Mission Control service API](https://api.solace.dev/cloud/reference/getservice) and its embedded OpenAPI schemas. Regional API configuration follows the [official API base URLs](https://api.solace.dev/cloud/reference/using-the-v2-rest-apis-for-pubsub-cloud).
+Cloud lifecycle tests use mocks. They cover persistent unique-name retries after an uncertain create result, bounded exact-ID cleanup, backoff, kill-switch refusal, service identity/region/class/version mismatch rejection, and successful SEMP readiness attachment. The response shape was checked against the official [Mission Control service API](https://api.solace.dev/cloud/reference/getservice) and its embedded OpenAPI schemas. Regional API configuration follows the [official API base URLs](https://api.solace.dev/cloud/reference/using-the-v2-rest-apis-for-pubsub-cloud).
+
+A real Enterprise 100K preflight on 22 September 2026 verified the target region and recommended version, but the first create was rejected before allocation because the organization's 100K service-class limit had been reached. Exact-name verification found zero test services afterward. This did not produce workload or migration evidence; see [the qualification record](cloud-qualification-2026-09-22.md).
 
 ## Remaining rollout requirements
 
