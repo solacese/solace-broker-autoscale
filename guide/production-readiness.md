@@ -19,7 +19,7 @@ Python SMF and Go AMQP now share the controller's persisted partition ownership 
 
 Start with one isolated workload, spare capacity and a small canary. Expand only after the gates pass. Automatic scale-in, copying stored backlog and arbitrary existing queues remain outside the initial supported scope.
 
-The 22 September 2026 Enterprise 100K Cloud attempt passed region/version/service discovery but was blocked before allocation by the organization's 100K service-class limit. No service was created, so it adds control-plane validation but no throughput or Cloud handover evidence. See [the qualification record](cloud-qualification-2026-09-22.md).
+The 22 September 2026 Cloud qualification found no Enterprise 100K quota, then successfully exercised the managed two-service handover on two Enterprise 5K HA services: 112 accepted events reached both subscriber groups with zero duplicates and preserved per-account order through publisher SIGKILL/restart. One Enterprise 10K HA service was created for a baseline, but the initial client run exposed a TLS trust-store defect and produced no throughput result; the service was deleted. See [the qualification record](cloud-qualification-2026-09-22.md).
 
 ## Improvements included in the main integration
 

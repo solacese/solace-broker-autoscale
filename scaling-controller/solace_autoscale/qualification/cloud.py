@@ -223,6 +223,13 @@ class QualificationRunner:
         for request in self.plan.requests:
             record = self.journal.service(request.name)
             if record.get("service_id"):
+                service = self.cloud.get_service(record["service_id"])["data"]
+                if service.get("creationState") != "COMPLETED" or service.get("adminState") != "START":
+                    operation_id = record.get("create_operation_id")
+                    if not operation_id:
+                        raise ValueError("journaled service is not ready and has no create operation")
+                    self._wait_operation(operation_id, record["service_id"])
+                self._verify_service(request, record)
                 continue
             payload = request.model_dump(by_alias=True)
             payload["serviceConnectionEndpoints"] = [{
@@ -265,24 +272,69 @@ class QualificationRunner:
                 raise ValueError("create operation did not identify its service")
             record["service_id"] = service_id
             self.journal.save()
-            service = self.cloud.get_service(service_id)["data"]
-            expected = {
-                "name": request.name,
-                "serviceClassId": request.service_class_id,
-                "datacenterId": request.datacenter_id,
-                "eventBrokerServiceVersion": request.event_broker_version,
-                "locked": False,
-            }
-            if any(service.get(key) != value for key, value in expected.items()):
-                raise ValueError("created service identity differs from the authorized request")
-            record["ready"] = (
-                service.get("creationState") == "COMPLETED"
-                and service.get("adminState") == "START"
-            )
-            self.journal.save()
-            if not record["ready"]:
-                raise RuntimeError("created service is not ready after successful operation")
+            self._verify_service(request, record)
         return self.journal.created_ids()
+
+    def _verify_service(self, request: ServiceRequest, record: dict[str, Any]) -> None:
+        service = self.cloud.get_service(record["service_id"])["data"]
+        expected = {
+            "name": request.name,
+            "serviceClassId": request.service_class_id,
+            "datacenterId": request.datacenter_id,
+            "eventBrokerServiceVersion": request.event_broker_version,
+            "locked": False,
+        }
+        if any(service.get(key) != value for key, value in expected.items()):
+            raise ValueError("created service identity differs from the authorized request")
+        record["ready"] = (
+            service.get("creationState") == "COMPLETED"
+            and service.get("adminState") == "START"
+        )
+        self.journal.save()
+        if not record["ready"]:
+            raise RuntimeError("created service is not ready after successful operation")
+
+    def connection_bundle(self) -> dict[str, Any]:
+        """Resolve private per-service SEMP/SMF/AMQP details for the workload process."""
+        brokers = []
+        requests = {request.name: request for request in self.plan.requests}
+        for index, record in enumerate(self.journal.data["services"]):
+            service_id = record.get("service_id")
+            if not service_id or record["name"] not in requests:
+                continue
+            detail = self.cloud.get_service(service_id, expand=True)["data"]
+            vpn = next(
+                item for item in detail["broker"]["msgVpns"]
+                if item["msgVpnName"] == requests[record["name"]].msg_vpn_name
+            )
+            endpoint = next(
+                item for item in detail["serviceConnectionEndpoints"]
+                if item.get("accessType") == "PUBLIC" and item.get("hostNames")
+            )
+            ports = {item["protocol"]: item["port"] for item in endpoint["ports"] if item.get("port")}
+            admin = vpn["managementAdminLoginCredential"]
+            client = vpn["serviceLoginCredential"]
+            host = endpoint["hostNames"][0]
+            brokers.append({
+                "broker_id": chr(ord("a") + index),
+                "service_id": service_id,
+                "msg_vpn": vpn["msgVpnName"],
+                "semp": f"https://{host}:{ports['serviceManagementTlsListenPort']}",
+                "smf": f"tcps://{host}:{ports['serviceSmfTlsListenPort']}",
+                "amqp": f"amqps://{host}:{ports['serviceAmqpTlsListenPort']}",
+                "admin_username": admin["username"],
+                "admin_password": admin["password"],
+                "client_username": client["username"],
+                "client_password": client["password"],
+            })
+        if len(brokers) != self.plan.service_count:
+            raise ValueError("not every created service has a complete private connection bundle")
+        return {
+            "topology": "independent-ha-services",
+            "service_class": self.plan.service_class,
+            "broker_version": self.plan.broker_version,
+            "brokers": brokers,
+        }
 
     def cleanup(self) -> CleanupResult:
         remaining = []

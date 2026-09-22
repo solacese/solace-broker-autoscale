@@ -7,16 +7,27 @@ idempotent business handler. No credentials are returned by the assignment servi
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .outbox import payment_envelope
 from .resolver import Assignment, Resolver
+
+
+def _default_trust_store() -> str:
+    """Use certifi when available; otherwise require an explicit trusted directory."""
+    try:
+        import certifi
+    except ImportError as exc:  # pragma: no cover - httpx normally installs certifi
+        raise ValueError("set SOLACE_TLS_TRUST_STORE_DIR for tcps connections") from exc
+    return str(Path(certifi.where()).parent)
 
 
 class SmfConnections:
@@ -37,18 +48,17 @@ class SmfConnections:
         with self.lock:
             if broker not in self.services:
                 username, password = self.credentials(broker)
-                service = (
-                    MessagingService.builder()
-                    .from_properties(
-                        {
-                            "solace.messaging.transport.host": location["endpoints"]["smf"],
-                            "solace.messaging.service.vpn-name": location["msg_vpn"],
-                            "solace.messaging.authentication.scheme.basic.username": username,
-                            "solace.messaging.authentication.scheme.basic.password": password,
-                        }
+                properties = {
+                    "solace.messaging.transport.host": location["endpoints"]["smf"],
+                    "solace.messaging.service.vpn-name": location["msg_vpn"],
+                    "solace.messaging.authentication.scheme.basic.username": username,
+                    "solace.messaging.authentication.scheme.basic.password": password,
+                }
+                if location["endpoints"]["smf"].startswith("tcps://"):
+                    properties["solace.messaging.tls.trust-store-path"] = (
+                        os.environ.get("SOLACE_TLS_TRUST_STORE_DIR") or _default_trust_store()
                     )
-                    .build()
-                )
+                service = MessagingService.builder().from_properties(properties).build()
                 service.connect()
                 self.services[broker] = service
             return self.services[broker]

@@ -22,7 +22,7 @@ Additional tests cover pending acknowledgments, unavailable telemetry, continuou
 
 Cloud lifecycle tests use mocks. They cover persistent unique-name retries after an uncertain create result, bounded exact-ID cleanup, backoff, kill-switch refusal, service identity/region/class/version mismatch rejection, and successful SEMP readiness attachment. The response shape was checked against the official [Mission Control service API](https://api.solace.dev/cloud/reference/getservice) and its embedded OpenAPI schemas. Regional API configuration follows the [official API base URLs](https://api.solace.dev/cloud/reference/using-the-v2-rest-apis-for-pubsub-cloud).
 
-A real Enterprise 100K preflight on 22 September 2026 verified the target region and recommended version, but the first create was rejected before allocation because the organization's 100K service-class limit had been reached. Exact-name verification found zero test services afterward. This did not produce workload or migration evidence; see [the qualification record](cloud-qualification-2026-09-22.md).
+A real Cloud qualification on 22 September 2026 found no Enterprise 100K quota, then used the largest available two-service tier: Enterprise 5K HA. Its managed fanout/migration run reconciled 112 accepted events in both groups, with zero duplicates and preserved per-account order through publisher SIGKILL/restart. A 10K baseline attempt exposed a TLS trust-store setup defect before traffic and produced no throughput result; all exact-ID resources were deleted. See [the qualification record](cloud-qualification-2026-09-22.md).
 
 ## Remaining rollout requirements
 

@@ -29,12 +29,31 @@ func run() error {
 	controller := flag.String("controller", "http://127.0.0.1:8099", "controller URL")
 	state := flag.String("state", "state/payments-demo", "persistent local directory")
 	subscribe := flag.Bool("subscribe", false, "run ledger and audit consumers")
+	handlerDelay := flag.Duration("handler-delay", 0, "delay each subscriber handler")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	c, err := messaging.Open(ctx, messaging.Options{ControllerURL: *controller, APIKey: os.Getenv("AUTOSCALE_API_KEY"), OutboxPath: filepath.Join(*state, "publisher.outbox.db"), PollInterval: 100 * time.Millisecond, Credentials: func(string) (string, string, error) {
-		return os.Getenv("SOLACE_USERNAME"), os.Getenv("SOLACE_PASSWORD"), nil
-	}})
+	type credential struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	credentials := map[string]credential{}
+	if raw := os.Getenv("SOLACE_CREDENTIALS_JSON"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &credentials); err != nil {
+			return fmt.Errorf("invalid SOLACE_CREDENTIALS_JSON: %w", err)
+		}
+	}
+	credentialFor := func(broker string) (string, string, error) {
+		if value, ok := credentials[broker]; ok && value.Username != "" && value.Password != "" {
+			return value.Username, value.Password, nil
+		}
+		username, password := os.Getenv("SOLACE_USERNAME"), os.Getenv("SOLACE_PASSWORD")
+		if username == "" || password == "" {
+			return "", "", fmt.Errorf("credentials unavailable for broker %s", broker)
+		}
+		return username, password, nil
+	}
+	c, err := messaging.Open(ctx, messaging.Options{ControllerURL: *controller, APIKey: os.Getenv("AUTOSCALE_API_KEY"), OutboxPath: filepath.Join(*state, "publisher.outbox.db"), PollInterval: 100 * time.Millisecond, Credentials: credentialFor})
 	if err != nil {
 		return err
 	}
@@ -50,6 +69,13 @@ func run() error {
 		defer c.Close() // Stop handlers before closing their business database.
 		for _, group := range []string{"ledger", "audit"} {
 			err = c.Subscribe(ctx, group, func(ctx context.Context, m messaging.Message) error {
+				if *handlerDelay > 0 {
+					select {
+					case <-time.After(*handlerDelay):
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
 				duplicate := false
 				err := db.Update(func(tx *bolt.Tx) error {
 					b, err := tx.CreateBucketIfNotExists([]byte(group))

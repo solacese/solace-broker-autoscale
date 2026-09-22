@@ -66,4 +66,4 @@ Enterprise 100K is a service class with connection and resource limits, not a me
 
 A successful single-service behavior test is useful but does not qualify splitting, disaster recovery, or production readiness. Machine sizing and load-generator placement must be sufficient to identify the broker bottleneck instead of measuring a laptop or WAN link.
 
-The [22 September Enterprise 100K qualification attempt](cloud-qualification-2026-09-22.md) stopped before allocation because the organization had reached its 100K service limit. It therefore produced no measured before/after numbers; the examples above remain explicitly synthetic.
+The [22 September Cloud qualification](cloud-qualification-2026-09-22.md) found no Enterprise 100K quota. The largest feasible two-service run used Enterprise 5K HA and reconciled 112 accepted events in each of two subscriber groups, with zero duplicates and preserved per-account order through migration and publisher SIGKILL/restart. Those functional results do not turn the normalized percentages above into measured 5K or 100K capacity.
