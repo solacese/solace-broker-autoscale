@@ -32,6 +32,8 @@ Use the Python native SMF client or the [managed Go AMQP client](guide/go-messag
 
 ## Show it working
 
+[Before/after broker split examples](guide/broker-split-examples.md): payment bursts, gradual growth, and bandwidth-heavy traffic, with runnable planner inputs and a Cloud qualification plan.
+
 Run `./scripts/manager-demo.sh` for a real two-broker payment burst and publisher crash/recovery demo. It produces an offline HTML presentation with a replay, seven-line policy and reconciled counts. [Setup and two-minute presenter notes](examples/manager-demo/README.md).
 
 The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. The reduced demo capacity is explicitly labelled; this is functional evidence, not a benchmark.
