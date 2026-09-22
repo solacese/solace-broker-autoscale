@@ -8,6 +8,8 @@ This project helps you plan and operate a horizontally scaled Solace Cloud fleet
 
 > Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
 
+For development and the next feature-aware placement phase, start with the [agent handoff](guide/agent-handoff.md).
+
 ## Repository layout and supported paths
 
 - [scaling-controller/](scaling-controller/): Python controller, capacity planning, native SMF client, durable outbox and managed queue migration.
