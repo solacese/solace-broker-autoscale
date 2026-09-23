@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import uvicorn
@@ -27,7 +28,7 @@ from solace_autoscale.assignment.topics import TopicRegistry
 from solace_autoscale.config import AssignmentConfig, MessagingConfig
 from solace_autoscale.controller.semp import QueueManager
 from solace_autoscale.controller.store import ControllerStore
-from solace_autoscale.metrics.semp import SempCollector
+from solace_autoscale.metrics.semp import SempCollector, map_vpn_monitor
 
 
 @contextmanager
@@ -174,6 +175,95 @@ def reconcile_deliveries(
     return by_group, loss, duplicates
 
 
+def phase_metrics(messages: int, timestamps: dict[str, float]) -> dict[str, float]:
+    """Return provenance-explicit phase durations and publication rates."""
+    started = timestamps["started"]
+    last_injected = timestamps["last_injected"]
+    all_accepted = timestamps["all_accepted"]
+    all_flushed = timestamps["all_flushed"]
+    all_processed = timestamps["all_processed"]
+    offer_seconds = last_injected - started
+    durable_accept_seconds = all_accepted - started
+    broker_flush_seconds = all_flushed - started
+    business_processing_seconds = all_processed - started
+    if min(offer_seconds, durable_accept_seconds, broker_flush_seconds,
+           business_processing_seconds) <= 0:
+        raise ValueError("workload phase timestamps must follow the timed start")
+    if all_accepted > all_flushed:
+        raise ValueError("broker flush completed before durable acceptance")
+    return {
+        "offer_injection_seconds": offer_seconds,
+        "offer_injection_messages_per_second": messages / offer_seconds,
+        "durable_accept_completion_seconds": durable_accept_seconds,
+        "durable_accept_completion_messages_per_second": messages / durable_accept_seconds,
+        "broker_flush_completion_seconds": broker_flush_seconds,
+        "broker_flush_completion_messages_per_second": messages / broker_flush_seconds,
+        "broker_flush_after_accept_seconds": all_flushed - all_accepted,
+        "business_handler_completion_seconds": business_processing_seconds,
+        "business_handler_completion_messages_per_second": messages / business_processing_seconds,
+    }
+
+
+def extract_cumulative_counters(data: dict[str, Any]) -> dict[str, int] | None:
+    names = ("dataRxMsgCount", "dataTxMsgCount", "dataRxByteCount", "dataTxByteCount")
+    nested = data.get("counter", {})
+    values: dict[str, int] = {}
+    for name in names:
+        value = data.get(name, nested.get(name) if isinstance(nested, dict) else None)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return None
+        integer = int(value)
+        if value != integer:
+            return None
+        values[name] = integer
+    return values
+
+
+def broker_observation(
+    collector: SempCollector, msg_vpn: str, now: float
+) -> tuple[Any, dict[str, int] | None]:
+    """Collect one VPN response for both rate telemetry and cumulative counters."""
+    encoded_vpn = quote(msg_vpn, safe="")
+    data = collector._get(f"/SEMP/v2/monitor/msgVpns/{encoded_vpn}").get("data", {})
+    sample = map_vpn_monitor(data, collector.connection_count(msg_vpn), now, 1)
+    return sample, extract_cumulative_counters(data)
+
+
+def counter_delta(
+    before: dict[str, int] | None, after: dict[str, int] | None
+) -> dict[str, int] | None:
+    if before is None or after is None or before.keys() != after.keys():
+        return None
+    result = {name: after[name] - value for name, value in before.items()}
+    return result if all(value >= 0 for value in result.values()) else None
+
+
+def wait_for_receivers(
+    queues: QueueManager,
+    broker_id: str,
+    partitions: int,
+    *,
+    timeout: float = 60,
+    poll_seconds: float = .05,
+) -> None:
+    """Wait until every managed group has a bound consumer on every partition."""
+    deadline = time.monotonic() + timeout
+    while True:
+        statuses = [queues.status(broker_id, "qualification", partition)
+                    for partition in range(partitions)]
+        # QueueManager.status reports the minimum consumer count across groups,
+        # so >=1 proves every configured group is bound for this partition.
+        if all(status.consumers >= 1 for status in statuses):
+            return
+        if time.monotonic() >= deadline:
+            observed = [status.consumers for status in statuses]
+            raise TimeoutError(
+                f"subscriber receiver readiness timed out: expected>=1 per group, "
+                f"observed minima={observed}"
+            )
+        time.sleep(poll_seconds)
+
+
 def run_case(
     root: Path, binary: Path, connection: dict[str, Any], case: dict[str, Any]
 ) -> dict[str, Any]:
@@ -211,7 +301,6 @@ def run_case(
     registry = TopicRegistry(store)
     queues.registry = registry
     queues.client_username = connection["client_username"]
-    queues._native_configured.add(broker_id)
     controller_store = ControllerStore(store)
     for group in messaging.subscriptions:
         registry.register(group.group, group.topics)
@@ -224,13 +313,14 @@ def run_case(
     credentials = {broker_id: {"username": connection["client_username"],
                                "password": connection["client_password"]}}
     before_sample = after_sample = None
+    broker_counters_before = broker_counters_after = None
     subscriber = None
     publishers: list[Process] = []
     accepted_at: dict[str, float] = {}
     acceptance_ms: list[float] = []
     children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic()
-    publish_started = publish_finished = started
+    timed_started = last_injected = all_accepted = all_flushed = all_processed = started
     try:
         readiness_deadline = time.monotonic() + 60
         while True:
@@ -247,12 +337,6 @@ def run_case(
             queues.prepare(broker_id, "qualification", partition, enabled=True)
             controller_store.mark_partition_ready("qualification", partition)
         registry.mark_ready(list(groups))
-        with SempCollector(
-            connection["semp"], connection["admin_username"], connection["admin_password"]
-        ) as collector:
-            before_sample = collector.collect(
-                "qualification", connection["msg_vpn"], time.time(), 1
-            )
         with api(app) as url:
             subscriber = Process(
                 binary, url, state / "subscriber", credentials,
@@ -260,21 +344,33 @@ def run_case(
             )
             subscribed = subscriber.next(timeout=120)
             if subscribed.get("kind") != "subscribed":
-                raise RuntimeError(f"subscriber did not become ready: {subscribed}")
+                raise RuntimeError(f"subscriber did not register: {subscribed}")
+            wait_for_receivers(
+                queues,
+                broker_id,
+                partitions,
+                timeout=float(case.get("receiver_ready_timeout_seconds", 60)),
+            )
             concurrency = int(case.get("publisher_concurrency", 4))
             publishers = [
                 Process(binary, url, state / f"publisher-{index}", credentials)
                 for index in range(concurrency)
             ]
+            with SempCollector(
+                connection["semp"], connection["admin_username"], connection["admin_password"]
+            ) as collector:
+                before_sample, broker_counters_before = broker_observation(
+                    collector, connection["msg_vpn"], time.time()
+                )
             padding = "x" * max(0, case["payload_bytes"] - 128)
-            publish_started = time.monotonic()
+            timed_started = time.monotonic()
             offered_rate = float(case["offered_messages_per_second"])
-            next_send = publish_started
+            next_send = timed_started
             pending_by_publisher = [0] * concurrency
             for index in range(case["messages"]):
                 event_id = f"{case['name']}-{index}"
                 if offered_rate > 0:
-                    next_send = publish_started + index / offered_rate
+                    next_send = timed_started + index / offered_rate
                     delay = next_send - time.monotonic()
                     if delay > 0:
                         time.sleep(delay)
@@ -292,15 +388,23 @@ def run_case(
                     },
                 })
                 pending_by_publisher[publisher_index] += 1
-            publish_finished = time.monotonic()
+            last_injected = time.monotonic()
+            accepted_observed_at: list[float] = []
             for publisher_index, publisher in enumerate(publishers):
                 for _ in range(pending_by_publisher[publisher_index]):
                     response = publisher.next()
                     if response.get("kind") != "accepted":
                         raise RuntimeError(f"publisher rejected offered event: {response}")
                     event = str(response["event_id"])
-                    acceptance_ms.append((response["observed_at"] - accepted_at[event]) * 1000)
-                publisher.request({"op": "flush"})
+                    observed_at = float(response["observed_at"])
+                    accepted_observed_at.append(observed_at)
+                    acceptance_ms.append((observed_at - accepted_at[event]) * 1000)
+            all_accepted = max(accepted_observed_at)
+            flush_observed_at = [
+                float(publisher.request({"op": "flush"})["observed_at"])
+                for publisher in publishers
+            ]
+            all_flushed = max(flush_observed_at)
             deadline = time.monotonic() + 180
             expected_ids = set(accepted_at)
             while True:
@@ -310,6 +414,11 @@ def run_case(
                     for group in groups
                 }
                 if all(ids == expected_ids for ids in received.values()):
+                    all_processed = max(
+                        float(item["observed_at"])
+                        for item in processed_now
+                        if item.get("group") in groups and item.get("event_id") in expected_ids
+                    )
                     break
                 if subscriber.process.poll() is not None:
                     raise RuntimeError(
@@ -323,12 +432,12 @@ def run_case(
                         f"errors={subscriber.errors}"
                     )
                 time.sleep(.05)
-            time.sleep(float(case.get("quiet_seconds", .25)))
+            time.sleep(float(case.get("quiet_seconds", 1.0)))
         with SempCollector(
             connection["semp"], connection["admin_username"], connection["admin_password"]
         ) as collector:
-            after_sample = collector.collect(
-                "qualification", connection["msg_vpn"], time.time(), 1
+            after_sample, broker_counters_after = broker_observation(
+                collector, connection["msg_vpn"], time.time()
             )
     finally:
         for publisher in publishers:
@@ -364,6 +473,14 @@ def run_case(
             f"workload invariants failed: loss={loss}, duplicates={duplicates}, "
             f"ordering_violations={order_violations}"
         )
+    phases = phase_metrics(case["messages"], {
+        "started": timed_started,
+        "last_injected": last_injected,
+        "all_accepted": all_accepted,
+        "all_flushed": all_flushed,
+        "all_processed": all_processed,
+    })
+    broker_counter_delta = counter_delta(broker_counters_before, broker_counters_after)
     return {
         "name": case["name"], "payload_bytes": case["payload_bytes"],
         "fanout": case["fanout"], "messages": case["messages"],
@@ -376,11 +493,15 @@ def run_case(
         "duplicates": duplicates,
         "ordering_violations": order_violations,
         "elapsed_seconds": elapsed,
-        "publish_seconds": publish_finished - publish_started,
-        "achieved_offer_messages_per_second": case["messages"] / (publish_finished - publish_started),
+        # Compatibility aliases: these describe stdin offer injection only.
+        "publish_seconds": phases["offer_injection_seconds"],
+        "achieved_offer_messages_per_second": phases[
+            "offer_injection_messages_per_second"
+        ],
+        "measurement_windows": phases,
         "offer_schedule_lag_ms": max(
             0,
-            (publish_finished - publish_started)
+            (last_injected - timed_started)
             - (case["messages"] - 1) / case["offered_messages_per_second"],
         ) * 1000 if case["offered_messages_per_second"] else 0,
         "acceptance_latency_ms": {"p50": percentile(acceptance_ms, .50),
@@ -394,6 +515,15 @@ def run_case(
             - children_before.ru_utime - children_before.ru_stime
         ),
         "broker_before": before_sample.__dict__, "broker_after": after_sample.__dict__,
+        "broker_cumulative_counters": {
+            "supported": broker_counter_delta is not None,
+            "units": {"dataRxMsgCount": "messages", "dataTxMsgCount": "messages",
+                      "dataRxByteCount": "bytes", "dataTxByteCount": "bytes"},
+            "before": broker_counters_before,
+            "after": broker_counters_after,
+            "delta": broker_counter_delta,
+            "sampling_window_seconds": after_sample.timestamp - before_sample.timestamp,
+        },
         "bottleneck": "undetermined; bounded run did not establish saturation",
     }
 
@@ -419,7 +549,7 @@ def main() -> None:
     results = [run_case(args.output, args.binary, connection_doc["brokers"][0], case)
                for case in cases]
     report = {
-        "schema_version": "cloud-workload-v1",
+        "schema_version": "cloud-workload-v2",
         "environment": connection_doc["service_class"],
         "broker_version": connection_doc["broker_version"],
         "topology": "one independent HA service",

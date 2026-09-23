@@ -1,0 +1,25 @@
+receivers:
+  solace:
+    broker: [broker:5672]
+    tls:
+      insecure: true
+    auth:
+      sasl_plain:
+        username: otel
+        password: ${env:SOLACE_OTEL_PASSWORD}
+    queue: queue://#telemetry-native-trace
+
+exporters:
+  file/traces:
+    path: /evidence/traces.json
+  debug:
+    verbosity: detailed
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [solace]
+      exporters: [file/traces, debug]

@@ -6,7 +6,7 @@ This project helps you plan and operate a horizontally scaled Solace Cloud fleet
 
 [Explore the project](https://solacese.github.io/solace-broker-autoscale/) · [Routing explained](guide/routing.md) · [Measured profiles](guide/measured-profiles.md) · [Configuration](guide/configuration.md)
 
-> Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on two real local brokers, including publisher rejection, durable retry and restart. Optional Cloud creation is implemented and mock-tested. Production Cloud rollout, workload performance validation and multi-host controller HA remain outstanding.
+> Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on real local brokers, and bounded independent tests cover native transactions, XA, ordinary-queue replay, tracing and one Standard HA failover. These are functional results, not production certification: automatic sequential 1→4 scale-out, feature interactions during managed migration, DR, saturation/soak, Cloud operations completion and multi-host controller HA remain outstanding.
 
 For development and the next feature-aware placement phase, start with the [agent handoff](guide/agent-handoff.md).
 
@@ -36,7 +36,7 @@ Use the Python native SMF client or the [managed Go AMQP client](guide/go-messag
 
 Run `./scripts/manager-demo.sh` for a real two-broker payment burst and publisher crash/recovery demo. It produces an offline HTML presentation with a replay, seven-line policy and reconciled counts. [Setup and two-minute presenter notes](examples/manager-demo/README.md).
 
-The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. The reduced demo capacity is explicitly labelled; this is functional evidence, not a benchmark.
+The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. The reduced demo capacity is explicitly labelled; this is functional evidence, not a benchmark. Static 2/3/4-broker routing has also been exercised, but an unattended sequential 1→4 scale-out run is still pending.
 
 ## Start with a small application policy
 
@@ -190,7 +190,7 @@ actuation:
   dry_run: true
 ```
 
-Replay and tracing were benchmarked separately; their combined cost is not measured. Intermediate size/fanout estimates are labeled. Workloads outside measured coverage produce an explicit refusal, not invented throughput.
+Replay and tracing were benchmarked separately; their combined cost is not measured. Intermediate size/fanout estimates are labeled. Workloads outside measured coverage produce an explicit refusal, not invented throughput. The optimizer can enforce feature, domain, role and pin constraints, but functional tests do not create an empirical DR-plus-transaction interaction capacity surface or train a capacity model.
 
 ## Commands
 
@@ -218,10 +218,13 @@ Replay and tracing were benchmarked separately; their combined cost is not measu
 - Automatic movement supports dedicated, homogeneous fleets with managed guaranteed SMF queues. Arbitrary existing queues, multi-protocol migration, automatic scale-in/deletion and backlog copying are not implemented.
 - A single hot key still needs a finer ordering key or larger tier. Slow consumers can delay a drain; a timeout never discards payments.
 - Protocol adapters do not prove measured throughput for every protocol. Validate the actual workload and message-ordering requirements before production use.
+- The [native feature qualification](guide/native-feature-evidence.md) and [sanitized evidence](examples/qualification-evidence/2026-09-23/native-features.json) prove bounded transaction, XA, replay, tracing and HA semantics independently; managed-migration combinations and DR remain pinned.
+- The [router performance review](guide/router-performance-review-2026-09-23.md) measured only 61–68 messages/s for a normal-sync 4 KiB outbox enqueue-plus-delete cycle on its local filesystem. Treat durable storage as a high-priority throughput gate; do not reinterpret the result as broker capacity.
+- No Enterprise 100K Cloud quota was available, and no more Cloud resources should be created while billing or credit status is unknown. Existing TLS evidence is a baseline; production trials must match broker class/version, client, profile and feature combination.
 
 ## Documentation and development
 
-[Automatic scaling](guide/automatic-scaling.md) · [Routing](guide/routing.md) · [Profiles](guide/measured-profiles.md) · [Architecture](guide/architecture.md) · [Metrics](guide/metrics.md) · [Safety](guide/safety.md) · [Configuration](guide/configuration.md) · [Client integration](guide/client-integration.md) · [Design decisions](guide/adr/)
+[Automatic scaling](guide/automatic-scaling.md) · [Feature qualification](guide/feature-qualification-matrix-2026-09-23.md) · [Native feature evidence](guide/native-feature-evidence.md) · [Router performance review](guide/router-performance-review-2026-09-23.md) · [Routing](guide/routing.md) · [Profiles](guide/measured-profiles.md) · [Architecture](guide/architecture.md) · [Metrics](guide/metrics.md) · [Safety](guide/safety.md) · [Configuration](guide/configuration.md) · [Client integration](guide/client-integration.md) · [Design decisions](guide/adr/)
 
 ```bash
 cd scaling-controller
