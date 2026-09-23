@@ -170,7 +170,8 @@ def test_group_fencing_retries_partial_failure_and_waits_for_every_group(tmp_pat
         with pytest.raises(OSError):
             queues.ingress("a", "payments", 0, False)
         status = queues.status("a", "payments", 0)
-        assert status.ingress_enabled  # A partial fence cannot authorize cutover.
+        assert status.ingress_enabled  # Any enabled group means the bundle is not fully fenced.
+        assert not status.fully_enabled  # Every group must accept ingress during normal ownership.
         assert not status.drained  # One group's outstanding ACK blocks migration.
         assert status.consumers == 1  # Every group needs a bound consumer.
         assert status.spooled_messages == 20  # Group queue counters are delivery copies.

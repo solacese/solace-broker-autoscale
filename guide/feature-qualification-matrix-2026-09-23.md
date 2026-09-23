@@ -1,6 +1,6 @@
 # Feature qualification matrix — 23 September 2026
 
-This matrix separates product support, empirical evidence, and automatic-migration policy. “Tested” means the exact listed environment and client were exercised; it is not a capacity or production certification.
+This matrix separates product support, empirical evidence, and automatic-migration policy. “Tested” means the exact listed environment and client were exercised; it is not a capacity or production certification. Feature requirements, broker capability labels, roles, failure domains and pins are operator-declared in YAML and persisted as contracts. SEMP discovers live load and queue state; it does not automatically discover transaction/XA, DR, replay, tracing or capability use.
 
 | Feature / behavior | Current placement contract | Evidence in this branch | Status / remaining gate |
 |---|---|---|---|

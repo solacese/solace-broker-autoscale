@@ -14,7 +14,7 @@ Suppose broker A reaches 90% of its measured capacity. Broker B is a warm spare.
 4. It disables incoming messages on A's queue. The assignment API pauses new publisher resolutions for that partition. A stale publisher also receives a broker rejection, so a cached address cannot bypass the handover.
 5. Publishers retain rejected or uncertain messages in their durable outbox. Other partitions continue. The original consumer finishes A's queued and unacknowledged messages.
 6. After the grace period **and** continuously observed empty state, the controller atomically changes the owner to B, verifies the source remains drained, and opens B to new messages.
-7. Publishers resolve B and retry their buffered messages. The controller measures again before selecting another move. Optional Cloud provisioning replenishes the warm pool.
+7. Publishers resolve B and retry their buffered messages. The controller measures again before selecting another move. Optional Cloud provisioning can replenish only unconstrained warm capacity; a fleet requiring capability or failure-domain attestations must pre-inventory qualified warm services.
 
 A grace period is a minimum wait, not permission to abandon messages. This implementation drains the old queue in place; it does not copy its backlog to the new broker. A slow or failed business consumer can therefore delay migration.
 
@@ -107,7 +107,7 @@ provisioning:
 
 Choose the Cloud API URL for your organization home: `https://api.solace.cloud` (US), `https://api.solacecloud.eu` (EU), `https://api.solacecloud.com.au` (Australia), or `https://api.solacecloud.sg` (Singapore). This is separate from the broker datacenter.
 
-The controller records a unique service name before issuing a request, reconciles that exact name after uncertain results, checks returned service identity, region, version, tier and mate-link encryption, waits for Cloud and SEMP readiness, configures the managed application username, and adds the service as warm capacity. It never saves Cloud/SEMP passwords into the assignment database or returns them to publishers. Choose a reachable private endpoint with `endpoint_index`. The API token needs permission to create and inspect services; SEMP credentials need permission to manage the scoped queues and application username.
+The controller records a unique service name before issuing a request, reconciles that exact name after uncertain results, checks returned service identity, region, version, tier and mate-link encryption, waits for Cloud and SEMP readiness, configures the managed application username, and adds the service as warm capacity. It never saves Cloud/SEMP passwords into the assignment database or returns them to publishers. Choose a reachable private endpoint with `endpoint_index`. The API token needs permission to create and inspect services; SEMP credentials need permission to manage the scoped queues and application username. Cloud provisioning cannot infer new-service capability labels or failure domains, so it refuses constrained shards; pre-inventory their attested warm services instead.
 
 Creating a Cloud service takes time. Warm capacity and bounded upstream buffering cover that delay. Reaching a broker limit, lacking a fitting partition, or failing readiness produces an explicit state in the JSON output. Connect those states to your existing monitoring. No email or paging integration is included.
 

@@ -373,7 +373,7 @@ class Controller:
                     shard, partition = key
                     owner = owners[key]
                     status = future.result()
-                    if not status.ingress_enabled:
+                    if not status.fully_enabled:
                         raise ValueError("owned queue unexpectedly fenced outside a migration")
                     observations[key] = (now, status, owner.broker_id)
                     previous = self.previous.get(key)

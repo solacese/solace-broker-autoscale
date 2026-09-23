@@ -29,7 +29,7 @@ Official references:
 
 ## Configuration and behavior
 
-The small business policy remains unchanged. Declare advanced evidence in its referenced operator profile:
+The small business policy remains unchanged. Declare advanced evidence in its referenced operator profile. These are operator attestations, not values discovered from SEMP:
 
 ```yaml
 automation:
@@ -42,7 +42,7 @@ automation:
         tracing: false
 ```
 
-`capacity.scenario: replay` or `tracing` also declares that feature. This prevents a measured capacity choice from accidentally bypassing the migration gate. `scenario: worst` does not mean replay and tracing together; it remains a conservative envelope of separate observations.
+`capacity.scenario: replay` or `tracing` also declares that feature. This prevents a measured capacity choice from accidentally bypassing the migration gate. `scenario: worst` does not mean replay and tracing together; it remains a conservative envelope of separate observations. Broker `capabilities`, `failure_domains`, `role`, `fixed_load`, shard requirements and explicit partition pins likewise come from the inventory. Runtime SEMP collection supplies queue/VPN load, consumer, ingress and spool state only; it does not infer any of those placement facts.
 
 The controller persists this feature contract beside its routing and topic contracts. Existing shard requirements cannot change on restart, because doing so could reinterpret durable ownership or an in-flight handover. Adding a new shard is allowed. Upgrading a non-empty pre-contract database fails closed; review the normalized contract and run `solace-autoscale adopt-feature-contract --config POLICY --yes` once rather than silently asserting that historic traffic used no broker-local feature.
 

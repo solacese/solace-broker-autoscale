@@ -1,8 +1,8 @@
 # Before production
 
-Status: suitable for an isolated pilot; not yet qualified for unattended production payments.
+Status: suitable for a bounded v1 customer alpha on dedicated, isolated non-production brokers; not yet qualified for unattended production payments. Follow the [customer-alpha runbook](customer-alpha.md) for the supported Python SMF starting path, acceptance evidence, and safe shutdown.
 
-Python SMF and Go AMQP now share the controller's persisted partition ownership and topic/subscriber contract. The managed Go `messaging` package adds a synced durable outbox, bounded per-partition delivery, native subscription discovery, reconnect and migration recovery. The legacy Go rules/spine path remains separate.
+Python SMF and Go AMQP share the controller's persisted partition ownership and topic/subscriber contract. The managed Go `messaging` package adds a synced durable outbox, bounded per-partition delivery, native subscription discovery, reconnect and migration recovery. The legacy Go rules/spine path remains separate. Capability/domain placement beyond the managed baseline is experimental, capacity remains customer-specific and uncalibrated, and durability-preserving Go batching remains an open production gate.
 
 ## Required release gates
 

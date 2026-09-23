@@ -448,6 +448,17 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(
     c = Controller(cfg, model, inv, db, q)
     c.bootstrap(100)
     assert not any(broker == "backup" for broker, _ in q.states)
+    if expected and warm_connections == 0:
+        # An aggregate where one group remains enabled but another is fenced cannot be treated
+        # as a healthy active partition. Refuse the snapshot without recording a migration.
+        for key, status in list(q.states.items()):
+            if status.ingress_enabled:
+                q.states[key] = replace(status, all_ingress_enabled=False)
+        assert c.tick(99).state == "no-decision"
+        assert not c.store.pending()
+        for key, status in list(q.states.items()):
+            if status.ingress_enabled:
+                q.states[key] = replace(status, all_ingress_enabled=True)
     first = c.tick(100)
     assert set(q.metric_calls) == {"a", "b"}
     if warm_connections is None:

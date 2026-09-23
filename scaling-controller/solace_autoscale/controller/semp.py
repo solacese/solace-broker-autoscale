@@ -26,11 +26,17 @@ class QueueStatus:
     ingress_enabled: bool
     spooled_messages: int
     spooled_bytes: int
+    all_ingress_enabled: bool | None = None
 
     @property
     def drained(self) -> bool:
         """Consumer-bound messages are outstanding until acknowledged, even at zero ready depth."""
         return self.messages == self.unacked == self.spool_bytes == 0
+
+    @property
+    def fully_enabled(self) -> bool:
+        """Require every group queue to accept ingress during normal ownership."""
+        return self.ingress_enabled if self.all_ingress_enabled is None else self.all_ingress_enabled
 
 
 class QueueManager:
@@ -248,6 +254,7 @@ class QueueManager:
             any(s.ingress_enabled for s in states),
             sum(s.spooled_messages for s in states),
             sum(s.spooled_bytes for s in states),
+            all(s.ingress_enabled for s in states),
         )
 
     def close(self) -> None:
