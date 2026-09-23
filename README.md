@@ -6,7 +6,7 @@ This project helps you plan and operate a horizontally scaled Solace Cloud fleet
 
 [Explore the project](https://solacese.github.io/solace-broker-autoscale/) · [Routing explained](guide/routing.md) · [Measured profiles](guide/measured-profiles.md) · [Configuration](guide/configuration.md)
 
-> Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on real local brokers, and bounded independent tests cover native transactions, XA, ordinary-queue replay, tracing and one Standard HA failover. These are functional results, not production certification: automatic sequential 1→4 scale-out, feature interactions during managed migration, DR, saturation/soak, Cloud operations completion and multi-host controller HA remain outstanding.
+> Community project, Apache 2.0. Managed SMF and Go AMQP queue handover are tested on real local brokers; a bounded local run also exercised automatic 1→2→3→4 activation with real queue/VPN telemetry. Independent tests cover native transactions, XA, ordinary-queue replay, tracing and one Standard HA failover. These are functional results, not production certification: measured production thresholds, feature interactions during managed migration, DR, saturation/soak, Cloud operations completion and multi-host controller HA remain outstanding.
 
 For development and the next feature-aware placement phase, start with the [agent handoff](guide/agent-handoff.md).
 
@@ -36,7 +36,7 @@ Use the Python native SMF client or the [managed Go AMQP client](guide/go-messag
 
 Run `./scripts/manager-demo.sh` for a real two-broker payment burst and publisher crash/recovery demo. It produces an offline HTML presentation with a replay, seven-line policy and reconciled counts. [Setup and two-minute presenter notes](examples/manager-demo/README.md).
 
-The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. The reduced demo capacity is explicitly labelled; this is functional evidence, not a benchmark. Static 2/3/4-broker routing has also been exercised, but an unattended sequential 1→4 scale-out run is still pending.
+The local scenario recovered **112 accepted payments in both ledger and audit**, including **24 buffered publications across SIGKILL and migration**, with account order checked. A separate [automatic scale-out qualification](guide/automatic-scaleout-evidence-2026-09-23.md) moved from one to four active owners, reconciled **1,752 accepted IDs / 3,504 deliveries**, and sent post-cutover traffic through every new owner. Both use explicitly invented reduced thresholds and are functional evidence, not capacity benchmarks.
 
 ## Start with a small application policy
 

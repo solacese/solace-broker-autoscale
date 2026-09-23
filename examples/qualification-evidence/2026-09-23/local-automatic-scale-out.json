@@ -1,0 +1,97 @@
+{
+  "schema_version": "qualification-evidence-v1",
+  "date": "2026-09-23",
+  "baseline_commit": "3ff4942",
+  "implementation_revision": "same commit as this evidence",
+  "environment": {
+    "broker_distribution": "four independent Solace PubSub+ Standard containers",
+    "broker_image_digest_prefix": "sha256:05f80ec7bd38",
+    "protocol": "native guaranteed SMF plaintext over loopback",
+    "topology": "one active plus three pre-provisioned warm standalone brokers",
+    "partitions": 12,
+    "subscriber_groups": 2
+  },
+  "measurement_scope": "bounded reduced-threshold functional automatic 1-to-4 scale-out using real monotonic time, real queue/VPN telemetry and Controller.tick; not broker capacity, HA failover, Cloud provisioning or production qualification",
+  "capacity_policy": {
+    "kind": "INVENTED TEST-ONLY",
+    "fanout_adjusted_message_rate_per_second": 30,
+    "trigger_utilization": 0.2,
+    "target_utilization": 0.15,
+    "controller_poll_seconds": 5,
+    "sustained_window_seconds": 3,
+    "must_not_train_or_support_capacity_claims": true
+  },
+  "case": {
+    "name": "automatic-1-to-4",
+    "partitions": 12,
+    "original_events": 1752,
+    "expected_deliveries": 3504,
+    "missing_ids": 0,
+    "duplicate_ids": 0,
+    "ordering_violations": 0,
+    "active_owner_counts": [
+      2,
+      3,
+      4
+    ],
+    "scale_steps": [
+      {
+        "active_owners": 2,
+        "migration": "a:partition-9 -> b",
+        "pre_cutover_events": 360,
+        "post_cutover_events": 24,
+        "post_cutover_new_owner_queue_copy_delta": 4,
+        "transition_sequence": [
+          "fencing",
+          "draining",
+          "activating",
+          "complete"
+        ]
+      },
+      {
+        "active_owners": 3,
+        "migration": "a:partition-4 -> c",
+        "pre_cutover_events": 600,
+        "post_cutover_events": 24,
+        "post_cutover_new_owner_queue_copy_delta": 4,
+        "transition_sequence": [
+          "fencing",
+          "draining",
+          "activating",
+          "complete"
+        ]
+      },
+      {
+        "active_owners": 4,
+        "migration": "a:partition-2 -> d",
+        "pre_cutover_events": 720,
+        "post_cutover_events": 24,
+        "post_cutover_new_owner_queue_copy_delta": 4,
+        "transition_sequence": [
+          "fencing",
+          "draining",
+          "activating",
+          "complete"
+        ]
+      }
+    ],
+    "owner_counter_mismatches": 0,
+    "nonowner_ingress_violations": 0,
+    "source_drain_violations": 0
+  },
+  "behaviors": [
+    "production KeyRouter mapped business keys across all 12 partitions",
+    "two identical wildcard groups each received every accepted event exactly once",
+    "Controller.tick selected all three migrations without manual assignment changes",
+    "each warm target became active in durable state before handover",
+    "every source drained and remained ingress-disabled after atomic ownership commit",
+    "post-cutover traffic reached every current owner, including final broker d"
+  ],
+  "limitations": [
+    "The capacity profile and thresholds are invented solely to trigger a bounded functional decision; they are not measured broker capacity.",
+    "Warm entries represent independent standalone Standard containers, not HA mates or Cloud services.",
+    "The run did not create Cloud capacity, exercise scale-in, test HA/DR, establish saturation, or perform a soak.",
+    "Restart recovery remains covered by separate migration tests rather than this sequential run.",
+    "Publishing paused during each handover; post-cutover bursts prove resumed routing, not uninterrupted publishing through sustained overload."
+  ]
+}

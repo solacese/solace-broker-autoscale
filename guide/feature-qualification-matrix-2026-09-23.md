@@ -19,7 +19,7 @@ This matrix separates product support, empirical evidence, and automatic-migrati
 | Retry / dedup | Transport is at-least-once; application transaction must deduplicate event ID | Real AMQP release/redelivery and durable publisher restart; workload reconciles unique IDs per group | **Retry tested; exactly-once is not claimed** |
 | Heterogeneous feature requirements | Deterministic constrained optimizer filters capability/domain/role/pin constraints | Unit/oracle tests and explicit infeasibility reasons | **Planner-tested; feature combinations need matching real services** |
 | Bursts | Open-loop multiprocess generator records configured and achieved rate separately | Local Standard: 256 B steady, 4 KiB fanout, 64 KiB burst, slow consumer | **Functional evidence only; no saturation capacity claim** |
-| 2 / 3 / 4 brokers | Deterministic owners and one active queue per partition | Real local Standard brokers, 3 preassigned static topologies | **Static routing tested locally**; automatic sequential 1→4 scale-out evidence is still pending and must not be inferred from the static runs |
+| 2 / 3 / 4 brokers | Deterministic owners and one active queue per partition | Three preassigned static topologies plus [automatic 1→2→3→4 activation](automatic-scaleout-evidence-2026-09-23.md) on four independent local Standard brokers | **Bounded automatic scale-out tested locally** with real queue/VPN telemetry and post-cutover traffic; invented thresholds mean this is functional evidence, not capacity |
 | Controller / publisher / subscriber restart | Durable state resumes; pre-commit recovers or rolls back, post-commit recovers forward | Real client restart and migration tests; phase-fault unit matrix | **Supported locally**; multi-host controller HA remains unavailable |
 
 ## Local measured workload
@@ -40,6 +40,12 @@ The 4 KiB case missed its configured schedule by 1,251 ms. The corrected harness
 Group queue cumulative counters count delivery copies, not necessarily original publications. For identical group filters, copy count divided by group count is exact. For heterogeneous or overlapping filters, the controller now retains a lower bound (`copies / groups`) and upper bound (`copies`). Destination-fit checks use the upper bound; source-relief checks use the lower bound. Live VPN ingress, egress, connection, and spool totals are normalized against the matching measured profile; pressure not accounted for by partition lower bounds remains broker-resident residual load.
 
 This is deliberately conservative: it may decline a beneficial move, but it does not invent precise partition ingress from ambiguous subscription copies.
+
+## Automatic sequential scale-out
+
+The bounded [automatic scale-out qualification](automatic-scaleout-evidence-2026-09-23.md) used four independent local Standard containers, 12 managed partitions, two identical wildcard groups, real monotonic timestamps, queue counters and VPN totals. `Controller.tick()` automatically activated B, C and D and completed A/p9→B, A/p4→C and A/p2→D without manual owner changes. Across 1,752 accepted IDs, both groups reconciled all 3,504 deliveries with zero missing IDs, duplicates or partition-order violations. A separate post-cutover burst crossed all partitions after every migration; the newly activated owner, including final broker D, recorded the expected four queue copies.
+
+The profile is prominently invented and test-only (30 fanout-adjusted messages/s, 0.20 trigger, 0.15 target). These values make a short functional run exercise the controller; they are not measurements, must not train a capacity model and do not qualify Cloud provisioning, HA, saturation or production thresholds. Compact evidence is [`local-automatic-scale-out.json`](../examples/qualification-evidence/2026-09-23/local-automatic-scale-out.json).
 
 ## Native feature evidence and boundaries
 
