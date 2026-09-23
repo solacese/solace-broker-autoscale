@@ -81,14 +81,20 @@ class PlacementBundle:
     queue_ids: tuple[str, ...] = ()
     migration_cost: float = 1.0
     pinned_reason: str | None = None
+    relief: LoadVector | None = None
 
     def __post_init__(self) -> None:
         if not self.bundle_id or not self.shard or not self.current_broker:
             raise ValueError("bundle identity, shard and current broker are required")
         if self.partition < 0 or not math.isfinite(self.migration_cost) or self.migration_cost < 0:
             raise ValueError("partition and migration cost must be nonnegative")
-        if self.movable.spool:
+        if self.movable.spool or self.relief is not None and self.relief.spool:
             raise ValueError("stored spool is source-resident, never movable")
+        if self.relief is not None and any(
+            relieved > placed
+            for relieved, placed in zip(self.relief.values, self.movable.values, strict=True)
+        ):
+            raise ValueError("source relief cannot exceed conservative destination placement load")
         if tuple(sorted(set(self.queue_ids))) != self.queue_ids:
             raise ValueError("queue_ids must be unique and sorted")
 
@@ -223,7 +229,12 @@ def _totals(problem: PlacementProblem, assignment: dict[str, str]) -> dict[str, 
     for bundle in problem.bundles:
         destination = assignment[bundle.bundle_id]
         totals[bundle.current_broker] = totals[bundle.current_broker].add(bundle.resident)
-        totals[destination] = totals[destination].add(bundle.movable)
+        if destination == bundle.current_broker:
+            totals[destination] = totals[destination].add(bundle.movable)
+        else:
+            retained = bundle.movable.subtract(bundle.relief or bundle.movable)
+            totals[bundle.current_broker] = totals[bundle.current_broker].add(retained)
+            totals[destination] = totals[destination].add(bundle.movable)
     return totals
 
 
@@ -324,7 +335,7 @@ def _eligible_destination(
     if not target_after.fits(constraints.target):
         return "destination-capacity"
     source_before = current_totals[bundle.current_broker]
-    source_after = source_before.subtract(bundle.movable)
+    source_after = source_before.subtract(bundle.relief or bundle.movable)
     if all(after >= before - _EPSILON for before, after in zip(
         source_before.values, source_after.values, strict=True
     )):

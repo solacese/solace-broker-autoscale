@@ -12,6 +12,8 @@ import httpx
 
 from ..actuator.solace_cloud import SempConnection
 from ..assignment.topics import TopicRegistry, group_queue, topic_prefix
+from ..decision.types import MetricSample
+from ..metrics.semp import map_vpn_monitor
 from .store import queue_name
 
 
@@ -219,6 +221,20 @@ class QueueManager:
     def ingress(self, broker: str, shard: str, partition: int, enabled: bool) -> None:
         for group in self._groups(shard):
             self._ingress_one(broker, shard, partition, enabled, group=group)
+
+    def broker_metrics(self, broker: str, shard: str, now: float) -> MetricSample:
+        """Read complete VPN totals for residual traffic and dynamic connection pressure."""
+        vpn = quote(self.vpns[broker], safe="")
+        response = self._request(broker, "GET", f"/SEMP/v2/monitor/msgVpns/{vpn}")
+        response.raise_for_status()
+        clients = self._request(
+            broker, "GET", f"/SEMP/v2/monitor/msgVpns/{vpn}/clients?count=1"
+        )
+        clients.raise_for_status()
+        count = clients.json().get("meta", {}).get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("missing/invalid broker connection telemetry")
+        return map_vpn_monitor(response.json()["data"], count, now, 1)
 
     def status(self, broker: str, shard: str, partition: int) -> QueueStatus:
         states = [self._status_one(broker, shard, partition, group=g) for g in self._groups(shard)]

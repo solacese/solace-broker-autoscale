@@ -12,7 +12,7 @@ Status: the controller now fails closed before automatic movement when a workloa
 | Fanout | Each durable subscriber group owns an independent queue copy. The measured profile retains ingress and egress at the requested fanout. | Every group queue is prepared, fenced and drained as one partition boundary; fanout is capacity amplification, not permission to split the group set. |
 | HA | One messaging node is active and carries client traffic; its mate is passive and carries no messaging traffic. Guaranteed messages/state and configuration are synchronized for takeover. | One HA service is one active capacity unit. Do not count its internal standby as another broker. |
 | DR replication | Same-named Message VPNs form active and standby sites. Guaranteed messages, acknowledgements and transaction outcomes can be replicated. Site switching is operationally distinct from HA failover. | A DR peer is protection capacity, not ordinary active or warm autoscaling capacity. The controller records `role: dr` but never places or migrates to it. |
-| Replay | Replay is per Message VPN, retains publication order across topics and targets the requested endpoint. It is not supported for partitioned queues or with replication. | The managed controller uses partition queues. Replay workloads are pinned; replay plus replication is incompatible for this path. |
+| Replay | Replay is per Message VPN, retains publication order across topics and targets the requested endpoint. Native Solace partitioned queues have separate replay restrictions. | This controller creates ordinary queues per application partition; those are **not** native Solace partitioned queues. Replay remains pinned because catch-up and migration interactions are unqualified here, not because the application partitioning automatically inherits the native restriction. |
 | Distributed tracing | Broker tracing emits spans for receive, enqueue, delivery, acknowledgements, deletion and movement. Local-transaction publications do not generate trace messages. | Tracing has measured standalone profiles but no migration qualification here. It remains pinned rather than receiving an invented multiplier. |
 
 Official references:
@@ -70,7 +70,7 @@ It independently validates complete assignments, refuses a state space above its
 ## Empirical gates before expanding support
 
 - Observe and deliberately interrupt local/XA transactions during every handover phase; prove that no open or in-doubt transaction crosses ownership.
-- Measure replay catch-up with concurrent live traffic, retention pressure and HA events. The current partitioned-queue path is incompatible by product contract.
+- Measure replay catch-up with concurrent live traffic, retention pressure and HA events on the ordinary queues created per application partition. Do not conflate these queues with native Solace partitioned queues.
 - Measure tracing overhead and span completeness across enqueue, delivery, migration, HA and DR failures using the exact deployed broker, collector and API versions.
 - Exercise synchronous/asynchronous DR link loss, backlog, reject-on-sync-ineligible, failover and failback. Define RPO/RTO and prove message reconciliation.
 - Measure feature combinations directly. Separate replay and tracing profiles do not establish replay-plus-tracing capacity.

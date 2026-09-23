@@ -1,6 +1,7 @@
 """Unattended handover safety: timers, acknowledgments, rollback and crash recovery."""
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,7 @@ from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerSta
 from solace_autoscale.config import AutomationConfig
 from solace_autoscale.controller.migration import MigrationEngine
 from solace_autoscale.controller.planner import PartitionLoad, propose_move
+from solace_autoscale.controller.runtime import queue_copy_bounds, residual_broker_load
 from solace_autoscale.controller.semp import QueueStatus
 from solace_autoscale.controller.store import ControllerStore
 
@@ -106,6 +108,47 @@ def test_telemetry_failure_resets_continuous_empty_proof(setup):
     assert db.get_placement("orders", "partition:0").broker_id == "b"
 
 
+@pytest.mark.parametrize("failed_phase", ["preparing", "fencing", "draining"])
+def test_restart_before_commit_never_splits_ownership(setup, failed_phase):
+    db, state, policy, q = setup
+    engine = MigrationEngine(state, q, policy)
+    now = 100
+    while state.pending()[0].phase != failed_phase:
+        tick(state, engine, now)
+        now += 1
+    q.fail = True
+    tick(state, engine, now)
+    q.fail = False
+    recovered = MigrationEngine(ControllerStore(db), q, policy)
+    q.states["a"] = replace(q.states["a"], messages=0, unacked=0, spool_bytes=0)
+    for moment in range(now + 1, now + 12):
+        if not state.pending():
+            break
+        tick(state, recovered, moment)
+    owner = db.get_placement("orders", "partition:0").broker_id
+    assert owner in {"a", "b"}
+    assert not (q.states["a"].ingress_enabled and q.states["b"].ingress_enabled)
+
+
+def test_restart_after_commit_recovers_forward_only(setup):
+    db, state, policy, q = setup
+    engine = MigrationEngine(state, q, policy)
+    tick(state, engine, 100)
+    tick(state, engine, 101)
+    q.states["a"] = replace(q.states["a"], messages=0, unacked=0, spool_bytes=0)
+    for now in [102, 103, 104]:
+        tick(state, engine, now)
+    assert state.pending()[0].phase == "activating"
+    assert db.get_placement("orders", "partition:0").broker_id == "b"
+    q.fail = True
+    tick(state, engine, 105)
+    q.fail = False
+    tick(state, MigrationEngine(ControllerStore(db), q, policy), 106)
+    assert not state.pending()
+    assert not q.states["a"].ingress_enabled
+    assert q.states["b"].ingress_enabled
+
+
 def test_destination_consumer_required_before_source_is_fenced(setup):
     db, state, policy, q = setup
     q.states["b"] = replace(q.states["b"], consumers=0)
@@ -172,6 +215,71 @@ def test_ownership_commit_never_reopens_source_on_activation_timeout(setup):
     assert db.get_placement("orders", "partition:0").broker_id == "b"
 
 
+def test_queue_copy_bounds_are_exact_for_identical_fanout_filters():
+    lower_rate, upper_rate, lower_bytes, upper_bytes, homogeneous = queue_copy_bounds(
+        200, 200_000, {"audit": ["payments/>"], "ledger": ["payments/>"]}, 1
+    )
+    assert homogeneous
+    assert lower_rate == upper_rate == 100
+    assert lower_bytes == upper_bytes == 100_000
+
+
+def test_queue_copy_bounds_preserve_uncertainty_for_overlapping_filters():
+    lower_rate, upper_rate, lower_bytes, upper_bytes, homogeneous = queue_copy_bounds(
+        150,
+        150_000,
+        {"audit": ["payments/*/created"], "ledger": ["payments/>"]},
+        1,
+    )
+    assert not homogeneous
+    assert (lower_rate, upper_rate) == (75, 150)
+    assert (lower_bytes, upper_bytes) == (75_000, 150_000)
+
+
+def test_broker_residual_clamps_interval_skew_to_zero():
+    from solace_autoscale.controller.planner import LoadVector
+
+    result = residual_broker_load(
+        LoadVector(.2, .1, .4, .1),
+        LoadVector(.3, .2, 0, .2),
+        LoadVector(),
+    )
+    assert result.values == pytest.approx((0, 0, .4, 0))
+
+
+def test_broker_residual_retains_connections_and_unattributed_traffic():
+    from solace_autoscale.controller.planner import LoadVector
+
+    result = residual_broker_load(
+        LoadVector(.8, .7, .6, .5),
+        LoadVector(.5, .4, 0, .3),
+        LoadVector(.1, .1, .2, .1),
+    )
+    assert result.values == pytest.approx(LoadVector(.3, .3, .6, .2).values)
+
+
+def test_load_planner_uses_lower_bound_for_relief_and_upper_bound_for_destination():
+    from solace_autoscale.controller.planner import (
+        BrokerCandidate,
+        LoadVector,
+        PlacementBundle,
+        PlacementConstraints,
+        PlacementProblem,
+        plan_next_move,
+    )
+
+    bundle = PlacementBundle(
+        "s/partition:0", "s", 0, "a", LoadVector(.7),
+        relief=LoadVector(.35),
+    )
+    result = plan_next_move(PlacementProblem(
+        "s", (bundle,),
+        (BrokerCandidate("a", "s"), BrokerCandidate("b", "s")),
+        PlacementConstraints(.8, .65, 2),
+    ))
+    assert result.proposal is None  # Upper bound does not fit target, despite lower source relief.
+
+
 def test_load_planner_fits_the_target_instead_of_round_robin():
     loads = [
         PartitionLoad("s", 0, "a", 0.5, 0.3),
@@ -190,17 +298,50 @@ def test_load_planner_fits_the_target_instead_of_round_robin():
     )  # An indivisible hot partition cannot fit anywhere.
 
 
-@pytest.mark.parametrize("override,expected,expected_state", [
-    ({}, True, "migration-planned"),
-    ({"enabled": False}, False, "observing"),
-    ({"trigger_utilization": .95}, False, "observing"),
-    ({"scale_up_window": "60s"}, False, "observing"),
-    ({"target_utilization": .2}, False, "capacity-shortfall"),
-    ({"features": {"transactions": "local"}}, False, "feature-pinned"),
-    ({"features": {"replay": True, "tracing": True}}, False, "feature-pinned"),
+def test_controller_refuses_pins_outside_configured_partition_range(tmp_path):
+    from solace_autoscale.capacity.schema import CapacityModel
+    from solace_autoscale.config import Config
+    from solace_autoscale.controller.runtime import Controller
+    from solace_autoscale.metrics.fleet import FleetInventory
+
+    cfg = Config.model_validate({
+        "fleet": {"service_class": "enterprise-1k", "max_brokers": 2},
+        "assignment": {"routing": "partitioned", "partitions": 4},
+        "automation": {"enabled": True},
+        "actuation": {"mode": "scale-up-only", "dry_run": False, "require_confirmation": False},
+    })
+    inv = FleetInventory.model_validate({
+        "provider": "aws", "broker_version": "10.1.2.3", "service_class": "enterprise-1k",
+        "brokers": [{
+            "broker_id": "a", "shard": "default", "msg_vpn": "vpn",
+            "base_url": "https://a.example", "username_env": "U", "password_env": "P",
+            "endpoints": {"smf": "tcps://a"},
+        }],
+        "placement": {"shards": {"default": {"pinned_partitions": [4]}}},
+    })
+    model = CapacityModel.model_validate_json((Path(__file__).parents[2] / "models/synthetic-v0.json").read_text())
+    model.synthetic = False
+    model.provenance.platform = "aws"
+    model.provenance.broker_version = "10.1.2.3"
+    with pytest.raises(ValueError, match="outside configured range"):
+        Controller(cfg, model, inv, AssignmentStore(tmp_path / "pins.db"), object())
+
+
+@pytest.mark.parametrize("override,expected,expected_state,warm_connections", [
+    ({}, True, "migration-planned", 0),
+    ({"enabled": False}, False, "observing", 0),
+    ({"trigger_utilization": .95}, False, "observing", 0),
+    ({"scale_up_window": "60s"}, False, "observing", 0),
+    ({"target_utilization": .2}, False, "capacity-shortfall", 0),
+    ({"features": {"transactions": "local"}}, False, "feature-pinned", 0),
+    ({"features": {"replay": True, "tracing": True}}, False, "feature-pinned", 0),
+    ({}, False, "capacity-shortfall", 900),
+    ({}, False, "no-decision", None),
+    ({}, False, "no-decision", "nonfinite"),
+    ({}, False, "no-decision", "backlog-without-size"),
 ])
 def test_controller_dispatches_partitions_after_a_sustained_burst(
-    tmp_path, override, expected, expected_state
+    tmp_path, override, expected, expected_state, warm_connections
 ):
     from solace_autoscale.capacity.benchmarks import BenchmarkPoint, BenchmarkSheet, BenchmarkWorkbook
     from solace_autoscale.capacity.profile_model import compile_profile
@@ -245,7 +386,9 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(
         {
             "fleet": {"service_class": "enterprise-1k", "max_brokers": 2},
             "assignment": {"routing": "partitioned", "partitions": 3},
-            "capacity": {"message_size_hint": 1000},
+            "capacity": {
+                "message_size_hint": None if warm_connections == "backlog-without-size" else 1000
+            },
             "automation": {"enabled": True, "poll_interval": 10, "shards": {"payments": override}},
             "policy": {"scale_up_window": 30},
             "metrics": {"scrape_interval": 10},
@@ -276,6 +419,7 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(
     class PartitionQueues:
         def __init__(self):
             self.states = {}
+            self.metric_calls = []
 
         def prepare(self, b, s, p, *, enabled=False):
             self.states.setdefault((b, p), QueueStatus(0, 0, 1, 0, enabled, 0, 0))
@@ -286,12 +430,44 @@ def test_controller_dispatches_partitions_after_a_sustained_burst(
         def status(self, b, s, p):
             return self.states[(b, p)]
 
+        def broker_metrics(self, broker, shard, now):
+            del shard
+            self.metric_calls.append(broker)
+            from solace_autoscale.decision.types import MetricSample
+            if broker == "b" and warm_connections is None:
+                raise OSError("warm broker telemetry unavailable")
+            if broker == "b" and warm_connections == "nonfinite":
+                return MetricSample(now, float("nan"), 0, 0, 0, 0, 0, 0, 1)
+            if broker == "b" and warm_connections == "backlog-without-size":
+                return MetricSample(now, 0, 0, 0, 0, 0, 0, 100, 1)
+            connections = warm_connections if broker == "b" else 0
+            return MetricSample(now, 0, 0, 0, 0, 0, connections, 0, 1)
+
     db = AssignmentStore(tmp_path / "controller.db")
     q = PartitionQueues()
     c = Controller(cfg, model, inv, db, q)
     c.bootstrap(100)
     assert not any(broker == "backup" for broker, _ in q.states)
-    assert c.tick(100).state == "observing"
+    first = c.tick(100)
+    assert set(q.metric_calls) == {"a", "b"}
+    if warm_connections is None:
+        assert first.state == "no-decision"
+        assert not c.store.pending()
+        db.close()
+        return
+    assert first.state == "observing"
+    if warm_connections in ("nonfinite", "backlog-without-size"):
+        for key, status in list(q.states.items()):
+            if status.ingress_enabled:
+                q.states[key] = replace(
+                    status,
+                    spooled_messages=status.spooled_messages + 3000,
+                    spooled_bytes=status.spooled_bytes + 3000000,
+                )
+        assert c.tick(110).state == "no-decision"
+        assert not c.store.pending()
+        db.close()
+        return
     for now in [110, 120, 130, 140]:
         for key, status in list(q.states.items()):
             if status.ingress_enabled:

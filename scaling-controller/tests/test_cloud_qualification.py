@@ -25,13 +25,14 @@ def plan():
             "broker_version": "10.26.0.8894-14",
             "budget_eur": 2000,
             "billing_basis": "internal-non-billable-user-attested",
+            "billing_attestation": "authorized test fixture",
             "max_runtime_minutes": 30,
             "cleanup_timeout_minutes": 30,
             "delete_test_services_after_run": True,
             "service_count": 2,
-            "services_created": [],
             "price_eur_per_hour": None,
             "purpose": "test",
+            "workload_command": ["python", "scripts/cloud-workload.py"],
             "requests": [
                 {
                     "name": "autoscale-qualification-a",
@@ -107,7 +108,8 @@ class Cloud:
         from solace_autoscale.cloud import OperationStatus
         return OperationStatus(body["data"]["status"])
 
-    def get_service(self, service_id):
+    def get_service(self, service_id, *, expand=False):
+        del expand
         for service in self.services:
             if service["id"] == service_id:
                 if any(item[0] == service_id for item in self.deleted):
@@ -118,6 +120,50 @@ class Cloud:
         request = httpx.Request("GET", "https://api.example/service")
         response = httpx.Response(404, request=request)
         raise httpx.HTTPStatusError("gone", request=request, response=response)
+
+
+def test_plan_requires_explicit_billing_basis_and_authorization():
+    data = plan().model_dump(mode="json", by_alias=True)
+    data.pop("billing_basis")
+    with pytest.raises(ValueError, match="billing_basis"):
+        QualificationPlan.model_validate(data)
+    data["billing_basis"] = "internal-non-billable-user-attested"
+    data["status"] = "authorization-required"
+    with pytest.raises(ValueError, match="status"):
+        QualificationPlan.model_validate(data)
+
+
+def test_plan_must_fit_workflow_run_and_cleanup_timeout():
+    data = plan().model_dump(mode="json", by_alias=True)
+    data.update(max_runtime_minutes=300, cleanup_timeout_minutes=60)
+    with pytest.raises(ValueError, match="360-minute workflow"):
+        QualificationPlan.model_validate(data)
+
+
+def test_budget_includes_cleanup_and_billing_granularity():
+    data = plan().model_dump(mode="json", by_alias=True)
+    data.update(
+        billing_basis="verified-eur-hourly",
+        billing_attestation="verified account rate",
+        price_eur_per_hour=300,
+        max_runtime_minutes=180,
+        cleanup_timeout_minutes=60,
+        billing_granularity_minutes=60,
+        budget_eur=2000,
+    )
+    with pytest.raises(ValueError, match="exposure"):
+        QualificationPlan.model_validate(data)
+
+
+def test_journal_rejects_plan_change_and_second_writer(tmp_path):
+    path = tmp_path / "journal.json"
+    journal = RunJournal(path, plan(), now=lambda: 100)
+    with pytest.raises(RuntimeError, match="active writer"):
+        RunJournal(path, plan(), now=lambda: 100)
+    journal.close()
+    changed = plan().model_copy(update={"purpose": "different scope"})
+    with pytest.raises(ValueError, match="does not match"):
+        RunJournal(path, changed, now=lambda: 100)
 
 
 def test_journal_is_private_and_atomic(tmp_path):
@@ -154,7 +200,7 @@ def test_preflight_refuses_preexisting_target_name(tmp_path):
 def test_uncertain_create_is_reconciled_only_after_attempt_was_journaled(tmp_path):
     cloud = Cloud()
     journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
-    record = journal.service("autoscale-qualification-a")
+    record = journal.service(plan().requests[0])
     record["create_attempted_at"] = "test"
     journal.save()
     cloud.services.append({"id": "svc-own", "name": "autoscale-qualification-a",
@@ -168,10 +214,127 @@ def test_uncertain_create_is_reconciled_only_after_attempt_was_journaled(tmp_pat
     assert journal.created_ids() == ("svc-own",)
 
 
+def test_uncertain_create_cleanup_reconciles_identity_before_delete(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    cloud.services.append({
+        "id": "svc-uncertain", "name": record["name"],
+        "serviceClassId": "ENTERPRISE_100K_HIGHAVAILABILITY",
+        "datacenterId": "eks-us-east-1a",
+        "eventBrokerServiceVersion": "10.26.0.8894-14", "locked": False,
+    })
+    result = QualificationRunner(plan(), journal, cloud, sleep=lambda _: None, clock=lambda: 101).cleanup()
+    assert result.deleted == 1 and not result.remaining
+    assert cloud.deleted[0][0] == "svc-uncertain"
+
+
+def test_repeated_cleanup_treats_absent_service_as_deleted(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    runner = QualificationRunner(plan(), journal, cloud, sleep=lambda _: None, clock=lambda: 101)
+    runner.create_all()
+    first = runner.cleanup()
+    second = runner.cleanup()
+    assert first.deleted == second.deleted == 2
+    assert len(cloud.deleted) == 2
+
+
+def test_preflight_refuses_unresolved_prior_create_intent(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    sleeps = []
+    runner = QualificationRunner(plan(), journal, cloud, sleep=sleeps.append, clock=lambda: 101)
+    with pytest.raises(RuntimeError, match="unresolved create intents"):
+        runner.preflight()
+    assert sleeps == [2, 2]
+
+
+def test_cleanup_reports_unresolved_create_after_bounded_visibility_checks(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    sleeps = []
+    result = QualificationRunner(
+        plan(), journal, cloud, sleep=sleeps.append, clock=lambda: 101
+    ).cleanup()
+    assert result.unresolved_create_intents == (record["name"],)
+    assert sleeps == [5] * 5
+    assert journal.data["events"][-1]["unresolved_create_intents"] == 1
+
+
+def test_cleanup_unresolved_intent_is_not_success(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    result = QualificationRunner(
+        plan(), journal, cloud, sleep=lambda _: None, clock=lambda: 101
+    ).cleanup()
+    assert result.remaining == ()
+    assert result.unresolved_create_intents == (record["name"],)
+
+
+def test_uncertain_create_eventual_visibility_is_reconciled(tmp_path):
+    class EventuallyVisible(Cloud):
+        def __init__(self):
+            super().__init__()
+            self.list_calls = 0
+
+        def list_services(self):
+            self.list_calls += 1
+            if self.list_calls < 3:
+                return []
+            return super().list_services()
+
+    cloud = EventuallyVisible()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    cloud.services.append({
+        "id": "svc-eventual", "name": record["name"],
+        "serviceClassId": "ENTERPRISE_100K_HIGHAVAILABILITY",
+        "datacenterId": "eks-us-east-1a",
+        "eventBrokerServiceVersion": "10.26.0.8894-14", "locked": False,
+    })
+    result = QualificationRunner(
+        plan(), journal, cloud, sleep=lambda _: None, clock=lambda: 101
+    ).cleanup()
+    assert result.deleted == 1
+    assert not result.unresolved_create_intents
+
+
+def test_uncertain_create_never_adopts_foreign_same_name(tmp_path):
+    cloud = Cloud()
+    journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
+    record = journal.service(plan().requests[0])
+    record["create_attempted_at"] = "test"
+    journal.save()
+    cloud.services.append({
+        "id": "foreign", "name": record["name"],
+        "serviceClassId": "ENTERPRISE_5K_HIGHAVAILABILITY",
+        "datacenterId": "eks-us-east-1a",
+        "eventBrokerServiceVersion": "10.26.0.8894-14", "locked": False,
+    })
+    result = QualificationRunner(plan(), journal, cloud, sleep=lambda _: None, clock=lambda: 101).cleanup()
+    assert result.attempted == result.deleted == 0
+    assert result.unresolved_create_intents == (record["name"],)
+    assert not cloud.deleted
+
+
 def test_cleanup_uses_separate_deadline_after_main_run_timeout(tmp_path):
     cloud = Cloud()
     journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 0)
-    record = journal.service("autoscale-qualification-a")
+    record = journal.service(plan().requests[0])
     record.update(service_id="svc-1", create_attempted_at="test")
     cloud.services.append({"id": "svc-1", "name": record["name"]})
     journal.save()
@@ -189,7 +352,7 @@ def test_cleanup_records_failure_without_deleting_unjournaled_service(tmp_path):
     cloud.services.extend([{"id": "owned", "name": "autoscale-qualification-a"},
                            {"id": "existing", "name": "customer-service"}])
     journal = RunJournal(tmp_path / "journal.json", plan(), now=lambda: 100)
-    journal.service("autoscale-qualification-a").update(
+    journal.service(plan().requests[0]).update(
         service_id="owned", create_attempted_at="test"
     )
     journal.save()

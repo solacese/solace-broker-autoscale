@@ -8,6 +8,9 @@ on:
         required: true
         type: string
 
+# This runner performs in-process exact-ID cleanup. A runner/host disappearance can still bypass
+# later steps; the private journal must be retained and an operator must rerun --cleanup. This is
+# bounded exposure, not an external billing hard stop.
 concurrency:
   group: solace-cloud-qualification
   cancel-in-progress: false
@@ -19,12 +22,17 @@ jobs:
   qualify:
     runs-on: ubuntu-latest
     environment: solace-cloud-qualification
-    timeout-minutes: 15
+    # Plans are validated to leave setup margin inside this run-plus-cleanup bound.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: shim/go.sum
       - run: pip install -e './scaling-controller[dev,service,integration]'
       - name: Validate explicit billing authorization
         env:
@@ -36,18 +44,21 @@ jobs:
         run: |
           test -n "$PLAN_JSON"
           install -d -m 700 state/cloud-qualification
+          install -m 600 /dev/null state/cloud-qualification/plan.json
           printf '%s' "$PLAN_JSON" > state/cloud-qualification/plan.json
-          chmod 600 state/cloud-qualification/plan.json
+      - name: Build race-enabled workload client
+        run: go -C shim build -race -o ../state/cloud-qualification/payments-demo ./cmd/payments-demo
       - name: Run bounded Cloud qualification
         env:
           SOLACE_CLOUD_TOKEN: ${{ secrets.SOLACE_CLOUD_TOKEN }}
         run: |
+          install -m 600 /dev/null .env
           printf 'bearer=%s\n' "$SOLACE_CLOUD_TOKEN" > .env
-          chmod 600 .env
           PYTHONPATH=scaling-controller python scripts/cloud-qualification.py \
             --plan state/cloud-qualification/plan.json \
             --journal state/cloud-qualification/run.json \
-            --create > cloud-qualification-result.json
+            --result cloud-qualification-result.json \
+            --create
       - name: Emergency exact-ID cleanup
         if: failure()
         env:

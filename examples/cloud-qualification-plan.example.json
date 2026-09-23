@@ -1,17 +1,29 @@
 {
-  "status": "authorization-required",
+  "status": "authorized",
   "region": "eks-us-east-1a",
   "service_class": "ENTERPRISE_100K_HIGHAVAILABILITY",
   "broker_version": "10.26.0.8894-14",
   "budget_eur": 2000,
-  "billing_basis": "replace-with-authorized-basis",
+  "billing_basis": "replace-with-explicit-authorized-basis",
+  "billing_attestation": "replace-with-authorization-reference",
   "price_eur_per_hour": null,
   "max_runtime_minutes": 180,
   "cleanup_timeout_minutes": 60,
+  "billing_granularity_minutes": 60,
+  "prior_attempt_cost_eur": 0,
   "delete_test_services_after_run": true,
   "service_count": 2,
-  "services_created": [],
   "purpose": "Isolated baseline and managed split behavior test, not production qualification",
+  "workload_command": [
+    "python",
+    "./scripts/cloud-workload.py",
+    "--connections",
+    "{connections}",
+    "--binary",
+    "state/cloud-qualification/payments-demo",
+    "--output",
+    "state/cloud-qualification/workload"
+  ],
   "requests": [
     {
       "name": "replace-with-unique-qualification-a",

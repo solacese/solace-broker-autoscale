@@ -15,9 +15,10 @@ from pathlib import Path
 from ..assignment.placement import assign
 from ..assignment.store import AssignmentStore, Broker, BrokerState
 from ..assignment.topics import TopicRegistry
-from ..capacity.model import lookup
+from ..capacity.model import CapacityPoint, lookup
 from ..capacity.schema import CapacityModel
 from ..config import Config, ShardScalingPolicy
+from ..decision.types import MetricSample
 from ..metrics.fleet import FleetInventory
 from .features import assess_migration, feature_contract, placement_contract, requirements_for
 from .migration import MigrationEngine
@@ -50,6 +51,41 @@ class EffectiveScalingPolicy:
     cooldown: float
 
 
+def residual_broker_load(
+    observed: LoadVector, attributed_lower: LoadVector, configured: LoadVector
+) -> LoadVector:
+    """Retain live broker pressure not safely attributable to movable partitions."""
+    return LoadVector(*(
+        max(configured_value, observed_value - attributed_value, 0.0)
+        for configured_value, observed_value, attributed_value in zip(
+            configured.values, observed.values, attributed_lower.values, strict=True
+        )
+    ))
+
+
+def queue_copy_bounds(
+    copy_rate: float,
+    copy_byte_rate: float,
+    group_patterns: dict[str, list[str]],
+    fallback_fanout: float,
+) -> tuple[float, float, float, float, bool]:
+    """Bound original publications from queue copies without assuming all filters match."""
+    if not group_patterns:
+        factor, homogeneous = max(1.0, fallback_fanout), True
+    else:
+        factor = float(len(group_patterns))
+        homogeneous = len({tuple(patterns) for patterns in group_patterns.values()}) == 1
+    lower_rate = copy_rate / factor
+    lower_bytes = copy_byte_rate / factor
+    return (
+        lower_rate,
+        lower_rate if homogeneous else copy_rate,
+        lower_bytes,
+        lower_bytes if homogeneous else copy_byte_rate,
+        homogeneous,
+    )
+
+
 class Controller:
     """Single writer: the CLI holds an OS file lock for its lifetime; assignment remains concurrent."""
 
@@ -61,6 +97,17 @@ class Controller:
         assignments: AssignmentStore,
         queues: QueueManager,
     ) -> None:
+        for shard, constraints in inventory.placement.shards.items():
+            invalid = sorted(
+                partition
+                for partition in constraints.pinned_partitions
+                if partition >= config.assignment.partitions
+            )
+            if invalid:
+                raise ValueError(
+                    f"{shard}: pinned partitions outside configured range: "
+                    + ", ".join(map(str, invalid))
+                )
         inventory.validate_profile(model, config.fleet.service_class)
         if not config.automation.enabled or config.assignment.routing != "partitioned":
             raise ValueError("controller requires automation.enabled and assignment.routing: partitioned")
@@ -257,6 +304,28 @@ class Controller:
             self.topics.mark_ready(list(groups))
             self._prepared_groups = groups
 
+    def _copy_factor(self, shard: str) -> tuple[int, bool]:
+        """Return maximum queue copies and whether every group has the same filter contract."""
+        if not self.config.messaging.enabled:
+            return 1, True
+        groups = self.topics.groups(shard)
+        if not groups:
+            return 1, True
+        contracts = {tuple(patterns) for patterns in groups.values()}
+        return len(groups), len(contracts) == 1
+
+    @staticmethod
+    def _broker_load(sample: MetricSample, cap: CapacityPoint) -> LoadVector:
+        ingress_bytes = cap.ingress_byte_rate
+        egress_bytes = cap.egress_byte_rate
+        assert ingress_bytes is not None and egress_bytes is not None
+        return LoadVector(
+            sample.ingress_msg_rate / cap.msg_rate,
+            max(sample.ingress_byte_rate / ingress_bytes, sample.egress_byte_rate / egress_bytes),
+            sample.connection_count / cap.connections,
+            sample.spool_used / cap.spool_bytes,
+        )
+
     def tick(self, now: float) -> ControlResult:
         """Advance durable work first; plan from complete fresh deltas only when no move is pending."""
         if Path(self.config.actuation.kill_switch_file).exists():
@@ -276,6 +345,8 @@ class Controller:
         loads: list[PlacementBundle] = []
         scrape_started = time.monotonic()
         observations: dict[tuple[str, int], tuple[float, QueueStatus, str]] = {}
+        broker_samples: dict[str, MetricSample] = {}
+        attribution: dict[str, object] = {"method": "queue-copy-bounds-plus-broker-totals"}
         try:
             owners = {}
             for shard in sorted({b.shard for b in self.inventory.brokers if b.role in ("active", "warm")}):
@@ -290,6 +361,14 @@ class Controller:
                     key: pool.submit(self.queues.status, owner.broker_id, *key)
                     for key, owner in owners.items()
                 }
+                broker_method = getattr(self.queues, "broker_metrics", None)
+                broker_futures = {
+                    broker_id: pool.submit(broker_method, broker_id, endpoint.shard, now)
+                    for broker_id, endpoint in self.scaling_brokers.items()
+                    if broker_method is not None
+                }
+                for broker_id, future in broker_futures.items():
+                    broker_samples[broker_id] = future.result()
                 for key, future in futures.items():
                     shard, partition = key
                     owner = owners[key]
@@ -309,10 +388,23 @@ class Controller:
                         or status.spooled_bytes < prior.spooled_bytes
                     ):
                         raise ValueError("counter reset, owner change or telemetry gap")
-                    rate = (status.spooled_messages - prior.spooled_messages) / elapsed
-                    byte_rate = (status.spooled_bytes - prior.spooled_bytes) / elapsed
+                    copy_rate = (status.spooled_messages - prior.spooled_messages) / elapsed
+                    copy_byte_rate = (status.spooled_bytes - prior.spooled_bytes) / elapsed
+                    groups = self.topics.groups(shard) if self.config.messaging.enabled else {}
+                    (
+                        lower_rate,
+                        upper_rate,
+                        lower_byte_rate,
+                        upper_byte_rate,
+                        homogeneous,
+                    ) = queue_copy_bounds(
+                        copy_rate, copy_byte_rate, groups, self.config.capacity.fanout
+                    )
                     # No ingress during this interval: use configured design size for spool-only pressure.
-                    size = byte_rate / rate if rate else self.config.capacity.message_size_hint
+                    size = (
+                        upper_byte_rate / upper_rate
+                        if upper_rate else self.config.capacity.message_size_hint
+                    )
                     if size is None:
                         if status.spool_bytes:
                             raise ValueError(
@@ -346,15 +438,20 @@ class Controller:
                             partition,
                             owner.broker_id,
                             LoadVector(
-                                rate / cap.msg_rate,
+                                upper_rate / cap.msg_rate,
                                 max(
-                                    byte_rate / cap.ingress_byte_rate,
-                                    # Native counters already include each group's stored copy.
-                                    byte_rate * (1 if self.config.messaging.enabled else
-                                                 self.config.capacity.fanout) / cap.egress_byte_rate,
+                                    upper_byte_rate / cap.ingress_byte_rate,
+                                    copy_byte_rate / cap.egress_byte_rate,
                                 ),
                             ),
                             resident=LoadVector(spool=status.spool_bytes / cap.spool_bytes),
+                            relief=LoadVector(
+                                lower_rate / cap.msg_rate,
+                                max(
+                                    lower_byte_rate / cap.ingress_byte_rate,
+                                    copy_byte_rate / cap.egress_byte_rate,
+                                ),
+                            ),
                             queue_ids=tuple(sorted(self.topics.groups(shard))) or ("default",),
                         )
                     )
@@ -370,9 +467,48 @@ class Controller:
             return ControlResult("no-decision", "partition scrape exceeded staleness limit", 0)
         if len(loads) != len(observations):
             return ControlResult("observing", "collecting counter-delta history", 0)
+        attributed_lower: dict[str, LoadVector] = defaultdict(LoadVector)
+        for load in loads:
+            attributed_lower[load.current_broker] = attributed_lower[load.current_broker].add(
+                (load.relief or load.movable).add(load.resident)
+            )
+        runtime_fixed: dict[str, LoadVector] = {}
+        try:
+            for broker_id, endpoint in self.scaling_brokers.items():
+                configured = LoadVector(**endpoint.fixed_load.model_dump())
+                sample = broker_samples.get(broker_id)
+                if sample is None:
+                    runtime_fixed[broker_id] = configured
+                    continue
+                size = sample.avg_msg_size or self.config.capacity.message_size_hint
+                if not size:
+                    if any((sample.ingress_msg_rate, sample.egress_msg_rate, sample.spool_used)):
+                        raise ValueError("broker traffic requires a measured or configured message size")
+                    size = 1
+                cap = lookup(
+                    self.model,
+                    self.config.fleet.service_class,
+                    size,
+                    "guaranteed",
+                    fanout=self.config.capacity.fanout,
+                    scenario=self.config.capacity.scenario,
+                )
+                observed = self._broker_load(sample, cap)
+                runtime_fixed[broker_id] = residual_broker_load(
+                    observed, attributed_lower[broker_id], configured
+                )
+        except Exception as exc:
+            self.previous.clear()
+            self.overloaded_since.clear()
+            self.store.event(now, "snapshot-refused", {"error_type": type(exc).__name__})
+            return ControlResult("no-decision", "complete valid broker telemetry unavailable", 0)
+        attribution["broker_totals"] = bool(broker_samples)
+        attribution["ambiguous_filter_shards"] = sorted({
+            load.shard for load in loads if not self._copy_factor(load.shard)[1]
+        })
         totals: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
-        for broker_id, endpoint in self.scaling_brokers.items():
-            totals[broker_id] = list(endpoint.fixed_load.model_dump().values())
+        for broker_id in self.scaling_brokers:
+            totals[broker_id] = list(runtime_fixed[broker_id].values)
         for load in loads:
             for i, value in enumerate(load.total.values):
                 totals[load.current_broker][i] += value
@@ -432,7 +568,7 @@ class Controller:
                         broker.state.value,
                         endpoint.capabilities,
                         tuple(sorted(endpoint.failure_domains.items())),
-                        LoadVector(**endpoint.fixed_load.model_dump()),
+                        runtime_fixed[broker_id],
                     )
                 )
             placement = self.inventory.placement.shards.get(shard)
@@ -497,6 +633,7 @@ class Controller:
                 raise ValueError(f"migration compatibility changed: {decision.reason}")
             explanation = {
                 "bundle": proposal.bundle_id,
+                "telemetry_attribution": attribution,
                 "source": proposal.source,
                 "destination": proposal.destination,
                 "queue_count": proposal.after.moved_queue_count,

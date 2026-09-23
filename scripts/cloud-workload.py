@@ -19,7 +19,6 @@ from typing import Any
 
 import httpx
 import uvicorn
-
 from solace_autoscale.actuator.solace_cloud import SempConnection
 from solace_autoscale.assignment.placement import assign
 from solace_autoscale.assignment.service import create_app
@@ -125,12 +124,15 @@ class Process:
             except queue.Empty:
                 continue
 
-    def request(self, value: dict[str, Any], timeout: float = 120) -> dict[str, Any]:
+    def send(self, value: dict[str, Any]) -> None:
         if self.process.poll() is not None:
             raise RuntimeError(f"client exited: {self.errors}")
         assert self.process.stdin
         self.process.stdin.write(json.dumps(value) + "\n")
         self.process.stdin.flush()
+
+    def request(self, value: dict[str, Any], timeout: float = 120) -> dict[str, Any]:
+        self.send(value)
         result = self.next(timeout)
         if result.get("kind") in ("error", "rejected"):
             raise RuntimeError(f"client operation failed: {result}")
@@ -156,6 +158,22 @@ def percentile(values: list[float], quantile: float) -> float:
     return ordered[index]
 
 
+def reconcile_deliveries(
+    accepted: set[str], groups: tuple[str, ...], processed: list[dict[str, Any]]
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int], int]:
+    by_group = {
+        group: [item for item in processed if item.get("group") == group] for group in groups
+    }
+    loss = {
+        group: len(accepted - {str(item["event_id"]) for item in items})
+        for group, items in by_group.items()
+    }
+    duplicates = sum(
+        len(items) - len({str(item["event_id"]) for item in items}) for items in by_group.values()
+    )
+    return by_group, loss, duplicates
+
+
 def run_case(
     root: Path, binary: Path, connection: dict[str, Any], case: dict[str, Any]
 ) -> dict[str, Any]:
@@ -176,7 +194,9 @@ def run_case(
     ))
     app = create_app(
         store,
-        policy=AssignmentConfig(routing="partitioned", partitions=1, lease_seconds=1),
+        policy=AssignmentConfig(
+            routing="partitioned", partitions=case.get("partitions", 4), lease_seconds=1
+        ),
         fleet_id="qualify-" + case["name"],
         messaging=messaging,
     )
@@ -186,7 +206,7 @@ def run_case(
             connection["semp"], connection["admin_username"], connection["admin_password"]
         )},
         {broker_id: connection["msg_vpn"]},
-        100,
+        int(case.get("queue_spool_mb", 100)),
     )
     registry = TopicRegistry(store)
     queues.registry = registry
@@ -195,14 +215,17 @@ def run_case(
     controller_store = ControllerStore(store)
     for group in messaging.subscriptions:
         registry.register(group.group, group.topics)
-    assign(
-        store, "qualification", "partition:0", "guaranteed", time.time(), 1,
-        allowed_broker_ids=frozenset({broker_id}),
-    )
+    partitions = case.get("partitions", 4)
+    for partition in range(partitions):
+        assign(
+            store, "qualification", f"partition:{partition}", "guaranteed", time.time(), 1,
+            allowed_broker_ids=frozenset({broker_id}),
+        )
     credentials = {broker_id: {"username": connection["client_username"],
                                "password": connection["client_password"]}}
     before_sample = after_sample = None
-    subscriber = publisher = None
+    subscriber = None
+    publishers: list[Process] = []
     accepted_at: dict[str, float] = {}
     acceptance_ms: list[float] = []
     children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -220,7 +243,9 @@ def run_case(
                         f"broker queue readiness failed: {exc.response.text}"
                     ) from exc
                 time.sleep(.5)
-        controller_store.mark_partition_ready("qualification", 0)
+        for partition in range(partitions):
+            queues.prepare(broker_id, "qualification", partition, enabled=True)
+            controller_store.mark_partition_ready("qualification", partition)
         registry.mark_ready(list(groups))
         with SempCollector(
             connection["semp"], connection["admin_username"], connection["admin_password"]
@@ -236,43 +261,69 @@ def run_case(
             subscribed = subscriber.next(timeout=120)
             if subscribed.get("kind") != "subscribed":
                 raise RuntimeError(f"subscriber did not become ready: {subscribed}")
-            publisher = Process(binary, url, state / "publisher", credentials)
+            concurrency = int(case.get("publisher_concurrency", 4))
+            publishers = [
+                Process(binary, url, state / f"publisher-{index}", credentials)
+                for index in range(concurrency)
+            ]
             padding = "x" * max(0, case["payload_bytes"] - 128)
             publish_started = time.monotonic()
+            offered_rate = float(case["offered_messages_per_second"])
+            next_send = publish_started
+            pending_by_publisher = [0] * concurrency
             for index in range(case["messages"]):
                 event_id = f"{case['name']}-{index}"
+                if offered_rate > 0:
+                    next_send = publish_started + index / offered_rate
+                    delay = next_send - time.monotonic()
+                    if delay > 0:
+                        time.sleep(delay)
                 begin = time.monotonic()
                 accepted_at[event_id] = begin
-                publisher.request({
-                    "topic": f"qualify/account-{index % 16}/created",
+                publisher_index = index % concurrency
+                publishers[publisher_index].send({
+                    "topic": f"qualify/account-{index % partitions}/created",
                     "event_id": event_id,
                     "payload": {
-                        "account": f"account-{index % 16}",
-                        "sequence": index // 16,
+                        "account": f"account-{index % partitions}",
+                        "sequence": index // partitions,
                         "sent": begin,
                         "padding": padding,
                     },
                 })
-                acceptance_ms.append((time.monotonic() - begin) * 1000)
-                if case["pace_ms"]:
-                    time.sleep(case["pace_ms"] / 1000)
+                pending_by_publisher[publisher_index] += 1
             publish_finished = time.monotonic()
-            publisher.request({"op": "flush"})
+            for publisher_index, publisher in enumerate(publishers):
+                for _ in range(pending_by_publisher[publisher_index]):
+                    response = publisher.next()
+                    if response.get("kind") != "accepted":
+                        raise RuntimeError(f"publisher rejected offered event: {response}")
+                    event = str(response["event_id"])
+                    acceptance_ms.append((response["observed_at"] - accepted_at[event]) * 1000)
+                publisher.request({"op": "flush"})
             deadline = time.monotonic() + 180
-            expected = case["messages"] * case["fanout"]
-            while len([item for item in subscriber.all if item.get("kind") == "processed"]) < expected:
+            expected_ids = set(accepted_at)
+            while True:
+                processed_now = [item for item in subscriber.all if item.get("kind") == "processed"]
+                received = {
+                    group: {str(item.get("event_id")) for item in processed_now if item.get("group") == group}
+                    for group in groups
+                }
+                if all(ids == expected_ids for ids in received.values()):
+                    break
                 if subscriber.process.poll() is not None:
                     raise RuntimeError(
                         f"subscriber exited with code {subscriber.process.returncode}: "
                         f"{subscriber.errors}"
                     )
                 if time.monotonic() >= deadline:
+                    missing = {group: len(expected_ids - ids) for group, ids in received.items()}
                     raise TimeoutError(
-                        "subscriber processing did not complete: "
-                        f"{len([item for item in subscriber.all if item.get('kind') == 'processed'])}/"
-                        f"{expected}; errors={subscriber.errors}"
+                        f"subscriber processing did not reconcile IDs: missing={missing}; "
+                        f"errors={subscriber.errors}"
                     )
                 time.sleep(.05)
+            time.sleep(float(case.get("quiet_seconds", .25)))
         with SempCollector(
             connection["semp"], connection["admin_username"], connection["admin_password"]
         ) as collector:
@@ -280,7 +331,7 @@ def run_case(
                 "qualification", connection["msg_vpn"], time.time(), 1
             )
     finally:
-        if publisher:
+        for publisher in publishers:
             publisher.close()
         if subscriber:
             subscriber.close()
@@ -289,9 +340,8 @@ def run_case(
     elapsed = time.monotonic() - started
     children_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     processed = [item for item in subscriber.all if item.get("kind") == "processed"]
-    by_group = {
-        group: [item for item in processed if item.get("group") == group] for group in groups
-    }
+    accepted = set(accepted_at)
+    by_group, loss, duplicates = reconcile_deliveries(accepted, groups, processed)
     latencies = [
         (item["observed_at"] - accepted_at[item["event_id"]]) * 1000
         for item in processed if item["event_id"] in accepted_at
@@ -309,20 +359,30 @@ def run_case(
         )
     if before_sample is None or after_sample is None:
         raise RuntimeError("broker telemetry collection did not complete")
-    accepted = set(accepted_at)
+    if any(loss.values()) or duplicates or order_violations:
+        raise RuntimeError(
+            f"workload invariants failed: loss={loss}, duplicates={duplicates}, "
+            f"ordering_violations={order_violations}"
+        )
     return {
         "name": case["name"], "payload_bytes": case["payload_bytes"],
         "fanout": case["fanout"], "messages": case["messages"],
-        "handler_delay_ms": case["handler_delay_ms"], "pace_ms": case["pace_ms"],
+        "handler_delay_ms": case["handler_delay_ms"],
+        "configured_offered_messages_per_second": case["offered_messages_per_second"],
+        "publisher_concurrency": concurrency, "partitions": partitions,
         "accepted": len(accepted),
         "processed": {group: len(items) for group, items in by_group.items()},
-        "loss": {group: len(accepted - {item["event_id"] for item in items})
-                 for group, items in by_group.items()},
-        "duplicates": sum(bool(item.get("duplicate")) for item in processed),
+        "loss": loss,
+        "duplicates": duplicates,
         "ordering_violations": order_violations,
         "elapsed_seconds": elapsed,
         "publish_seconds": publish_finished - publish_started,
-        "offered_messages_per_second": case["messages"] / (publish_finished - publish_started),
+        "achieved_offer_messages_per_second": case["messages"] / (publish_finished - publish_started),
+        "offer_schedule_lag_ms": max(
+            0,
+            (publish_finished - publish_started)
+            - (case["messages"] - 1) / case["offered_messages_per_second"],
+        ) * 1000 if case["offered_messages_per_second"] else 0,
         "acceptance_latency_ms": {"p50": percentile(acceptance_ms, .50),
                                   "p95": percentile(acceptance_ms, .95),
                                   "p99": percentile(acceptance_ms, .99)},
@@ -348,13 +408,13 @@ def main() -> None:
     connection_doc = json.loads(args.connections.read_text())
     cases = [
         {"name": "small-steady", "payload_bytes": 256, "fanout": 1,
-         "messages": 200, "pace_ms": 5, "handler_delay_ms": 0},
+         "messages": 200, "offered_messages_per_second": 200, "handler_delay_ms": 0},
         {"name": "medium-fanout", "payload_bytes": 4096, "fanout": 2,
-         "messages": 200, "pace_ms": 2, "handler_delay_ms": 0},
+         "messages": 200, "offered_messages_per_second": 500, "handler_delay_ms": 0},
         {"name": "large-burst", "payload_bytes": 65536, "fanout": 2,
-         "messages": 100, "pace_ms": 0, "handler_delay_ms": 0},
+         "messages": 100, "offered_messages_per_second": 0, "handler_delay_ms": 0},
         {"name": "slow-consumer", "payload_bytes": 1024, "fanout": 2,
-         "messages": 100, "pace_ms": 0, "handler_delay_ms": 20},
+         "messages": 100, "offered_messages_per_second": 500, "handler_delay_ms": 20},
     ]
     results = [run_case(args.output, args.binary, connection_doc["brokers"][0], case)
                for case in cases]
