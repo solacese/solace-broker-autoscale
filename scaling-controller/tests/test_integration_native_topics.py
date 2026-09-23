@@ -112,6 +112,10 @@ def test_multi_broker_partition_owners_preserve_fanout_and_order_after_restart(
     for partition in range(1, partitions):
         ControllerStore(db).mark_partition_ready("payments", partition)
     registry.mark_ready(["ledger", "audit"])
+    counters_before = {
+        partition: queues.status(owner, "payments", partition).spooled_messages
+        for partition, owner in owners.items()
+    }
     ledger, audit = [], []
     router = KeyRouter(Resolver("http://unused"), "payments", "test", partitions=partitions)
     accounts = {}
@@ -175,7 +179,7 @@ def test_multi_broker_partition_owners_preserve_fanout_and_order_after_restart(
         status = queues.status(owner, "payments", partition)
         expected_publications = len(range(partition, 24, partitions)) * 2
         assert status.drained
-        assert status.spooled_messages == expected_publications * 2
+        assert status.spooled_messages - counters_before[partition] == expected_publications * 2
         for nonowner in set(connections) - {owner}:
             for group in ("ledger", "audit"):
                 response = queues._request(
