@@ -6,7 +6,7 @@ The managed queue controller and reference SMF integration are implemented and l
 
 | Check | Result |
 |---|---|
-| Unit and regression suite | 248 passed; two legacy workbook-path tests skipped; five live protocol tests excluded from this unit run. |
+| Unit and regression suite | 418 passed; four optional local/workbook tests skipped; eight live protocol tests excluded from this unit run. |
 | Real two-broker migration | Passed using two isolated local Solace Docker brokers and the native SMF client. |
 | Ruff | Clean for source, tests, Python adapters and payment example. |
 | Mypy | Clean across 58 source files. |
@@ -22,7 +22,7 @@ Additional tests cover pending acknowledgments, unavailable telemetry, continuou
 
 Cloud lifecycle tests use mocks. They cover persistent unique-name retries after an uncertain create result, bounded exact-ID cleanup, backoff, kill-switch refusal, service identity/region/class/version mismatch rejection, and successful SEMP readiness attachment. The response shape was checked against the official [Mission Control service API](https://api.solace.dev/cloud/reference/getservice) and its embedded OpenAPI schemas. Regional API configuration follows the [official API base URLs](https://api.solace.dev/cloud/reference/using-the-v2-rest-apis-for-pubsub-cloud).
 
-A real Cloud qualification on 22 September 2026 found no Enterprise 100K quota, then used the largest available two-service tier: Enterprise 5K HA. Its managed fanout/migration run reconciled 112 accepted events in both groups, with zero duplicates and preserved per-account order through publisher SIGKILL/restart. A 10K baseline attempt exposed a TLS trust-store setup defect before traffic and produced no throughput result; all exact-ID resources were deleted. See [the qualification record](cloud-qualification-2026-09-22.md).
+A real Cloud qualification on 22–23 September 2026 found no Enterprise 100K quota, then used the largest available two-service tier: Enterprise 5K HA. Its managed fanout/migration run reconciled 112 accepted events in both groups, with zero duplicates and preserved per-account order through publisher SIGKILL/restart. The largest available single-service tier, Enterprise 10K HA, subsequently completed four bounded AMQP-over-TLS cases (256 B steady, 4 KiB fanout, 64 KiB burst and a slow consumer); every accepted ID reached every expected group with zero duplicates and zero per-account order violations. The sequential client path did not seek saturation and does not establish broker throughput. All exact-ID resources were deleted. See [the qualification record](cloud-qualification-2026-09-22.md).
 
 ## Remaining rollout requirements
 
@@ -33,7 +33,7 @@ A real Cloud qualification on 22 September 2026 found no Enterprise 100K quota, 
 - Configure external monitoring of JSON states such as `capacity-shortfall`, `feature-pinned`, `no-decision`, `retry` and `limited`.
 - Multi-host controller HA, automatic broker deletion/scale-in, arbitrary queue adoption and backlog copying remain outside this implementation.
 
-The private verification report and compiled measured models remain ignored under `resources/` and `models/`. Public examples use illustrative loads and invented fixtures. No production Cloud resources were created, modified or deleted in this validation. No GitHub publication was performed; the reviewed source remains in the local working tree on `codex/autoscaler-reliability`.
+Private raw Cloud journals and connection bundles remain ignored under `state/`; customer data and credentials are not committed. Public examples use illustrative loads and invented fixtures. The qualification created and deleted only its exact journaled test-service IDs and did not modify existing services.
 
 ## Native topic API — 2026-09-18
 

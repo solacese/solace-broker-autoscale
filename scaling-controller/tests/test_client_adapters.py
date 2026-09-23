@@ -3,9 +3,13 @@ the live protocol integration test lives in test_integration_broker.py."""
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from solace_autoscale_client.adapters import amqp_uri, mqtt_config, rest_target
+from solace_autoscale_client.managed_smf import SmfConnections
 from solace_autoscale_client.resolver import Assignment, Resolver, ResolverError
 from solace_autoscale_client.smf_wrapper import (
     GuaranteedReassignmentRefused,
@@ -74,6 +78,63 @@ def test_resolver_raises_when_no_cache_and_down():
     r = Resolver(base_url="http://svc", _opener=opener)
     with pytest.raises(ResolverError):
         r.resolve("shard-a", "c1")
+
+
+class StubMessagingServiceBuilder:
+    def __init__(self, properties):
+        self.properties = properties
+
+    def from_properties(self, value):
+        self.properties.update(value)
+        return self
+
+    def build(self):
+        return self
+
+    def connect(self):
+        return None
+
+    def disconnect(self):
+        return None
+
+
+def install_messaging_service(monkeypatch, properties):
+    module = types.ModuleType("solace.messaging.messaging_service")
+
+    class MessagingService:
+        @staticmethod
+        def builder():
+            return StubMessagingServiceBuilder(properties)
+
+    module.MessagingService = MessagingService
+    monkeypatch.setitem(sys.modules, "solace.messaging.messaging_service", module)
+
+
+def test_managed_smf_injects_trust_store_for_tls(monkeypatch, tmp_path):
+    properties = {}
+    install_messaging_service(monkeypatch, properties)
+    monkeypatch.setenv("SOLACE_TLS_TRUST_STORE_DIR", str(tmp_path))
+    connections = SmfConnections(lambda _: ("user", "password"))
+    try:
+        connections.service({
+            "broker_id": "b0", "msg_vpn": "vpn", "endpoints": {"smf": "tcps://b0:55443"}
+        })
+    finally:
+        connections.close()
+    assert properties["solace.messaging.tls.trust-store-path"] == str(tmp_path)
+
+
+def test_managed_smf_omits_trust_store_for_plaintext(monkeypatch):
+    properties = {}
+    install_messaging_service(monkeypatch, properties)
+    connections = SmfConnections(lambda _: ("user", "password"))
+    try:
+        connections.service({
+            "broker_id": "b0", "msg_vpn": "vpn", "endpoints": {"smf": "tcp://b0:55555"}
+        })
+    finally:
+        connections.close()
+    assert "solace.messaging.tls.trust-store-path" not in properties
 
 
 def test_smf_wrapper_connects_and_reconnects():

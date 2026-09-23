@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,40 @@ import (
 	"github.com/solacese/solace-broker-autoscale/shim/messaging"
 	bolt "go.etcd.io/bbolt"
 )
+
+type credential struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func parseGroups(raw string) []string {
+	groups := make([]string, 0)
+	seen := map[string]bool{}
+	for _, value := range strings.Split(raw, ",") {
+		group := strings.TrimSpace(value)
+		if group == "" || seen[group] {
+			continue
+		}
+		seen[group] = true
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func resolveCredential(
+	credentials map[string]credential,
+	broker string,
+	getenv func(string) string,
+) (string, string, error) {
+	if value, ok := credentials[broker]; ok && value.Username != "" && value.Password != "" {
+		return value.Username, value.Password, nil
+	}
+	username, password := getenv("SOLACE_USERNAME"), getenv("SOLACE_PASSWORD")
+	if username == "" || password == "" {
+		return "", "", fmt.Errorf("credentials unavailable for broker %s", broker)
+	}
+	return username, password, nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -28,15 +63,16 @@ func main() {
 func run() error {
 	controller := flag.String("controller", "http://127.0.0.1:8099", "controller URL")
 	state := flag.String("state", "state/payments-demo", "persistent local directory")
-	subscribe := flag.Bool("subscribe", false, "run ledger and audit consumers")
+	subscribe := flag.Bool("subscribe", false, "run subscribers")
+	groupsFlag := flag.String("groups", "ledger,audit", "comma-separated declared subscriber groups")
 	handlerDelay := flag.Duration("handler-delay", 0, "delay each subscriber handler")
 	flag.Parse()
+	groups := parseGroups(*groupsFlag)
+	if *subscribe && len(groups) == 0 {
+		return fmt.Errorf("at least one subscriber group is required")
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	type credential struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
 	credentials := map[string]credential{}
 	if raw := os.Getenv("SOLACE_CREDENTIALS_JSON"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &credentials); err != nil {
@@ -44,14 +80,7 @@ func run() error {
 		}
 	}
 	credentialFor := func(broker string) (string, string, error) {
-		if value, ok := credentials[broker]; ok && value.Username != "" && value.Password != "" {
-			return value.Username, value.Password, nil
-		}
-		username, password := os.Getenv("SOLACE_USERNAME"), os.Getenv("SOLACE_PASSWORD")
-		if username == "" || password == "" {
-			return "", "", fmt.Errorf("credentials unavailable for broker %s", broker)
-		}
-		return username, password, nil
+		return resolveCredential(credentials, broker, os.Getenv)
 	}
 	c, err := messaging.Open(ctx, messaging.Options{ControllerURL: *controller, APIKey: os.Getenv("AUTOSCALE_API_KEY"), OutboxPath: filepath.Join(*state, "publisher.outbox.db"), PollInterval: 100 * time.Millisecond, Credentials: credentialFor})
 	if err != nil {
@@ -67,7 +96,7 @@ func run() error {
 		}
 		defer db.Close()
 		defer c.Close() // Stop handlers before closing their business database.
-		for _, group := range []string{"ledger", "audit"} {
+		for _, group := range groups {
 			err = c.Subscribe(ctx, group, func(ctx context.Context, m messaging.Message) error {
 				if *handlerDelay > 0 {
 					select {

@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 
 from solace_autoscale.actuator.solace_cloud import SempConnection
@@ -50,6 +51,20 @@ def api(app: Any) -> Iterator[str]:
         sock.close()
 
 
+def client_command(
+    binary: Path,
+    controller: str,
+    state: Path,
+    groups: tuple[str, ...] = (),
+    handler_delay_ms: int = 0,
+) -> list[str]:
+    args = [str(binary), "--controller", controller, "--state", str(state)]
+    if groups:
+        args.extend(("--subscribe", "--groups", ",".join(groups)))
+        args.extend(("--handler-delay", f"{handler_delay_ms}ms"))
+    return args
+
+
 class Process:
     def __init__(
         self,
@@ -63,10 +78,7 @@ class Process:
     ) -> None:
         self.lines: queue.Queue[dict[str, Any]] = queue.Queue()
         self.all: list[dict[str, Any]] = []
-        args = [str(binary), "--controller", controller, "--state", str(state)]
-        if groups:
-            args.extend(("--subscribe", "--groups", ",".join(groups)))
-            args.extend(("--handler-delay", f"{handler_delay_ms}ms"))
+        args = client_command(binary, controller, state, groups, handler_delay_ms)
         self.process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -82,7 +94,11 @@ class Process:
         def stdout() -> None:
             assert self.process.stdout
             for line in self.process.stdout:
-                item = json.loads(line)
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    self.errors.append(f"invalid client output: {exc}")
+                    continue
                 item["observed_at"] = time.monotonic()
                 self.all.append(item)
                 self.lines.put(item)
@@ -94,18 +110,30 @@ class Process:
         )
         self.error_reader.start()
 
+    def next(self, timeout: float = 120) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    f"client exited with code {self.process.returncode}: {self.errors}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"client response timed out: {self.errors}")
+            try:
+                return self.lines.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+
     def request(self, value: dict[str, Any], timeout: float = 120) -> dict[str, Any]:
         if self.process.poll() is not None:
             raise RuntimeError(f"client exited: {self.errors}")
         assert self.process.stdin
         self.process.stdin.write(json.dumps(value) + "\n")
         self.process.stdin.flush()
-        try:
-            result = self.lines.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise TimeoutError(f"client response timed out: {self.errors}") from exc
+        result = self.next(timeout)
         if result.get("kind") in ("error", "rejected"):
-            raise RuntimeError(f"client operation failed: {result.get('kind')}")
+            raise RuntimeError(f"client operation failed: {result}")
         return result
 
     def close(self) -> None:
@@ -171,31 +199,46 @@ def run_case(
         store, "qualification", "partition:0", "guaranteed", time.time(), 1,
         allowed_broker_ids=frozenset({broker_id}),
     )
-    queues.prepare(broker_id, "qualification", 0, enabled=True)
-    controller_store.mark_partition_ready("qualification", 0)
-    registry.mark_ready(list(groups))
     credentials = {broker_id: {"username": connection["client_username"],
                                "password": connection["client_password"]}}
-    before = SempCollector(
-        connection["semp"], connection["admin_username"], connection["admin_password"]
-    )
-    before_sample = before.collect("qualification", connection["msg_vpn"], time.time(), 1)
-    before.close()
+    before_sample = after_sample = None
     subscriber = publisher = None
     accepted_at: dict[str, float] = {}
     acceptance_ms: list[float] = []
+    children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic()
+    publish_started = publish_finished = started
     try:
+        readiness_deadline = time.monotonic() + 60
+        while True:
+            try:
+                queues.prepare(broker_id, "qualification", 0, enabled=True)
+                break
+            except httpx.HTTPStatusError as exc:
+                if time.monotonic() >= readiness_deadline:
+                    raise RuntimeError(
+                        f"broker queue readiness failed: {exc.response.text}"
+                    ) from exc
+                time.sleep(.5)
+        controller_store.mark_partition_ready("qualification", 0)
+        registry.mark_ready(list(groups))
+        with SempCollector(
+            connection["semp"], connection["admin_username"], connection["admin_password"]
+        ) as collector:
+            before_sample = collector.collect(
+                "qualification", connection["msg_vpn"], time.time(), 1
+            )
         with api(app) as url:
             subscriber = Process(
                 binary, url, state / "subscriber", credentials,
                 groups=groups, handler_delay_ms=case["handler_delay_ms"],
             )
-            subscribed = subscriber.lines.get(timeout=120)
+            subscribed = subscriber.next(timeout=120)
             if subscribed.get("kind") != "subscribed":
-                raise RuntimeError("subscriber did not become ready")
+                raise RuntimeError(f"subscriber did not become ready: {subscribed}")
             publisher = Process(binary, url, state / "publisher", credentials)
             padding = "x" * max(0, case["payload_bytes"] - 128)
+            publish_started = time.monotonic()
             for index in range(case["messages"]):
                 event_id = f"{case['name']}-{index}"
                 begin = time.monotonic()
@@ -213,19 +256,38 @@ def run_case(
                 acceptance_ms.append((time.monotonic() - begin) * 1000)
                 if case["pace_ms"]:
                     time.sleep(case["pace_ms"] / 1000)
+            publish_finished = time.monotonic()
             publisher.request({"op": "flush"})
             deadline = time.monotonic() + 180
             expected = case["messages"] * case["fanout"]
             while len([item for item in subscriber.all if item.get("kind") == "processed"]) < expected:
+                if subscriber.process.poll() is not None:
+                    raise RuntimeError(
+                        f"subscriber exited with code {subscriber.process.returncode}: "
+                        f"{subscriber.errors}"
+                    )
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("subscriber processing did not complete")
+                    raise TimeoutError(
+                        "subscriber processing did not complete: "
+                        f"{len([item for item in subscriber.all if item.get('kind') == 'processed'])}/"
+                        f"{expected}; errors={subscriber.errors}"
+                    )
                 time.sleep(.05)
+        with SempCollector(
+            connection["semp"], connection["admin_username"], connection["admin_password"]
+        ) as collector:
+            after_sample = collector.collect(
+                "qualification", connection["msg_vpn"], time.time(), 1
+            )
     finally:
         if publisher:
             publisher.close()
         if subscriber:
             subscriber.close()
+        queues.close()
+        store.close()
     elapsed = time.monotonic() - started
+    children_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     processed = [item for item in subscriber.all if item.get("kind") == "processed"]
     by_group = {
         group: [item for item in processed if item.get("group") == group] for group in groups
@@ -245,13 +307,8 @@ def run_case(
         order_violations += sum(
             values != sorted(values) for values in by_account.values()
         )
-    after = SempCollector(
-        connection["semp"], connection["admin_username"], connection["admin_password"]
-    )
-    after_sample = after.collect("qualification", connection["msg_vpn"], time.time(), 1)
-    after.close()
-    queues.close()
-    store.close()
+    if before_sample is None or after_sample is None:
+        raise RuntimeError("broker telemetry collection did not complete")
     accepted = set(accepted_at)
     return {
         "name": case["name"], "payload_bytes": case["payload_bytes"],
@@ -264,14 +321,18 @@ def run_case(
         "duplicates": sum(bool(item.get("duplicate")) for item in processed),
         "ordering_violations": order_violations,
         "elapsed_seconds": elapsed,
-        "offered_messages_per_second": case["messages"] / elapsed,
+        "publish_seconds": publish_finished - publish_started,
+        "offered_messages_per_second": case["messages"] / (publish_finished - publish_started),
         "acceptance_latency_ms": {"p50": percentile(acceptance_ms, .50),
                                   "p95": percentile(acceptance_ms, .95),
                                   "p99": percentile(acceptance_ms, .99)},
         "processing_latency_ms": {"p50": percentile(latencies, .50),
                                   "p95": percentile(latencies, .95),
                                   "p99": percentile(latencies, .99)},
-        "client_cpu_seconds": resource.getrusage(resource.RUSAGE_SELF).ru_utime,
+        "client_cpu_seconds": (
+            children_after.ru_utime + children_after.ru_stime
+            - children_before.ru_utime - children_before.ru_stime
+        ),
         "broker_before": before_sample.__dict__, "broker_after": after_sample.__dict__,
         "bottleneck": "undetermined; bounded run did not establish saturation",
     }

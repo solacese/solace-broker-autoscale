@@ -38,4 +38,4 @@ The test checks native fanout, destination consumer binding, ingress rejection, 
 
 The initial consumer restart also verifies durable subscriber registration and business deduplication state. Warm means provisioned and available, not powered off or free. Existing backlog stays on its original broker until processed. One indivisible hot account and a slow business handler are not magically fixed by adding brokers.
 
-For engineering, the same scenario runs in CI as `test_integration_go_managed.py`, with the Go race detector enabled. The [Go API guide](../../guide/go-messaging.md) explains delivery limits and error handling.
+For engineering, the same scenario runs in CI as `test_integration_go_managed.py`, with the Go race detector enabled. The managed Go client also supports an explicit `--groups` list for isolated qualification workloads; the presentation keeps its default `ledger,audit` groups. The [Go API guide](../../guide/go-messaging.md) explains delivery limits and error handling.
