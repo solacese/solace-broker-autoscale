@@ -58,7 +58,7 @@ capacity:
 | `tracing` | Streaming/unspooling with tracing enabled. |
 | `worst` | Conservative envelope of all four guaranteed scenarios, where all cover the requested workload. |
 
-`workload.delivery: direct` uses direct measurements. `mixed` uses the conservative envelope of direct and the selected guaranteed scenario. Replay and tracing **together** were not measured; selecting `worst` does not establish their combined performance.
+`workload.delivery: direct` uses direct measurements. `mixed` uses the conservative envelope of direct and the selected guaranteed scenario. Replay and tracing **together** were not measured; selecting `worst` does not establish their combined performance. A measured replay or tracing profile is capacity evidence only: automatic movement remains pinned until the corresponding broker-local state and handover behavior are qualified. See [feature-aware placement](feature-aware-placement.md).
 
 At an exact size/fanout, the measured directions are retained. Between points, the runtime uses the lower message and byte ceilings of bracketing observations and labels the result as estimated. Outside measured coverage, it refuses a recommendation. An absent fanout row is not zero capacity and is not guessed.
 

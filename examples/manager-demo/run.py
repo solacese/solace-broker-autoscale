@@ -20,6 +20,7 @@ from pathlib import Path
 
 import httpx
 import uvicorn
+
 from solace_autoscale.actuator.solace_cloud import SempConnection
 from solace_autoscale.assignment.placement import assign
 from solace_autoscale.assignment.service import create_app
@@ -61,16 +62,21 @@ def api(app):
 
 
 class Process:
-    def __init__(self, binary, url, state, subscribe=False):
+    def __init__(self, binary, url, state, subscribe=False, credentials=None, handler_delay=0):
         self.lines = queue.Queue()
         self.all = []
         self.errors = []
         self.proc = subprocess.Popen(
             [str(binary), "--controller", url, "--state", str(state)]
-            + (["--subscribe"] if subscribe else []),
+            + (["--subscribe", "--handler-delay", str(handler_delay)] if subscribe else []),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
-            env={**os.environ, "SOLACE_USERNAME": "default", "SOLACE_PASSWORD": "default"},
+            env={
+                **os.environ,
+                "SOLACE_USERNAME": "default",
+                "SOLACE_PASSWORD": "default",
+                **({"SOLACE_CREDENTIALS_JSON": json.dumps(credentials)} if credentials else {}),
+            },
         )
         def read():
             for line in self.proc.stdout:
@@ -116,16 +122,42 @@ class Process:
 
 
 class Lab:
-    """Fixed loopback endpoints only. The launcher owns the two disposable containers."""
-    def __init__(self, state: Path, partitions=4):
+    """Two explicit brokers; defaults are the disposable loopback demo."""
+    def __init__(self, state: Path, partitions=4, connection_file: Path | None = None):
         self.state = state
         self.fleet = "demo-" + str(int(time.time() * 1000))
         self.db = AssignmentStore(state / "controller.db")
         self.partitions = partitions
-        for broker, smf, amqp in [("a", 15556, 15672), ("b", 15557, 15673)]:
+        if connection_file is None:
+            brokers = [
+                {"broker_id": "a", "msg_vpn": "default", "semp": "http://127.0.0.1:18081",
+                 "smf": "tcp://127.0.0.1:15556", "amqp": "amqp://127.0.0.1:15672",
+                 "admin_username": "admin", "admin_password": "admin",
+                 "client_username": "default", "client_password": "default"},
+                {"broker_id": "b", "msg_vpn": "default", "semp": "http://127.0.0.1:18082",
+                 "smf": "tcp://127.0.0.1:15557", "amqp": "amqp://127.0.0.1:15673",
+                 "admin_username": "admin", "admin_password": "admin",
+                 "client_username": "default", "client_password": "default"},
+            ]
+        else:
+            brokers = json.loads(connection_file.read_text())["brokers"]
+        self.source, self.target = (item["broker_id"] for item in brokers)
+        self.credentials = (
+            {
+                item["broker_id"]: {
+                    "username": item["client_username"],
+                    "password": item["client_password"],
+                }
+                for item in brokers
+            }
+            if connection_file is not None
+            else None
+        )
+        for index, item in enumerate(brokers):
             self.db.upsert_broker(Broker(
-                broker, "payments", "default", BrokerState.ACTIVE if broker == "a" else BrokerState.WARM,
-                {"smf": f"tcp://127.0.0.1:{smf}", "amqp": f"amqp://127.0.0.1:{amqp}"},
+                item["broker_id"], "payments", item["msg_vpn"],
+                BrokerState.ACTIVE if index == 0 else BrokerState.WARM,
+                {"smf": item["smf"], "amqp": item["amqp"]},
             ))
         self.messaging = MessagingConfig.model_validate({
             "enabled": True, "allow_dynamic_groups": False,
@@ -137,25 +169,39 @@ class Lab:
         })
         self.app = create_app(self.db, policy=AssignmentConfig(routing="partitioned", partitions=partitions,
                               lease_seconds=1), fleet_id=self.fleet, messaging=self.messaging)
-        self.queues = QueueManager(self.fleet, {
-            b: SempConnection(f"http://127.0.0.1:{p}", "admin", "admin")
-            for b, p in [("a", 18081), ("b", 18082)]
-        }, {"a": "default", "b": "default"}, 100)
+        self.queues = QueueManager(
+            self.fleet,
+            {
+                item["broker_id"]: SempConnection(
+                    item["semp"], item["admin_username"], item["admin_password"]
+                )
+                for item in brokers
+            },
+            {item["broker_id"]: item["msg_vpn"] for item in brokers},
+            100,
+        )
         self.registry = TopicRegistry(self.db)
         self.queues.registry = self.registry
-        self.queues.client_username = "default"
+        self.queues.client_username = brokers[0]["client_username"]
         for group in self.messaging.subscriptions:
             self.registry.register(group.group, group.topics)
-        for b in ("a", "b"):
-            self.queues.configure_native(b)
+        if connection_file is None:
+            for item in brokers:
+                self.queues.configure_native(item["broker_id"])
+        else:
+            # Cloud-provided service credentials already reference a managed client profile.
+            self.queues._native_configured.update(item["broker_id"] for item in brokers)
         for p in range(partitions):
-            assign(self.db, "payments", f"partition:{p}", "guaranteed", time.time(), 1)
+            assign(
+                self.db, "payments", f"partition:{p}", "guaranteed", time.time(), 1,
+                allowed_broker_ids=frozenset({self.source}),
+            )
             # SEMP can answer before the broker's message spool has finished starting.
             # Queue creation is idempotent, so retry readiness without weakening its checks.
             deadline = time.monotonic() + 60
             while True:
                 try:
-                    self.queues.prepare("a", "payments", p, enabled=True)
+                    self.queues.prepare(self.source, "payments", p, enabled=True)
                     break
                 except httpx.HTTPStatusError as exc:
                     if time.monotonic() >= deadline:
@@ -163,6 +209,8 @@ class Lab:
                     time.sleep(0.5)
         self.registry.mark_ready(list(self.registry.groups()))
         self.store = ControllerStore(self.db)
+        for p in range(partitions):
+            self.store.mark_partition_ready("payments", p)
         self.engine = MigrationEngine(self.store, self.queues, AutomationConfig(
             poll_interval=1, migration_grace=2, empty_settle=1, migration_timeout=120,
         ))
@@ -200,10 +248,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--connections", type=Path)
+    parser.add_argument("--label", default="local disposable brokers")
+    parser.add_argument("--migration-wait", type=float, default=45)
+    parser.add_argument("--handler-delay", type=float, default=0)
+    parser.add_argument("--payload-bytes", type=int, default=0)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
-    prepare_brokers()
-    lab = Lab(args.output)
+    if args.connections is None:
+        prepare_brokers()
+    lab = Lab(args.output, connection_file=args.connections)
     start = time.monotonic()
     events, accepted, all_processed, sequences = [], [], [], {}
     publisher = subscriber = None
@@ -214,9 +268,11 @@ def main():
         print(f"{event['seconds']:5.1f}s  {title}: {detail}", flush=True)
     try:
         with api(lab.app) as url:
-            subscriber = Process(args.binary, url, args.output / "subscriber", True)
-            publisher = Process(args.binary, url, args.output / "publisher")
-            eventually(lambda: all(lab.bound("a", p) for p in range(4)))
+            subscriber = Process(
+                args.binary, url, args.output / "subscriber", True, lab.credentials, args.handler_delay
+            )
+            publisher = Process(args.binary, url, args.output / "publisher", credentials=lab.credentials)
+            eventually(lambda: all(lab.bound(lab.source, p) for p in range(4)))
             router = KeyRouter(Resolver(url), "payments", "demo", partitions=4)
             accounts = {}
             i = 0
@@ -230,29 +286,40 @@ def main():
                 sequences[account] = seq + 1
                 event_id = f"{account}-{seq}"
                 result = publisher.request({"topic": f"payments/{account}/created",
-                    "event_id": event_id, "payload": {"account": account, "sequence": seq, "amount": 25}})
+                    "event_id": event_id, "payload": {"account": account, "sequence": seq,
+                    "amount": 25, "padding": "x" * args.payload_bytes}})
                 assert result["kind"] == "accepted"
                 accepted.append(event_id)
-            note("One active broker", "Four ordered payment streams on A. B is already provisioned and warm.")
+            note(
+                "One active broker",
+                "Four ordered payment streams on the source. "
+                "The destination is already provisioned and warm.",
+            )
             for p in range(4):
                 publish(p)
             publisher.request({"op": "flush"})
             eventually(lambda: len([x for x in subscriber.all if x.get("group") == "ledger"]) == 4)
             note("Payments arrive", "Ledger and audit receive independent native topic subscriptions.")
-            before = [lab.queues.status("a", "payments", p) for p in range(4)]
+            before = [lab.queues.status(lab.source, "payments", p) for p in range(4)]
             measured_at = time.monotonic()
             for _ in range(20):
                 for p in range(4):
                     publish(p)
             publisher.request({"op": "flush"})
             elapsed = time.monotonic() - measured_at
-            after = [lab.queues.status("a", "payments", p) for p in range(4)]
-            rates = [(a.spooled_messages - b.spooled_messages) / elapsed for a, b in zip(after, before)]
+            after = [lab.queues.status(lab.source, "payments", p) for p in range(4)]
+            rates = [
+                (a.spooled_messages - b.spooled_messages) / elapsed
+                for a, b in zip(after, before, strict=True)
+            ]
             # Demonstration threshold: the observed burst is 120% of this small budget.
             # Real rates, deliberately reduced capacity; never used as a production model.
             demo_capacity = sum(rates) / 1.2
-            loads = [PartitionLoad("payments", p, "a", rate / demo_capacity, 0) for p, rate in enumerate(rates)]
-            move = propose_move(loads, ["a", "b"], trigger=0.8, target=0.65, excluded=set())
+            loads = [
+                PartitionLoad("payments", p, lab.source, rate / demo_capacity, 0)
+                for p, rate in enumerate(rates)
+            ]
+            move = propose_move(loads, [lab.source, lab.target], trigger=0.8, target=0.65, excluded=set())
             assert move is not None
             chosen, target = move
             note("Burst detected — 120% of demo budget",
@@ -260,14 +327,19 @@ def main():
                  "This reduced budget is a demo trigger, not a broker benchmark.",
                  measured_copies_per_second=round(sum(rates), 1), demo_capacity=round(demo_capacity, 1))
             lab.db.set_broker_state(target, BrokerState.ACTIVE)
-            lab.store.begin("payments", chosen.partition, "a", target, time.time())
+            lab.store.begin("payments", chosen.partition, lab.source, target, time.time())
             # Stop consumers to make the drain wait visible. Their durable queues survive.
             subscriber.close()
             all_processed.extend(subscriber.all)
-            subscriber = Process(args.binary, url, args.output / "subscriber", True)
+            subscriber = Process(
+                args.binary, url, args.output / "subscriber", True, lab.credentials, args.handler_delay
+            )
             lab.engine.advance(lab.store.pending()[0], time.time())
-            eventually(lambda: lab.bound("b", chosen.partition))
-            note("Destination ready", f"The Go subscriber found B's preparing queue for partition {chosen.partition}.")
+            eventually(lambda: lab.bound(lab.target, chosen.partition))
+            note(
+                "Destination ready",
+                f"The Go subscriber found the destination queue for partition {chosen.partition}.",
+            )
             def fenced():
                 lab.engine.advance(lab.store.pending()[0], time.time())
                 return lab.store.pending()[0].phase == "draining"
@@ -276,22 +348,33 @@ def main():
                 publish(chosen.partition)
             status = publisher.request({"op": "status"})["status"]
             assert status["pending"] == 24, status
-            note("Old ingress fenced", "24 new payments are safe on the publisher's disk while the old queue drains.",
-                 pending=status["pending"])
+            note(
+                "Old ingress fenced",
+                "24 new payments are safe on the publisher disk while the old queue drains.",
+                pending=status["pending"],
+            )
             publisher.close(kill=True)
-            note("Publisher killed — SIGKILL", "No graceful shutdown. Accepted publications must survive in the same outbox.", pending=24)
+            note(
+                "Publisher killed — SIGKILL",
+                "No graceful shutdown. Accepted publications must survive in the same outbox.",
+                pending=24,
+            )
             # Recover controller migration state too; ownership is never recomputed from membership.
             lab.engine = MigrationEngine(ControllerStore(lab.db), lab.queues, lab.engine.policy)
-            publisher = Process(args.binary, url, args.output / "publisher")
+            publisher = Process(args.binary, url, args.output / "publisher", credentials=lab.credentials)
             assert publisher.request({"op": "status"})["status"]["pending"] == 24
-            note("Publisher restarted", "Same application, same outbox. No broker names in the publish call.", pending=24)
-            deadline = time.monotonic() + 45
+            note(
+                "Publisher restarted",
+                "Same application, same outbox. No broker names in the publish call.",
+                pending=24,
+            )
+            deadline = time.monotonic() + args.migration_wait
             while lab.store.pending():
                 if time.monotonic() > deadline:
                     raise TimeoutError(f"migration blocked: {lab.store.pending()}")
                 lab.engine.advance(lab.store.pending()[0], time.time())
                 time.sleep(0.2)
-            assert lab.owners()[chosen.partition] == "b"
+            assert lab.owners()[chosen.partition] == lab.target
             note("Ownership committed", "Grace period and drain completed. New publications now use B.")
             publisher.request({"op": "flush"})
             for p in range(4):
@@ -299,7 +382,10 @@ def main():
             publisher.request({"op": "flush"})
             def processed_ids(group):
                 return {x["event_id"] for x in all_processed + subscriber.all if x.get("group") == group}
-            eventually(lambda: processed_ids("ledger") == set(accepted) and processed_ids("audit") == set(accepted))
+            eventually(
+                lambda: processed_ids("ledger") == set(accepted)
+                and processed_ids("audit") == set(accepted)
+            )
             all_processed.extend(subscriber.all)
             for group in ("ledger", "audit"):
                 for account in accounts.values():
@@ -310,7 +396,8 @@ def main():
             duplicates = sum(bool(x.get("duplicate")) for x in all_processed)
             note("Every accepted payment reconciled", "Both groups processed every ID, in account order. "
                  "Transport retries are deduplicated in each group's durable business transaction.",
-                 pending=0, ledger=len(processed_ids("ledger")), audit=len(processed_ids("audit")), duplicates=duplicates)
+                 pending=0, ledger=len(processed_ids("ledger")),
+                 audit=len(processed_ids("audit")), duplicates=duplicates)
     finally:
         try:
             if publisher:
@@ -324,11 +411,13 @@ def main():
     report = {"passed": True, "events": events, "accepted": len(accepted),
               "ledger": len({x["event_id"] for x in all_processed if x.get("group") == "ledger"}),
               "audit": len({x["event_id"] for x in all_processed if x.get("group") == "audit"}),
-              "disclaimer": "Recorded local run on two real Solace containers. Reduced demo capacity. "
-                            "No Cloud provisioning, production throughput or SLO qualification."}
+              "environment": args.label,
+              "disclaimer": "Recorded functional run on two independent Solace services. Reduced "
+                            "demo capacity; not production throughput or SLO qualification."}
     (args.output / "report.json").write_text(json.dumps(report, indent=2))
     template = (Path(__file__).parent / "presentation.html").read_text()
-    (args.output / "index.html").write_text(template.replace("/*REPORT*/null", json.dumps(report).replace("<", "\\u003c")))
+    document = template.replace("/*REPORT*/null", json.dumps(report).replace("<", "\\u003c"))
+    (args.output / "index.html").write_text(document)
     print(f"\nVerified presentation: {args.output / 'index.html'}", flush=True)
 
 

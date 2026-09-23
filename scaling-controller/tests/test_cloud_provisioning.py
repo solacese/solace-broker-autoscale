@@ -79,6 +79,7 @@ def controller(tmp_path, model):
         model=model,
         assignments=db,
         inventory=inv,
+        scaling_brokers={b.broker_id: b for b in inv.brokers},
         store=ControllerStore(db),
         queues=SimpleNamespace(connections={}, vpns={}),
     )
@@ -116,6 +117,18 @@ def test_kill_switch_blocks_cloud_create(tmp_path, measured_model):
     p = CloudProvisioner(c, cloud, AuditLog(tmp_path / "audit.jsonl"))
     assert "refused" in p.reconcile(100, metrics_fresh=True)
     assert not cloud.calls
+    c.assignments.close()
+
+
+def test_dr_peer_does_not_satisfy_or_consume_warm_pool(tmp_path, measured_model):
+    c = controller(tmp_path, measured_model)
+    c.inventory.brokers.append(
+        c.inventory.brokers[0].model_copy(update={"broker_id": "dr", "role": "dr"})
+    )
+    cloud = Cloud()
+    p = CloudProvisioner(c, cloud, AuditLog(tmp_path / "audit.jsonl"))
+    assert "reconciling" in p.reconcile(100, metrics_fresh=True)
+    assert len(cloud.calls) == 1
     c.assignments.close()
 
 

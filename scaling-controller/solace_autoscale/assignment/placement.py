@@ -36,9 +36,19 @@ class ProtocolUnavailable(NoBrokerAvailable):
     """No eligible broker supports the requested protocol."""
 
 
-def _pick_broker(store: AssignmentStore, shard: str, now: float, protocol: str | None,
-                 key: str, strategy: str, weights: dict[str, float]) -> Broker:
+def _pick_broker(
+    store: AssignmentStore,
+    shard: str,
+    now: float,
+    protocol: str | None,
+    key: str,
+    strategy: str,
+    weights: dict[str, float],
+    allowed_broker_ids: frozenset[str] | None,
+) -> Broker:
     candidates = store.assignable_brokers(shard)  # ACTIVE only
+    if allowed_broker_ids is not None:
+        candidates = [b for b in candidates if b.broker_id in allowed_broker_ids]
     if not candidates:
         raise NoBrokerAvailable(f"no ACTIVE broker for shard {shard!r}")
     if protocol is not None:
@@ -65,6 +75,7 @@ def assign(
     protocol: str | None = None,
     strategy: str = "least-placements",
     broker_weights: dict[str, float] | None = None,
+    allowed_broker_ids: frozenset[str] | None = None,
 ) -> Assignment:
     """Atomically select and persist one placement, including across local worker processes."""
     if mode not in ("direct", "guaranteed") or lease_seconds <= 0 or not shard or not client_id:
@@ -73,12 +84,21 @@ def assign(
         raise ValueError("unknown placement strategy")
     with store.transaction():
         return _assign(store, shard, client_id, mode, now, lease_seconds, protocol,
-                       strategy, broker_weights or {})
+                       strategy, broker_weights or {}, allowed_broker_ids)
 
 
-def _assign(store: AssignmentStore, shard: str, client_id: str, mode: str, now: float,
-            lease_seconds: int, protocol: str | None, strategy: str,
-            weights: dict[str, float]) -> Assignment:
+def _assign(
+    store: AssignmentStore,
+    shard: str,
+    client_id: str,
+    mode: str,
+    now: float,
+    lease_seconds: int,
+    protocol: str | None,
+    strategy: str,
+    weights: dict[str, float],
+    allowed_broker_ids: frozenset[str] | None,
+) -> Assignment:
     """Return the broker this client should use, creating/renewing the placement as needed."""
     existing = store.get_placement(shard, client_id)
 
@@ -100,7 +120,9 @@ def _assign(store: AssignmentStore, shard: str, client_id: str, mode: str, now: 
                 f"guaranteed placement remains on unavailable broker {existing.broker_id!r}; "
                 "restore that broker or complete an explicit queue migration before reassignment"
             )
-        broker = _pick_broker(store, shard, now, protocol, client_id, strategy, weights)
+        broker = _pick_broker(
+            store, shard, now, protocol, client_id, strategy, weights, allowed_broker_ids
+        )
         version = existing.version if existing is not None else 1
         store.put_placement(Placement(shard, client_id, broker.broker_id, "guaranteed",
                                       now + lease_seconds, version=version))
@@ -114,7 +136,9 @@ def _assign(store: AssignmentStore, shard: str, client_id: str, mode: str, now: 
                 and existing.lease_expires_at > now):
             store.renew_lease(shard, client_id, now + lease_seconds)
             return Assignment(broker=broker, lease_seconds=lease_seconds, reused_existing=True)
-    broker = _pick_broker(store, shard, now, protocol, client_id, strategy, weights)
+    broker = _pick_broker(
+        store, shard, now, protocol, client_id, strategy, weights, allowed_broker_ids
+    )
     version = existing.version if existing is not None else 1
     store.put_placement(Placement(shard, client_id, broker.broker_id, "direct",
                                   now + lease_seconds, version=version))

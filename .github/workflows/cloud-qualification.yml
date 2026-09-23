@@ -1,0 +1,78 @@
+name: cloud-qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_non_billable:
+        description: "Type INTERNAL-NON-BILLABLE after account authorization"
+        required: true
+        type: string
+
+# This runner performs in-process exact-ID cleanup. A runner/host disappearance can still bypass
+# later steps; the private journal must be retained and an operator must rerun --cleanup. This is
+# bounded exposure, not an external billing hard stop.
+concurrency:
+  group: solace-cloud-qualification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    environment: solace-cloud-qualification
+    # Plans are validated to leave setup margin inside this run-plus-cleanup bound.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: shim/go.sum
+      - run: pip install -e './scaling-controller[dev,service,integration]'
+      - name: Validate explicit billing authorization
+        env:
+          CONFIRMATION: ${{ inputs.confirm_non_billable }}
+        run: test "$CONFIRMATION" = INTERNAL-NON-BILLABLE
+      - name: Restore private qualification plan
+        env:
+          PLAN_JSON: ${{ secrets.SOLACE_CLOUD_QUALIFICATION_PLAN }}
+        run: |
+          test -n "$PLAN_JSON"
+          install -d -m 700 state/cloud-qualification
+          install -m 600 /dev/null state/cloud-qualification/plan.json
+          printf '%s' "$PLAN_JSON" > state/cloud-qualification/plan.json
+      - name: Build race-enabled workload client
+        run: go -C shim build -race -o ../state/cloud-qualification/payments-demo ./cmd/payments-demo
+      - name: Run bounded Cloud qualification
+        env:
+          SOLACE_CLOUD_TOKEN: ${{ secrets.SOLACE_CLOUD_TOKEN }}
+        run: |
+          install -m 600 /dev/null .env
+          printf 'bearer=%s\n' "$SOLACE_CLOUD_TOKEN" > .env
+          PYTHONPATH=scaling-controller python scripts/cloud-qualification.py \
+            --plan state/cloud-qualification/plan.json \
+            --journal state/cloud-qualification/run.json \
+            --result cloud-qualification-result.json \
+            --create
+      - name: Emergency exact-ID cleanup
+        if: failure()
+        env:
+          SOLACE_CLOUD_TOKEN: ${{ secrets.SOLACE_CLOUD_TOKEN }}
+        run: |
+          PYTHONPATH=scaling-controller python scripts/cloud-qualification.py \
+            --plan state/cloud-qualification/plan.json \
+            --journal state/cloud-qualification/run.json \
+            --cleanup
+      - name: Upload redacted qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-qualification-result
+          path: cloud-qualification-result.json
+          if-no-files-found: error
+          retention-days: 14

@@ -54,6 +54,7 @@ def test_real_queue_fence_buffer_drain_and_restart(tmp_path):
     assign(db, "payments", "partition:0", "guaranteed", 1, 1)
     queues.prepare("a", "payments", 0, enabled=True)
     state = ControllerStore(db)
+    state.mark_partition_ready("payments", 0)
     delivered = []
     gate = threading.Event()
     connections = SmfConnections(lambda broker: ("default", "default"))

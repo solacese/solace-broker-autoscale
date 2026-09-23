@@ -17,8 +17,8 @@ pip install -e '.[dev]'
 ## Use it
 
 ```
-# How many brokers does this workload need now?
-solace-autoscale recommend --config ../examples/config.example.yaml
+# How many brokers does this recorded workload window need now?
+solace-autoscale recommend --config ../examples/config.example.yaml --metrics ../examples/orders.json
 
 # Play a workload forward and see when it would need to scale.
 solace-autoscale simulate --config ../examples/config.example.yaml

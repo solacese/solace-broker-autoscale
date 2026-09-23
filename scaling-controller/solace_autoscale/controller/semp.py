@@ -12,6 +12,8 @@ import httpx
 
 from ..actuator.solace_cloud import SempConnection
 from ..assignment.topics import TopicRegistry, group_queue, topic_prefix
+from ..decision.types import MetricSample
+from ..metrics.semp import map_vpn_monitor
 from .store import queue_name
 
 
@@ -24,11 +26,17 @@ class QueueStatus:
     ingress_enabled: bool
     spooled_messages: int
     spooled_bytes: int
+    all_ingress_enabled: bool | None = None
 
     @property
     def drained(self) -> bool:
         """Consumer-bound messages are outstanding until acknowledged, even at zero ready depth."""
         return self.messages == self.unacked == self.spool_bytes == 0
+
+    @property
+    def fully_enabled(self) -> bool:
+        """Require every group queue to accept ingress during normal ownership."""
+        return self.ingress_enabled if self.all_ingress_enabled is None else self.all_ingress_enabled
 
 
 class QueueManager:
@@ -220,6 +228,20 @@ class QueueManager:
         for group in self._groups(shard):
             self._ingress_one(broker, shard, partition, enabled, group=group)
 
+    def broker_metrics(self, broker: str, shard: str, now: float) -> MetricSample:
+        """Read complete VPN totals for residual traffic and dynamic connection pressure."""
+        vpn = quote(self.vpns[broker], safe="")
+        response = self._request(broker, "GET", f"/SEMP/v2/monitor/msgVpns/{vpn}")
+        response.raise_for_status()
+        clients = self._request(
+            broker, "GET", f"/SEMP/v2/monitor/msgVpns/{vpn}/clients?count=1"
+        )
+        clients.raise_for_status()
+        count = clients.json().get("meta", {}).get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("missing/invalid broker connection telemetry")
+        return map_vpn_monitor(response.json()["data"], count, now, 1)
+
     def status(self, broker: str, shard: str, partition: int) -> QueueStatus:
         states = [self._status_one(broker, shard, partition, group=g) for g in self._groups(shard)]
         if not states:
@@ -232,6 +254,7 @@ class QueueManager:
             any(s.ingress_enabled for s in states),
             sum(s.spooled_messages for s in states),
             sum(s.spooled_bytes for s in states),
+            all(s.ingress_enabled for s in states),
         )
 
     def close(self) -> None:

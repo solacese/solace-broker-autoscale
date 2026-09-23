@@ -1,11 +1,13 @@
 # Terraform: identical broker configuration
 
 Templates the **configuration** of a broker (Message VPN, queues, ACL profiles, client profiles, DMR
-links) so a newly-provisioned broker is configured identically to its peers. The actuator triggers
-`terraform apply` for configuration rather than hand-rolling SEMPv2 calls (§10).
+links) so a newly-provisioned broker can be configured identically to its peers. This directory is an
+operator-run example; the controller never invokes `terraform apply`. Its managed queue handover uses
+scoped SEMPv2 calls directly.
 
-- Service **provisioning** (create/delete the managed service) is done by the actuator via the
-  Mission Control API - Terraform here is for the *config that must match across the shard*.
+- Optional Cloud service **creation** is done by the controller through the Mission Control API.
+  Automatic scale-in/deletion is not implemented. Terraform here is for operator-managed baseline
+  configuration that must match across a shard.
 - `variables.tf` declares the per-shard config (VPN name, queues, subscriptions, client profiles,
   ACL profiles, DMR cluster links).
 - `main.tf` applies it via the Solace SEMPv2 provider (`registry.terraform.io/SolaceProducts/solacebroker`).

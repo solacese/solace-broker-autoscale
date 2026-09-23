@@ -95,8 +95,12 @@ class SolaceCloudClient:
 
     # ---- CloudClient protocol ----------------------------------------------------------------
 
+    def create_service_request(self, body: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+        """Issue create and retain the complete operation so callers can journal resourceId."""
+        return self._post("/api/v2/missionControl/eventBrokerServices", body, idempotency_key)
+
     def create_service(self, body: dict[str, Any], idempotency_key: str) -> str:
-        resp = self._post("/api/v2/missionControl/eventBrokerServices", body, idempotency_key)
+        resp = self.create_service_request(body, idempotency_key)
         return str(resp["data"]["id"])  # operation id (202 OperationResponse)
 
     def delete_service(self, service_id: str, idempotency_key: str) -> str:
@@ -111,15 +115,10 @@ class SolaceCloudClient:
         )
         return str(resp.get("data", {}).get("id", ""))
 
-    def get_service(self, service_id: str) -> dict[str, Any]:
-        """GET the full Service (getService).
-
-        Returns the Service record: ``serviceClassId``, ``creationState`` (see
-        ``ServiceCreationState``), ``adminState`` (``ServiceAdminState``), ``msgVpnName``,
-        ``serviceConnectionEndpoints`` (hosts/ports/protocols), ``messageSpoolDetails``, and
-        ``ongoingOperationIds``. This is the spec-first way to read endpoints and lifecycle state.
-        """
-        return self._get(f"/api/v2/missionControl/eventBrokerServices/{service_id}")
+    def get_service(self, service_id: str, *, expand: bool = False) -> dict[str, Any]:
+        """GET one service, optionally including broker credentials and connection endpoints."""
+        suffix = "?expand=broker,serviceConnectionEndpoints" if expand else ""
+        return self._get(f"/api/v2/missionControl/eventBrokerServices/{service_id}{suffix}")
 
     def get_service_operation(self, service_id: str, operation_id: str) -> dict[str, Any]:
         """GET a service-scoped operation (spec's first-documented operation path).
@@ -157,6 +156,16 @@ class SolaceCloudClient:
     def get_broker_state(self, service_id: str) -> dict[str, Any]:
         return self._get(
             f"/api/v2/missionControl/eventBrokerServices/{service_id}/brokerState"
+        )
+
+    def get_datacenter(self, datacenter_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v2/missionControl/datacenters/{quote(datacenter_id, safe='')}")
+
+    def list_service_versions(self, datacenter_id: str) -> dict[str, Any]:
+        query = "?datacenterId=" + quote(datacenter_id, safe="")
+        return self._get(
+            "/api/v2/missionControl/eventBrokerServiceVersions"
+            + query + "&filterIncompatibleVersions=true&pageSize=100&pageNumber=1"
         )
 
     def list_services(self, page_size: int = 100) -> list[dict[str, Any]]:

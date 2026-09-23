@@ -27,6 +27,8 @@ type Options struct {
 	Credentials                       func(broker string) (username, password string, err error)
 	Transport                         dispatch.Transport
 	PollInterval                      time.Duration
+	// MaxOutboxBytes bounds serialized logical pending records, not the bbolt file size.
+	// Database pages, indexes, and high-water allocation require additional disk space.
 	MaxOutboxBytes, MaxOutboxMessages uint64
 	MaxInflight                       int
 }

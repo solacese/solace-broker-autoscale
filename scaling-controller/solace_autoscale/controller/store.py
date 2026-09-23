@@ -50,6 +50,25 @@ class ControllerStore:
             assignments._conn.execute("""CREATE TABLE IF NOT EXISTS controller_events (
                 id INTEGER PRIMARY KEY, ts REAL NOT NULL, migration_id TEXT, event TEXT NOT NULL,
                 detail TEXT NOT NULL)""")
+            assignments._conn.execute("""CREATE TABLE IF NOT EXISTS managed_partitions (
+                shard TEXT NOT NULL, partition INTEGER NOT NULL, ready INTEGER NOT NULL,
+                PRIMARY KEY (shard,partition))""")
+
+    def mark_partition_ready(self, shard: str, partition: int) -> None:
+        with self.assignments.transaction():
+            self.assignments._conn.execute(
+                "INSERT INTO managed_partitions VALUES (?,?,1) "
+                "ON CONFLICT(shard,partition) DO UPDATE SET ready=1",
+                (shard, partition),
+            )
+
+    def partition_ready(self, shard: str, partition: int) -> bool:
+        with self.assignments.transaction():
+            row = self.assignments._conn.execute(
+                "SELECT ready FROM managed_partitions WHERE shard=? AND partition=?",
+                (shard, partition),
+            ).fetchone()
+            return bool(row and row["ready"])
 
     def event(self, now: float, event: str, detail: dict[str, Any], migration_id: str | None = None) -> None:
         """Write durable intent before issuing network mutations; never include credentials."""
@@ -59,8 +78,18 @@ class ControllerStore:
                 (now, migration_id, event, json.dumps(detail)),
             )
 
-    def begin(self, shard: str, partition: int, source: str, target: str, now: float) -> Migration:
-        """Record intent only if the source still owns the guaranteed partition."""
+    def begin(
+        self,
+        shard: str,
+        partition: int,
+        source: str,
+        target: str,
+        now: float,
+        *,
+        activate_warm: bool = False,
+        explanation: dict[str, Any] | None = None,
+    ) -> Migration:
+        """Record intent and any warm activation in one local transaction."""
         with self.assignments.transaction():
             if self.assignments._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='topic_groups'"
@@ -74,12 +103,27 @@ class ControllerStore:
             m = Migration(
                 uuid.uuid4().hex, shard, partition, source, target, "preparing", now, now, now, None, None
             )
+            target_broker = self.assignments.get_broker(target)
+            if target_broker is None:
+                raise ValueError("migration target is not in the durable broker inventory")
+            if activate_warm:
+                if target_broker.state.value != "warm":
+                    raise ValueError("planned warm target is no longer warm")
+                self.assignments.set_broker_state(target, target_broker.state.ACTIVE)
+            elif target_broker.state.value != "active":
+                raise ValueError("migration target is not active")
             self.assignments._conn.execute(
                 "INSERT INTO migrations VALUES (?,?,?,?,?,?,?,?,?,?,?)", tuple(m.__dict__.values())
             )
-            self.event(
-                now, "migration-planned", {"partition": partition, "source": source, "target": target}, m.id
-            )
+            detail: dict[str, Any] = {
+                "partition": partition,
+                "source": source,
+                "target": target,
+                "activated_warm": activate_warm,
+            }
+            if explanation:
+                detail["planner"] = explanation
+            self.event(now, "migration-planned", detail, m.id)
             return m
 
     def pending(self) -> list[Migration]:
@@ -118,6 +162,22 @@ class ControllerStore:
                 ),
             )
             if phase and phase != m.phase:
+                if phase == "rolled-back":
+                    target = self.assignments.get_broker(m.target)
+                    if target is not None and target.state.value == "active":
+                        event = self.assignments._conn.execute(
+                            "SELECT detail FROM controller_events "
+                            "WHERE migration_id=? AND event='migration-planned' ORDER BY id LIMIT 1",
+                            (m.id,),
+                        ).fetchone()
+                        planned = json.loads(event["detail"]) if event else {}
+                        unrelated = self.assignments._conn.execute(
+                            "SELECT 1 FROM placements WHERE broker_id=? "
+                            "AND NOT (shard=? AND client_id=?) LIMIT 1",
+                            (m.target, m.shard, f"partition:{m.partition}"),
+                        ).fetchone()
+                        if planned.get("activated_warm") and not unrelated:
+                            self.assignments.set_broker_state(m.target, target.state.WARM)
                 self.event(now, "transition", {"from": m.phase, "to": phase, "detail": detail}, m.id)
 
     def commit_owner(self, m: Migration, now: float) -> None:

@@ -1,12 +1,22 @@
 # Replace these placeholder endpoints with dedicated, actual HA services.
+# role: dr is accepted for an explicitly inventoried DR peer but is never active/warm scaling capacity.
 provider: aws
 broker_version: 10.8.1.241
 service_class: enterprise-1k
 deployment_mode: HA
+placement:
+  shards:
+    payments:
+      required_capabilities: [guaranteed]
+      spread_by: [zone]
 brokers:
   - broker_id: payments-a
     shard: payments
     role: active
+    capabilities: [guaranteed]
+    failure_domains: {zone: zone-a}
+    # Example reservation; measure unattributable connection/load overhead in your environment.
+    fixed_load: {connections: 0}
     msg_vpn: payments
     base_url: https://payments-a.example.com:943
     username_env: PAYMENTS_A_SEMP_USERNAME
@@ -16,6 +26,8 @@ brokers:
   - broker_id: payments-b
     shard: payments
     role: warm
+    capabilities: [guaranteed]
+    failure_domains: {zone: zone-b}
     msg_vpn: payments
     base_url: https://payments-b.example.com:943
     username_env: PAYMENTS_B_SEMP_USERNAME

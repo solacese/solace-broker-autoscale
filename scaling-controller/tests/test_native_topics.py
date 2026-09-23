@@ -92,6 +92,45 @@ def test_registry_and_api_keep_subscriptions_durable_and_freeze_during_migration
     db.close()
 
 
+def test_broker_metrics_include_live_connections_and_vpn_rates(monkeypatch):
+    from solace_autoscale.actuator.solace_cloud import SempConnection
+    from solace_autoscale.controller.semp import QueueManager
+
+    queues = QueueManager(
+        "payments", {"a": SempConnection("http://127.0.0.1:8080", "u", "p")}, {"a": "vpn"}
+    )
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    def request(broker, method, path, body=None):
+        del broker, method, body
+        if path.endswith("/clients?count=1"):
+            return Response({"meta": {"count": 37}})
+        return Response({"data": {
+            "averageRxMsgRate": 100, "averageTxMsgRate": 180,
+            "averageRxByteRate": 100_000, "averageTxByteRate": 180_000,
+            "msgSpoolUsage": 4096,
+        }})
+
+    monkeypatch.setattr(queues, "_request", request)
+    try:
+        sample = queues.broker_metrics("a", "payments", 100)
+        assert sample.connection_count == 37
+        assert sample.ingress_msg_rate == 100
+        assert sample.egress_msg_rate == 180
+        assert sample.spool_used == 4096
+    finally:
+        queues.close()
+
+
 def test_group_fencing_retries_partial_failure_and_waits_for_every_group(tmp_path, monkeypatch):
     from solace_autoscale.controller.semp import QueueManager, QueueStatus
 
@@ -131,9 +170,12 @@ def test_group_fencing_retries_partial_failure_and_waits_for_every_group(tmp_pat
         with pytest.raises(OSError):
             queues.ingress("a", "payments", 0, False)
         status = queues.status("a", "payments", 0)
-        assert status.ingress_enabled  # A partial fence cannot authorize cutover.
+        assert status.ingress_enabled  # Any enabled group means the bundle is not fully fenced.
+        assert not status.fully_enabled  # Every group must accept ingress during normal ownership.
         assert not status.drained  # One group's outstanding ACK blocks migration.
         assert status.consumers == 1  # Every group needs a bound consumer.
+        assert status.spooled_messages == 20  # Group queue counters are delivery copies.
+        assert status.spooled_bytes == 200
         queues.ingress("a", "payments", 0, False)
         assert not queues.status("a", "payments", 0).ingress_enabled
     finally:

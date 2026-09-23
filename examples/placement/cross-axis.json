@@ -1,0 +1,55 @@
+{
+  "schema_version": "1",
+  "case_id": "cross-axis-one-move",
+  "source": {
+    "kind": "synthetic-normalized",
+    "note": "Dimensionless fixture; not broker performance evidence"
+  },
+  "shard": "payments",
+  "state_limit": 100000,
+  "constraints": {
+    "trigger": 0.8,
+    "target": 0.65,
+    "max_active_brokers": 3,
+    "required_capabilities": ["guaranteed"],
+    "allowed_failure_domains": {},
+    "max_partitions_per_domain": {},
+    "spread_by": ["zone"]
+  },
+  "brokers": [
+    {
+      "id": "a",
+      "capabilities": ["guaranteed"],
+      "failure_domains": {"zone": "one"}
+    },
+    {
+      "id": "b",
+      "capabilities": ["guaranteed"],
+      "failure_domains": {"zone": "two"},
+      "fixed_load": {"messages": 0.1, "bytes": 0.25}
+    },
+    {
+      "id": "c",
+      "role": "warm",
+      "state": "warm",
+      "capabilities": ["guaranteed", "specialized"],
+      "failure_domains": {"zone": "three"}
+    }
+  ],
+  "bundles": [
+    {
+      "id": "payments/partition:0",
+      "partition": 0,
+      "current_broker": "a",
+      "movable": {"messages": 0.5, "bytes": 0.4},
+      "queue_ids": ["audit", "ledger"]
+    },
+    {
+      "id": "payments/partition:1",
+      "partition": 1,
+      "current_broker": "a",
+      "movable": {"messages": 0.4, "bytes": 0.3},
+      "queue_ids": ["audit", "ledger"]
+    }
+  ]
+}
