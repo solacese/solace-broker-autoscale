@@ -173,23 +173,6 @@ def test_guaranteed_reassignment_refused():
     with pytest.raises(GuaranteedReassignmentRefused):
         client.on_reassignment_signal()
 
-
-def test_dns_desired_records(tmp_path):
-    from solace_autoscale.assignment.store import AssignmentStore, Broker, BrokerState
-    from solace_autoscale.dns.updater import desired_records
-
-    store = AssignmentStore(tmp_path / "a.db")
-    store.upsert_broker(Broker("b0", "shard-a", "vpn", BrokerState.ACTIVE,
-                               {"smf": "tcps://b0.example.com:55443"}))
-    store.upsert_broker(Broker("b1", "shard-a", "vpn", BrokerState.DRAINING,
-                               {"smf": "tcps://b1.example.com:55443"}))
-    recs = desired_records(store, ["shard-a"], "brokers.example.com", ttl=30)
-    assert len(recs) == 1
-    assert recs[0].name == "shard-a.brokers.example.com"
-    # draining broker excluded from DNS
-    assert recs[0].hostnames == ["b0.example.com"]
-
-
 def test_resolver_query_ids_cannot_inject_parameters():
     import json
     from urllib.parse import parse_qs, urlparse

@@ -46,7 +46,7 @@ def requirements_for(config: Config, shard: str) -> FeatureRequirements:
 
 def feature_contract(config: Config, shards: list[str], *, deployment_mode: str) -> dict[str, Any]:
     """Return the stable migration-safety contract persisted beside routing ownership."""
-    return {
+    contract = {
         "schema": "feature-placement-v1",
         "bundle_scope": "partition-with-subscriber-groups-v1",
         "cross_partition_transactions": "pinned",
@@ -56,6 +56,14 @@ def feature_contract(config: Config, shards: list[str], *, deployment_mode: str)
             for shard in sorted(shards)
         },
     }
+    libraries = {
+        route.pattern: route.key_evaluator.model_dump(mode="json")
+        for route in config.messaging.routes
+        if route.key_evaluator is not None
+    }
+    if libraries:
+        contract["routing_libraries"] = dict(sorted(libraries.items()))
+    return contract
 
 
 def contract_digest(contract: dict[str, Any]) -> str:

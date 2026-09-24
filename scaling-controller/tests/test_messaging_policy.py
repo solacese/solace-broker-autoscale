@@ -149,3 +149,18 @@ def test_subscriber_uses_yaml_patterns_when_app_only_names_group(tmp_path, monke
         assert requests == [{"group": "ledger", "topics": ["payments/>"]}]
         with pytest.raises(ValueError, match="declared"):
             client.subscribe(group="unknown", handler=lambda message: None, timeout=0)
+        with pytest.raises(ValueError, match="mode cannot change"):
+            client.subscribe(
+                group="ledger", handler=lambda message: None, timeout=0, validate_routing=True
+            )
+        assert requests == [{"group": "ledger", "topics": ["payments/>"]}]
+
+    requests.clear()
+    with MessagingClient(
+        "http://unused", state_dir=tmp_path / "validated", credentials=lambda _: ("u", "p")
+    ) as client:
+        with pytest.raises(ValueError, match="evaluator routes"):
+            client.subscribe(
+                group="ledger", handler=lambda message: None, timeout=0, validate_routing=True
+            )
+        assert requests == []

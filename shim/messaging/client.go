@@ -31,6 +31,7 @@ type Options struct {
 	// Database pages, indexes, and high-water allocation require additional disk space.
 	MaxOutboxBytes, MaxOutboxMessages uint64
 	MaxInflight                       int
+	RoutingEvaluators                 *EvaluatorRegistry
 }
 type Status struct {
 	Pending           uint64 `json:"pending"`
@@ -47,6 +48,7 @@ type assignment struct {
 	Partition int               `json:"partition_id"`
 	Count     int               `json:"partition_count"`
 	Lease     int               `json:"lease_seconds"`
+	Revision  uint64            `json:"revision"`
 	fetched   time.Time
 }
 type cachedSender struct {
@@ -72,6 +74,7 @@ type Client struct {
 	subscriptions map[string]subscription
 	flows         map[string]*flow
 	wake          chan struct{}
+	controlWake   chan struct{}
 }
 
 // Open locks the durable outbox to one process and validates its routing contract.
@@ -106,12 +109,16 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		opts.MaxOutboxMessages = 100_000
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	c := &Client{opts: opts, ctx: workerCtx, cancel: cancel, http: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, assignments: map[string]assignment{}, senders: map[string]*cachedSender{}, subscriptions: map[string]subscription{}, flows: map[string]*flow{}, wake: make(chan struct{}, 1)}
+	c := &Client{opts: opts, ctx: workerCtx, cancel: cancel, http: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, assignments: map[string]assignment{}, senders: map[string]*cachedSender{}, subscriptions: map[string]subscription{}, flows: map[string]*flow{}, wake: make(chan struct{}, 1), controlWake: make(chan struct{}, 1)}
 	if err = c.request(ctx, "/messaging/config", nil, &c.cfg); err != nil {
 		cancel()
 		return nil, err
 	}
 	if err = c.cfg.validate(); err != nil {
+		cancel()
+		return nil, err
+	}
+	if err = c.requireEvaluators(c.cfg); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -121,9 +128,17 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		return nil, err
 	}
 	c.policyAt = time.Now()
-	c.wg.Add(2)
+	events := c.cfg.Events // Immutable startup contract; control() may replace c.cfg immediately.
+	workers := 2
+	if events.Enabled {
+		workers++
+	}
+	c.wg.Add(workers)
 	go c.control()
 	go c.deliver()
+	if events.Enabled {
+		go c.controlEvents(events)
+	}
 	return c, nil
 }
 
@@ -162,20 +177,93 @@ func (c *Client) request(ctx context.Context, path string, body, out any) error 
 	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
 }
 
-// Publish durably accepts a publication without waiting for broker or consumer ACK.
-// ErrFull, disk errors, invalid topics and rejected policy mean it was not accepted.
-func (c *Client) Publish(topic string, payload any, eventID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Client) requireEvaluators(cfg config) error {
+	for _, route := range cfg.Routes {
+		if route.KeyEvaluator != nil {
+			if _, err := c.opts.RoutingEvaluators.require(route.KeyEvaluator.Name, route.KeyEvaluator.Version); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Client) publicationPolicy(topic string) (config, route, error) {
 	if c.ctx.Err() != nil {
-		return ErrClosed
+		return config{}, route{}, ErrClosed
 	}
 	if c.status.Paused || time.Since(c.policyAt) > 5*time.Minute {
-		return errors.New("publishing paused; controller policy unavailable or rejected")
+		return config{}, route{}, errors.New("publishing paused; controller policy unavailable or rejected")
 	}
-	r, err := c.cfg.publication(topic, eventID, payload)
+	var selected *route
+	for _, candidate := range c.cfg.Routes {
+		if matches(candidate.Pattern, topic) {
+			if selected != nil {
+				return config{}, route{}, errors.New("ambiguous route")
+			}
+			copy := candidate
+			selected = &copy
+		}
+	}
+	if selected == nil {
+		return config{}, route{}, errors.New("no configured route")
+	}
+	ready := map[string]bool{}
+	for _, group := range c.cfg.Ready {
+		ready[group] = true
+	}
+	matched := false
+	for group, patterns := range c.cfg.Groups {
+		for _, pattern := range patterns {
+			if matches(pattern, topic) {
+				matched = true
+				if !ready[group] {
+					return config{}, route{}, errors.New("matching subscriber group is not ready")
+				}
+			}
+		}
+	}
+	if !matched {
+		return config{}, route{}, errors.New("no matching subscriber group")
+	}
+	return c.cfg.contract(), *selected, nil
+}
+
+// Publish preserves the original API and borrows payload until local acceptance returns.
+func (c *Client) Publish(topic string, payload any, eventID string) error {
+	return c.PublishMessage(&Publication{Topic: topic, Payload: payload, EventID: eventID})
+}
+
+// PublishMessage passes this exact Publication pointer to trusted customer code. Evaluation and
+// serialization run without the client lock; current policy is rechecked before durable acceptance.
+func (c *Client) PublishMessage(message *Publication) error {
+	if message == nil {
+		return errors.New("publication is required")
+	}
+	c.mu.Lock()
+	contract, selected, err := c.publicationPolicy(message.Topic)
+	c.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	snapshot := contract
+	snapshot.Routes = []route{selected}
+	snapshot.Groups = map[string][]string{"selected": {selected.Pattern}}
+	snapshot.Ready = []string{"selected"}
+	r, err := snapshot.publicationMessage(message, c.opts.RoutingEvaluators)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, currentRoute, err := c.publicationPolicy(message.Topic)
+	if err != nil {
+		return err
+	}
+	oldRoute, _ := json.Marshal(selected)
+	newRoute, _ := json.Marshal(currentRoute)
+	if !compatible(contract, current) || !bytes.Equal(oldRoute, newRoute) {
+		return errors.New("routing policy changed during evaluation; publication was not accepted")
 	}
 	if err = c.box.enqueue(r); err != nil {
 		return err
@@ -236,21 +324,51 @@ func (c *Client) Flush(ctx context.Context) error {
 }
 func (c *Client) control() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(c.opts.PollInterval)
-	defer ticker.Stop()
+	nextPeriodic := time.Now().Add(c.opts.PollInterval)
+	lastRefresh := time.Now()
 	for {
+		wait := time.Until(nextPeriodic)
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
+		event := false
 		select {
 		case <-c.ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
+		case <-c.controlWake:
+			timer.Stop()
+			event = true
+		}
+		now := time.Now()
+		minGap := min(c.opts.PollInterval/2, 250*time.Millisecond)
+		if event && now.Sub(lastRefresh) < minGap {
+			timer := time.NewTimer(minGap - now.Sub(lastRefresh))
+			select {
+			case <-c.ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			now = time.Now()
+		}
+		lastRefresh = now
+		if !now.Before(nextPeriodic) {
+			for !nextPeriodic.After(now) {
+				nextPeriodic = nextPeriodic.Add(c.opts.PollInterval)
+			}
 		}
 		var cfg config
 		err := c.request(c.ctx, "/messaging/config", nil, &cfg)
 		c.mu.Lock()
 		if err == nil {
-			if cfg.validate() != nil || !compatible(c.cfg, cfg) {
-				err = errors.New("routing contract changed")
+			if cfg.validate() != nil || c.requireEvaluators(cfg) != nil || !compatible(c.cfg, cfg) {
+				err = errors.New("routing contract changed or evaluator unavailable")
 				c.status.Paused = true
+			} else if cfg.Revision < c.cfg.Revision {
+				err = errors.New("stale controller revision")
 			} else {
 				cfg.Routes = c.cfg.Routes
 				c.cfg = cfg
@@ -281,8 +399,10 @@ func (c *Client) control() {
 func (c *Client) resolve(r record) (assignment, error) {
 	c.mu.Lock()
 	a, ok := c.assignments[r.lane()]
+	requiredRevision := c.cfg.Revision
 	c.mu.Unlock()
-	if ok && time.Since(a.fetched) < time.Duration(a.Lease)*time.Second && time.Since(a.fetched) < 5*time.Minute {
+	leaseValid := ok && a.Lease > 0 && time.Since(a.fetched) < time.Duration(a.Lease)*time.Second
+	if leaseValid && a.Revision >= requiredRevision {
 		return a, nil
 	}
 	params := url.Values{"shard": {r.Shard}, "client_id": {"go-messaging"}, "mode": {"guaranteed"}, "protocol": {"amqp"}, "partition": {fmt.Sprint(r.Partition)}}
@@ -292,7 +412,8 @@ func (c *Client) resolve(r record) (assignment, error) {
 		if errors.As(err, &h) && h < 500 {
 			return assignment{}, err
 		}
-		if ok && time.Since(a.fetched) < 5*time.Minute {
+		// A hint never invalidates a still-valid lease. Broker ingress fencing remains authoritative.
+		if leaseValid {
 			return a, nil
 		}
 		return assignment{}, err
@@ -300,8 +421,8 @@ func (c *Client) resolve(r record) (assignment, error) {
 	c.mu.Lock()
 	partitions := c.cfg.Partitions
 	c.mu.Unlock()
-	if fresh.Partition != r.Partition || fresh.Count != partitions || fresh.Prefix == "" || fresh.Broker == "" {
-		return assignment{}, errors.New("assignment contract mismatch")
+	if fresh.Partition != r.Partition || fresh.Count != partitions || fresh.Prefix == "" || fresh.Broker == "" || fresh.Revision < requiredRevision {
+		return assignment{}, errors.New("assignment contract mismatch or stale revision")
 	}
 	fresh.fetched = time.Now()
 	c.mu.Lock()
@@ -351,7 +472,14 @@ func (c *Client) send(r record) error {
 		c.senders[a.Broker] = s
 	}
 	c.senderMu.Unlock()
-	body, err := json.Marshal(map[string]any{"event_id": r.ID, "payload": map[string]any{"topic": r.Topic, "data": r.Data}})
+	payload := map[string]any{"topic": r.Topic, "data": r.Data}
+	if len(r.Headers) > 0 {
+		payload["headers"] = r.Headers
+	}
+	if r.EvaluatorName != "" {
+		payload["routing"] = map[string]any{"kind": r.RoutingKind, "value": r.RoutingValue, "partition": r.Partition, "evaluator": r.EvaluatorName, "version": r.EvaluatorVersion}
+	}
+	body, err := json.Marshal(map[string]any{"event_id": r.ID, "payload": payload})
 	if err != nil {
 		return err
 	}
@@ -441,6 +569,10 @@ func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		c.cancel()
+		select {
+		case c.controlWake <- struct{}{}:
+		default:
+		}
 		c.wg.Wait()
 		c.stopFlows()
 		c.senderMu.Lock()

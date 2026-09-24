@@ -125,8 +125,8 @@ class TopicRegistry:
                 if any(overlaps(p, r) for p in patterns for r in routes)
             }
 
-    def register(self, name: str, patterns: list[str]) -> None:
-        """Same group = competing replicas; different groups = independent native queue copies."""
+    def register(self, name: str, patterns: list[str], *, now: float = 0.0) -> bool:
+        """Same group = competing replicas; return whether durable policy changed."""
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) or not 1 <= len(patterns) <= 64:
             raise ValueError("group needs a simple stable name and 1..64 subscriptions")
         patterns = sorted({validate_topic(p, subscription=True) for p in patterns})
@@ -137,7 +137,7 @@ class TopicRegistry:
                     raise ValueError(
                         "durable group subscriptions differ; use a new group or explicit migration"
                     )
-                return
+                return False
             if len(known) >= 64:
                 raise ValueError("maximum 64 managed subscriber groups reached")
             pending = self.store._conn.execute(
@@ -148,6 +148,7 @@ class TopicRegistry:
             self.store._conn.execute(
                 "INSERT INTO topic_groups(name,patterns) VALUES (?,?)", (name, json.dumps(patterns))
             )
+            return True
 
     def ready(self, groups: list[str]) -> bool:
         with self.store.transaction():
@@ -157,8 +158,14 @@ class TopicRegistry:
             }
             return bool(groups) and set(groups) <= ready
 
-    def mark_ready(self, groups: list[str]) -> None:
+    def mark_ready(self, groups: list[str]) -> bool:
         with self.store.transaction():
+            placeholders = ",".join("?" for _ in groups)
+            changed = bool(groups) and bool(self.store._conn.execute(
+                f"SELECT 1 FROM topic_groups WHERE ready=0 AND name IN ({placeholders}) LIMIT 1",
+                groups,
+            ).fetchone())
             self.store._conn.executemany(
                 "UPDATE topic_groups SET ready=1 WHERE name=?", [(name,) for name in groups]
             )
+            return changed

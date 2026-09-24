@@ -38,7 +38,14 @@ class DurableOutbox:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("""CREATE TABLE IF NOT EXISTS outbox (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL,
-            partition INTEGER NOT NULL, payload BLOB NOT NULL)""")
+            partition INTEGER NOT NULL, payload BLOB NOT NULL,
+            routing_kind TEXT, routing_value TEXT, evaluator_name TEXT, evaluator_version TEXT)""")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(outbox)")}
+        for name in (
+            "routing_kind", "routing_value", "evaluator_name", "evaluator_version"
+        ):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE outbox ADD COLUMN {name} TEXT")
         self.db.execute("CREATE TABLE IF NOT EXISTS routing_contract (value TEXT NOT NULL)")
         contract = json.dumps([router.shard, router.partitions, router.mode, "sha256-json-v1"])
         saved = self.db.execute("SELECT value FROM routing_contract").fetchone()
@@ -54,25 +61,54 @@ class DurableOutbox:
             "SELECT COALESCE(SUM(length(payload)),0), COUNT(*) FROM outbox"
         ).fetchone()
 
-    def enqueue(self, key: str, event_id: str, payload: bytes) -> None:
-        """Apply backpressure when full; never discard the oldest accepted local payment."""
+    def enqueue(
+        self,
+        key: str,
+        event_id: str,
+        payload: bytes,
+        *,
+        partition: int | None = None,
+        routing_kind: str = "key",
+        evaluator_name: str | None = None,
+        evaluator_version: str | None = None,
+    ) -> None:
+        """Persist the resolved result/partition/library once; retries never run application code."""
         if not event_id or not isinstance(payload, bytes):
             raise ValueError("event_id and bytes payload are required")
-        partition = self.router.partition_for(key)
+        if (evaluator_name is None) != (evaluator_version is None):
+            raise ValueError("routing evaluator name and version must be stored together")
+        if routing_kind not in ("key", "sha256"):
+            raise ValueError("routing kind must be key or sha256")
+        if partition is None:
+            if routing_kind != "key":
+                raise ValueError("digest routing requires an explicitly resolved partition")
+            partition = self.router.partition_for(key)
+        if not 0 <= partition < self.router.partitions:
+            raise ValueError("partition outside configured range")
+        identity = (
+            partition, payload, routing_kind, key, evaluator_name, evaluator_version
+        )
         with self.lock:
             with self.db:
                 existing = self.db.execute(
-                    "SELECT partition,payload FROM outbox WHERE event_id=?", (event_id,)
+                    "SELECT partition,payload,routing_kind,routing_value,evaluator_name,"
+                    "evaluator_version FROM outbox WHERE event_id=?", (event_id,)
                 ).fetchone()
                 if existing:
-                    if existing != (partition, payload):
-                        raise ValueError("event_id reused with different partition or payload")
+                    # Rows accepted by an older client have no stored result/library. Preserve their
+                    # original partition/payload idempotency without manufacturing metadata.
+                    if existing[2] is None:
+                        if existing[:2] != identity[:2]:
+                            raise ValueError("event_id reused with different partition or payload")
+                    elif existing != identity:
+                        raise ValueError("event_id reused with different content or routing")
                     return
                 if self.bytes_used + len(payload) > self.max_bytes or self.rows >= 100000:
                     raise BufferError("durable outbox full; apply upstream backpressure")
                 self.db.execute(
-                    "INSERT INTO outbox(event_id,partition,payload) VALUES (?,?,?)",
-                    (event_id, partition, payload),
+                    "INSERT INTO outbox(event_id,partition,payload,routing_kind,routing_value,"
+                    "evaluator_name,evaluator_version) VALUES (?,?,?,?,?,?,?)",
+                    (event_id, *identity),
                 )
             self.bytes_used += len(payload)
             self.rows += 1

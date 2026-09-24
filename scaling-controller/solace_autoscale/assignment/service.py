@@ -1,21 +1,7 @@
-"""Assignment HTTP service (§9.1). Stateless over the store.
+"""HTTP APIs for assignment and managed publisher/subscriber discovery.
 
-GET /assignment?shard=&client_id=&protocol=&mode=direct|guaranteed
-  → per-protocol endpoint map (not a single host/port), broker_id, msg_vpn, state, lease_seconds.
-
-GET /topology?shard=
-  → the current topology snapshot for a shard, in the exact wire form the event spine publishes
-    (ADR 0009). This is the shim's COLD-START fallback: on boot, or if the bus is unreachable, the
-    shim fetches the snapshot once here, then live spine events take over and win by generation.
-    Because the service is stateless over the store and does not own the generation counter, the
-    cold snapshot carries gen 0 - a floor that any real spine event (gen >= 1) supersedes.
-
-Never vends credentials - returns a location only. Health + readiness endpoints. The service is
-stateless; all durable state is in the store, so it survives restart and horizontal replication
-(with optimistic locking on placement writes).
-
-``now`` is injected via a clock function so tests are deterministic; the running server uses the
-real clock.
+The service returns broker locations and managed queue metadata, never credentials. Durable
+ownership remains in the assignment store; ``now`` is injectable for deterministic tests.
 """
 
 from __future__ import annotations
@@ -28,13 +14,12 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
 
-from ..config import AssignmentConfig, MessagingConfig, load_config
+from ..config import AssignmentConfig, ManagedEventsConfig, MessagingConfig, load_config
 from ..controller.store import ControllerStore, queue_name
 from .placement import NoBrokerAvailable, ProtocolUnavailable, assign
 from .routing import partition_for
 from .store import AssignmentStore, BrokerState
 from .topics import TopicRegistry, group_queue, topic_prefix
-from .topology import COLD_START_GEN, BrokerRef, ShardTopology
 
 DEFAULT_LEASE_SECONDS = 300
 
@@ -52,12 +37,14 @@ def create_app(
     policy: AssignmentConfig | None = None,
     fleet_id: str | None = None,
     messaging: MessagingConfig | None = None,
+    events: ManagedEventsConfig | None = None,
 ) -> FastAPI:
     policy = policy or AssignmentConfig(lease_seconds=lease_seconds)
     store.ensure_routing(policy.routing, policy.partitions)
     store.ensure_managed_namespace(fleet_id)
     migrations = ControllerStore(store)
     messaging = messaging or MessagingConfig()
+    events = events or ManagedEventsConfig()
     registry = TopicRegistry(store)
     registry.contract(messaging.routing_contract())
     if messaging.enabled:
@@ -184,34 +171,10 @@ def create_app(
             "queue_name": (
                 queue_name(fleet_id, shard, partition_id) if fleet_id and partition_id is not None else None
             ),
+            "revision": migrations.revision(),
         }
         response.headers["Cache-Control"] = "no-store"
         return body
-
-    @app.get("/topology")  # type: ignore[untyped-decorator, unused-ignore]
-    def topology(shard: str = Query(...), authorization: str | None = Header(default=None)) -> dict:
-        """Cold-start snapshot for a shard, in the spine's wire form (ADR 0009).
-
-        Carries gen 0 (COLD_START_GEN): a floor the live event spine supersedes. Includes every
-        broker on the shard with its state, so the shim can compute ownership (ACTIVE brokers only)
-        exactly as it would from a spine event. No handoffs - the service does not track in-flight
-        cutovers; those come only from the generation-owning spine.
-        """
-        if api_key and not secrets.compare_digest(authorization or "", f"Bearer {api_key}"):
-            raise HTTPException(status_code=401, detail="assignment authorization required")
-        if messaging.enabled:
-            raise HTTPException(
-                status_code=409,
-                detail="managed topic ownership requires /assignment and /partitions; "
-                       "topology hashing cannot bypass queue migration",
-            )
-        brokers = store.brokers_for_shard(shard)
-        topo = ShardTopology(
-            shard=shard,
-            gen=COLD_START_GEN,
-            brokers=tuple(BrokerRef.from_broker(b) for b in brokers),
-        )
-        return topo.to_event(emitted_at=datetime.fromtimestamp(clock(), UTC).isoformat())
 
     @app.get("/partitions")  # type: ignore[untyped-decorator, unused-ignore]
     def partitions(
@@ -226,8 +189,8 @@ def create_app(
             raise HTTPException(status_code=400, detail="managed partition discovery is not configured")
         if messaging.enabled and group not in registry.groups():
             raise HTTPException(status_code=400, detail="register a durable subscriber group first")
-        if messaging.enabled and group not in registry.groups(shard):
-            return {"partitions": []}
+        if messaging.enabled and group is not None and group not in registry.groups(shard):
+            return {"partitions": [], "revision": migrations.revision()}
         records = []
         for partition_id in range(policy.partitions):
             placement = store.get_placement(shard, f"partition:{partition_id}")
@@ -257,7 +220,7 @@ def create_app(
                     "locations": locations,
                 }
             )
-        return {"partitions": records}
+        return {"partitions": records, "revision": migrations.revision()}
 
     def authorize_messaging(authorization: str | None) -> None:
         if api_key and not secrets.compare_digest(authorization or "", f"Bearer {api_key}"):
@@ -269,12 +232,23 @@ def create_app(
     def messaging_config(authorization: str | None = Header(default=None)) -> dict:
         authorize_messaging(authorization)
         groups = registry.groups()
+        event_broker = store.get_broker(events.broker_id) if events.enabled and events.broker_id else None
         return {
             "routes": [r.routing_contract() for r in messaging.routes],
             "partitions": policy.partitions,
             "groups": groups,
             "ready_groups": [g for g in groups if registry.ready([g])],
             "fleet_id": fleet_id,
+            "revision": migrations.revision(),
+            "events": {
+                "enabled": events.enabled,
+                "broker_id": events.broker_id,
+                "endpoints": event_broker.endpoints if event_broker else {},
+                "msg_vpn": event_broker.msg_vpn if event_broker else None,
+                "topic": events.topic or (
+                    f"_autoscale/managed/{fleet_id}/changed" if fleet_id else None
+                ),
+            },
         }
 
     @app.post("/messaging/subscriptions")  # type: ignore[untyped-decorator, unused-ignore]
@@ -290,7 +264,10 @@ def create_app(
         if not messaging.allow_dynamic_groups and group not in {g.group for g in messaging.subscriptions}:
             raise HTTPException(status_code=403, detail="subscription group must be declared in YAML")
         try:
-            registry.register(group, patterns)
+            with store.transaction():
+                changed = registry.register(group, patterns)
+                if changed:
+                    migrations.signal(clock(), "subscription-registered")
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
@@ -321,6 +298,7 @@ def run_server(config_path: str, host: str = "127.0.0.1", port: int = 8099) -> N
         policy=cfg.assignment,
         fleet_id=cfg.automation.fleet_id if cfg.automation.enabled else None,
         messaging=cfg.messaging,
+        events=cfg.automation.events,
     )
     try:
         uvicorn.run(app, host=host, port=port)

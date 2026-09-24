@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "solace-autoscale"
 version = "0.1.0"
-description = "Recommends and (optionally) scales a fleet of Solace Cloud brokers to match a workload. Community project, not a supported product."
-readme = "README.md"  # scaling-controller/README.md (repo-root README covers both products)
+description = "Managed-partition controller and Python publisher/subscriber client for existing Solace brokers. Community project, not a supported product."
+readme = { text = "Solace managed-partition controller and Python publisher/subscriber client.", content-type = "text/plain" }
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "solace-autoscale contributors" }]
@@ -63,8 +63,7 @@ pythonpath = ["."]
 markers = [
   "integration: requires a live broker (deselect with -m 'not integration')",
 ]
-# A contributor's first bare `pytest` must not go red on integration tests that need a live broker
-# and optional protocol clients. CI opts back in with `-m integration` (see the integration job).
+# Bare pytest excludes tests that require separately managed live brokers and protocol clients.
 addopts = '-ra -m "not integration"'
 
 [tool.ruff]

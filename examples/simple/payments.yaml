@@ -1,7 +1,0 @@
-version: 1
-connection: connection.yaml
-workloads:
-  payments:
-    topic: payments/{account}/{event}
-    keep_together: account
-    subscribers: [ledger, audit]

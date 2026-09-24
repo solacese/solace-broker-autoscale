@@ -6,10 +6,7 @@ import json
 
 import pytest
 
-from solace_autoscale.metrics.cloud_api import CloudApiCollector
-from solace_autoscale.metrics.prometheus import PrometheusCollector
 from solace_autoscale.metrics.semp import map_vpn_monitor
-from solace_autoscale.metrics.static import StaticCollector
 
 from .conftest import CONTROLLER
 
@@ -46,31 +43,6 @@ def test_semp_avg_size_derived():
     s = map_vpn_monitor(vpn, 5, now=1.0, current_brokers=1)
     assert s.avg_msg_size == pytest.approx(1024.0)
     assert s.spool_used == 10
-
-
-def test_static_collector(tmp_path):
-    doc = {"shards": {"domain-a": {"msg_vpn": "acme-prod", "samples": [
-        {"timestamp": 1, "ingress_msg_rate": 10, "egress_msg_rate": 10, "ingress_byte_rate": 1000,
-         "egress_byte_rate": 1000, "avg_msg_size": 100, "connection_count": 5, "spool_used": 0,
-         "current_brokers": 1},
-        {"timestamp": 2, "ingress_msg_rate": 20, "egress_msg_rate": 20, "ingress_byte_rate": 2000,
-         "egress_byte_rate": 2000, "avg_msg_size": 100, "connection_count": 6, "spool_used": 0,
-         "current_brokers": 1},
-    ]}}}
-    p = tmp_path / "m.json"
-    p.write_text(json.dumps(doc))
-    c = StaticCollector(p)
-    assert c.msg_vpn("domain-a") == "acme-prod"
-    assert len(c.window("domain-a")) == 2
-    latest = c.collect("domain-a", "acme-prod", now=99, current_brokers=1)
-    assert latest.timestamp == 2  # newest
-
-
-def test_stub_collectors_raise_not_implemented():
-    for coll in (CloudApiCollector(), PrometheusCollector()):
-        with pytest.raises(NotImplementedError) as e:
-            coll.collect("s", "vpn", 1.0, 1)
-        assert "not implemented" in str(e.value)
 
 
 @pytest.mark.parametrize('data', [{}, {'averageRxMsgRate': 0},

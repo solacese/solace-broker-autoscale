@@ -89,95 +89,6 @@ class WorkloadConfig(_Base):
     bottleneck: Literal["auto", "bytes", "messages", "spool", "connections"] = "auto"
 
 
-class ProtocolSpec(_Base):
-    enabled: bool = False
-    port: int | None = None  # read from broker config; not hardcoded
-
-
-class ProtocolsConfig(_Base):
-    smf: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=True))
-    amqp: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=True))
-    mqtt: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=False))
-    rest: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=True))
-    jms: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=False))
-    web: ProtocolSpec = Field(default_factory=lambda: ProtocolSpec(enabled=False))
-
-    def enabled_protocols(self) -> list[str]:
-        return [name for name in ("smf", "amqp", "mqtt", "rest", "jms", "web")
-                if getattr(self, name).enabled]
-
-
-class DnsConfig(_Base):
-    enabled: bool = False
-    zone: str = "brokers.example.com"
-    ttl: float = Field(default=30.0, gt=0)
-
-    @field_validator("ttl", mode="before")
-    @classmethod
-    def _ttl(cls, v: Any) -> float:
-        return parse_duration(v)
-
-
-class IntegrationConfig(_Base):
-    dns: DnsConfig = Field(default_factory=DnsConfig)
-
-
-# ---- smart SHIM: rule-based dispatch (topic + payload -> broker + partition key) -------------
-
-class PayloadPredicateSpec(_Base):
-    path: str = ""  # dotted JSON path; ignored for raw_* operators
-    op: str
-    value: Any = None
-
-
-class MatchSpec(_Base):
-    topic: str = ">"
-    payload: list[PayloadPredicateSpec] = Field(default_factory=list)
-
-
-class RouteSpec(_Base):
-    broker: str
-    key: str | None = None    # partition/group-key template, e.g. "vip.{order.region}"
-    topic: str | None = None  # optional publish-address rewrite template, e.g. "vip/{topic}"
-
-
-class DispatchRuleSpec(_Base):
-    name: str
-    when: MatchSpec = Field(default_factory=MatchSpec)
-    route: RouteSpec
-
-
-class DispatchConfig(_Base):
-    """Rule-based dispatch for the smart SHIM. First matching rule wins; else ``default_broker``.
-
-    Deliberately not round-robin: the same message always routes the same way, so per-key ordering
-    holds and the listener SHIM can demultiplex a coherent stream.
-    """
-
-    enabled: bool = False
-    default_broker: str | None = None
-    rules: list[DispatchRuleSpec] = Field(default_factory=list)
-
-
-# ---- broker config replication ---------------------------------------------------------------
-
-class ConfigSyncConfig(_Base):
-    """Replicate the config slice (queues, subscriptions, endpoints, profiles) across the fleet.
-
-    Pick a ``source_of_truth`` broker; every other broker is reconciled to match it. Re-runnable, so
-    an edit made on the source propagates. ``mode: additive`` (default) never deletes target-local
-    objects; ``mirror`` makes targets identical to the source.
-    """
-
-    enabled: bool = False
-    source_of_truth: str | None = None  # broker_id; None → chosen deterministically at runtime
-    mode: Literal["additive", "mirror"] = "additive"
-    objects: list[str] = Field(
-        default_factory=lambda: ["queue", "queueSubscription", "topicEndpoint",
-                                 "clientProfile", "aclProfile"]
-    )
-
-
 class MetricsConfig(_Base):
     source: Literal["prometheus", "cloud-api", "semp", "static"] = "prometheus"
     scrape_interval: float = Field(default=30.0, gt=0)
@@ -318,12 +229,48 @@ class ShardScalingPolicy(_Base):
         return None if value is None else parse_duration(value)
 
 
+class ManagedEventsConfig(_Base):
+    """Optional Solace control hints; SQLite and HTTP remain authoritative."""
+
+    enabled: bool = False
+    broker_id: str | None = None
+    topic: str | None = None
+    client_username: str = "autoscale-app"
+    password_env: str = "SOLACE_AUTOSCALE_CLIENT_PASSWORD"
+    native_topics: list[str] = Field(
+        default_factory=lambda: ["#LOG/*/VPN/>", "#LOG/*/CLIENT/>"] , max_length=16
+    )
+    coalesce_window: float = Field(default=0.25, ge=0, le=5)
+    publish_retry: float = Field(default=1, gt=0, le=60)
+    operation_timeout: float = Field(default=5, gt=0, le=30)
+
+    @field_validator("coalesce_window", "publish_retry", "operation_timeout", mode="before")
+    @classmethod
+    def durations(cls, value: Any) -> float:
+        return parse_duration(value)
+
+    @model_validator(mode="after")
+    def valid_transport(self) -> ManagedEventsConfig:
+        if self.enabled and not self.broker_id:
+            raise ValueError("automation.events.enabled requires broker_id")
+        if self.topic is not None:
+            from .assignment.topics import validate_topic
+
+            validate_topic(self.topic)
+        if any(not value.startswith("#LOG/") or "\x00" in value for value in self.native_topics):
+            raise ValueError("native event subscriptions must use #LOG/ topics")
+        if not self.client_username or not self.password_env:
+            raise ValueError("managed event credentials require username and password environment name")
+        return self
+
+
 class AutomationConfig(_Base):
     """Unattended managed-partition controller; opt in with explicit namespace and inventory."""
 
     enabled: bool = False
     fleet_id: str = Field(default="payments", pattern=r"^[a-z0-9][a-z0-9-]{2,40}$")
     poll_interval: float = Field(default=10, gt=0)
+    events: ManagedEventsConfig = Field(default_factory=ManagedEventsConfig)
     migration_grace: float = Field(default=30, ge=0)
     empty_settle: float = Field(default=10, gt=0)
     migration_timeout: float = Field(default=900, gt=0)
@@ -379,28 +326,51 @@ class ProvisioningConfig(_Base):
         return self
 
 
+class RoutingEvaluatorSpec(_Base):
+    """Exact identity and result type of trusted code registered by each application."""
+
+    name: str
+    version: str
+    result: Literal["key", "sha256"] = "key"
+
+    @field_validator("name", "version")
+    @classmethod
+    def bounded_identity(cls, value: str, info: Any) -> str:
+        limit = 128 if info.field_name == "name" else 64
+        if not 1 <= len(value.encode("utf-8")) <= limit or "\x00" in value:
+            raise ValueError(f"routing evaluator {info.field_name} must be 1-{limit} UTF-8 bytes without NUL")
+        return value
+
+
 class TopicRoute(_Base):
     pattern: str
     shard: str = Field(min_length=1, max_length=512)
     dispatch: Literal["by-key", "by-topic", "single"] = "by-key"
     key_levels: list[int] = Field(default_factory=list, max_length=32)
+    key_evaluator: RoutingEvaluatorSpec | None = None
 
     @model_validator(mode="after")
     def valid_rule(self) -> TopicRoute:
         from .assignment.topics import validate_topic
         validate_topic(self.pattern, subscription=True)
-        if (self.dispatch == "by-key") != bool(self.key_levels):
+        if self.key_evaluator is not None:
+            if self.dispatch != "by-key" or self.key_levels:
+                raise ValueError("key_evaluator replaces key_levels and requires by-key dispatch")
+        elif (self.dispatch == "by-key") != bool(self.key_levels):
             raise ValueError("key_levels is required only for by-key dispatch")
         if any(i < 0 or i >= len(self.pattern.split('/')) for i in self.key_levels):
             raise ValueError("key_levels must name zero-based levels in the topic pattern")
         return self
 
-
     def routing_contract(self) -> dict:
-        """Keep the original by-key wire contract stable for existing publisher state."""
-        value = {"pattern": self.pattern, "shard": self.shard, "key_levels": self.key_levels}
+        """Keep absent evaluator defaults out of the original durable wire contract."""
+        value: dict[str, Any] = {
+            "pattern": self.pattern, "shard": self.shard, "key_levels": self.key_levels
+        }
         if self.dispatch != "by-key":
             value["dispatch"] = self.dispatch
+        if self.key_evaluator is not None:
+            value["key_evaluator"] = self.key_evaluator.model_dump(mode="json")
         return value
 
 
@@ -438,27 +408,17 @@ class MessagingConfig(_Base):
         return {"enabled": self.enabled, "routes": [r.routing_contract() for r in self.routes]}
 
 
-class AccuracyConfig(_Base):
-    record: bool = True
-    store: str = "./accuracy.db"
-
-
 class Config(_Base):
     inventory: str | None = None
     fleet: FleetConfig = Field(default_factory=FleetConfig)
     topology: TopologyConfig = Field(default_factory=TopologyConfig)
     workload: WorkloadConfig = Field(default_factory=WorkloadConfig)
-    protocols: ProtocolsConfig = Field(default_factory=ProtocolsConfig)
-    integration: IntegrationConfig = Field(default_factory=IntegrationConfig)
-    dispatch: DispatchConfig = Field(default_factory=DispatchConfig)
-    configsync: ConfigSyncConfig = Field(default_factory=ConfigSyncConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     billing: BillingConfig = Field(default_factory=BillingConfig)
     actuation: ActuationConfig = Field(default_factory=ActuationConfig)
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     capacity: CapacityConfigBlock = Field(default_factory=CapacityConfigBlock)
-    accuracy: AccuracyConfig = Field(default_factory=AccuracyConfig)
     assignment: AssignmentConfig = Field(default_factory=AssignmentConfig)
     automation: AutomationConfig = Field(default_factory=AutomationConfig)
     provisioning: ProvisioningConfig = Field(default_factory=ProvisioningConfig)

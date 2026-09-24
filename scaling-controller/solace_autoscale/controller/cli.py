@@ -17,11 +17,20 @@ from ..assignment.store import AssignmentStore
 from ..capacity.model import load_model
 from ..config import load_config
 from ..metrics.fleet import load_inventory
+from .events import ManagedControlBus, ReconcileSchedule
 from .features import contract_digest, feature_contract, placement_contract
 from .provisioning import CloudProvisioner
 from .runtime import Controller
 from .semp import QueueManager
 from .store import ControllerStore
+
+
+def _wait_for_reconcile(event_bus: ManagedControlBus | None, timeout: float) -> bool:
+    """Block until the deadline even when optional events are disabled."""
+    if event_bus is not None:
+        return event_bus.wait(timeout)
+    time.sleep(timeout)
+    return False
 
 
 @click.command("adopt-feature-contract")
@@ -101,6 +110,28 @@ def run_controller(config_path: Path, inventory_path: Path | None, once: bool) -
         )
         try:
             controller = Controller(cfg, model, inventory, store, queues)
+            event_bus = None
+            if cfg.automation.events.enabled and not once:
+                event_credentials = {}
+                for endpoint in scaling_brokers:
+                    password = os.environ.get(cfg.automation.events.password_env)
+                    if not password:
+                        raise click.ClickException(
+                            f"missing managed event credential variable "
+                            f"{cfg.automation.events.password_env}"
+                        )
+                    event_credentials[endpoint.broker_id] = (
+                        cfg.automation.events.client_username,
+                        password,
+                    )
+                event_bus = ManagedControlBus(
+                    cfg.automation.fleet_id,
+                    cfg.automation.events,
+                    scaling_brokers,
+                    event_credentials,
+                    controller.store,
+                    sample_due=queues.request_refresh,
+                )
             cloud = None
             provisioner = None
             if cfg.provisioning.enabled:
@@ -112,7 +143,15 @@ def run_controller(config_path: Path, inventory_path: Path | None, once: bool) -
                 cloud = SolaceCloudClient(token, base_url=cfg.provisioning.api_base_url)
                 provisioner = CloudProvisioner(controller, cloud, AuditLog(path.with_suffix(".audit.jsonl")))
             initialized = False
+            schedule = ReconcileSchedule.start(cfg.automation.poll_interval, time.monotonic())
+            event_wakeup = False
             while True:
+                monotonic_now = time.monotonic()
+                if not once and not schedule.should_run(monotonic_now, event_wakeup):
+                    timeout = schedule.due_in(monotonic_now)
+                    event_wakeup = _wait_for_reconcile(event_bus, timeout)
+                    continue
+                event_wakeup = False
                 start = time.time()
                 try:
                     if not initialized:
@@ -135,10 +174,11 @@ def run_controller(config_path: Path, inventory_path: Path | None, once: bool) -
                     )
                 if once:
                     break
-                time.sleep(max(0, cfg.automation.poll_interval - (time.time() - start)))
         except (ValueError, KeyError) as exc:
             raise click.ClickException(str(exc)) from exc
         finally:
+            if "event_bus" in locals() and event_bus is not None:
+                event_bus.close()
             if "cloud" in locals() and cloud is not None:
                 cloud.close()
             queues.close()

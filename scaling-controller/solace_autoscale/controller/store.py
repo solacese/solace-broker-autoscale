@@ -53,14 +53,69 @@ class ControllerStore:
             assignments._conn.execute("""CREATE TABLE IF NOT EXISTS managed_partitions (
                 shard TEXT NOT NULL, partition INTEGER NOT NULL, ready INTEGER NOT NULL,
                 PRIMARY KEY (shard,partition))""")
+            assignments._conn.execute("""CREATE TABLE IF NOT EXISTS managed_control_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL)""")
+            assignments._conn.execute(
+                "INSERT OR IGNORE INTO managed_control_state VALUES (1,0)"
+            )
+            assignments._conn.execute("""CREATE TABLE IF NOT EXISTS managed_control_outbox (
+                revision INTEGER PRIMARY KEY, created_at REAL NOT NULL, kind TEXT NOT NULL)""")
 
-    def mark_partition_ready(self, shard: str, partition: int) -> None:
+    def _signal(self, now: float, kind: str) -> int:
+        """Advance the authoritative revision and enqueue its hint in the current transaction."""
+        self.assignments._conn.execute(
+            "UPDATE managed_control_state SET revision=revision+1 WHERE singleton=1"
+        )
+        revision = int(self.assignments._conn.execute(
+            "SELECT revision FROM managed_control_state WHERE singleton=1"
+        ).fetchone()[0])
+        # Hints are level-triggered: one latest revision is enough, and bounds storage while disabled.
+        self.assignments._conn.execute("DELETE FROM managed_control_outbox")
+        self.assignments._conn.execute(
+            "INSERT INTO managed_control_outbox(revision,created_at,kind) VALUES (?,?,?)",
+            (revision, now, kind),
+        )
+        return revision
+
+    def signal(self, now: float, kind: str) -> int:
         with self.assignments.transaction():
+            return self._signal(now, kind)
+
+    def revision(self) -> int:
+        with self.assignments.transaction():
+            return int(self.assignments._conn.execute(
+                "SELECT revision FROM managed_control_state WHERE singleton=1"
+            ).fetchone()[0])
+
+    def pending_notifications(self, limit: int = 128) -> list[tuple[int, float, str]]:
+        if not 1 <= limit <= 1024:
+            raise ValueError("notification batch limit must be 1..1024")
+        with self.assignments.transaction():
+            rows = self.assignments._conn.execute(
+                "SELECT revision,created_at,kind FROM managed_control_outbox "
+                "ORDER BY revision LIMIT ?", (limit,)
+            ).fetchall()
+            return [(int(row["revision"]), float(row["created_at"]), row["kind"]) for row in rows]
+
+    def notification_published(self, revision: int) -> None:
+        with self.assignments.transaction():
+            self.assignments._conn.execute(
+                "DELETE FROM managed_control_outbox WHERE revision<=?", (revision,)
+            )
+
+    def mark_partition_ready(self, shard: str, partition: int, now: float | None = None) -> None:
+        with self.assignments.transaction():
+            previous = self.assignments._conn.execute(
+                "SELECT ready FROM managed_partitions WHERE shard=? AND partition=?",
+                (shard, partition),
+            ).fetchone()
             self.assignments._conn.execute(
                 "INSERT INTO managed_partitions VALUES (?,?,1) "
                 "ON CONFLICT(shard,partition) DO UPDATE SET ready=1",
                 (shard, partition),
             )
+            if not previous or not previous["ready"]:
+                self._signal(0.0 if now is None else now, "partition-ready")
 
     def partition_ready(self, shard: str, partition: int) -> bool:
         with self.assignments.transaction():
@@ -124,6 +179,7 @@ class ControllerStore:
             if explanation:
                 detail["planner"] = explanation
             self.event(now, "migration-planned", detail, m.id)
+            self._signal(now, "migration-planned")
             return m
 
     def pending(self) -> list[Migration]:
@@ -179,6 +235,7 @@ class ControllerStore:
                         if planned.get("activated_warm") and not unrelated:
                             self.assignments.set_broker_state(m.target, target.state.WARM)
                 self.event(now, "transition", {"from": m.phase, "to": phase, "detail": detail}, m.id)
+                self._signal(now, "migration-transition")
 
     def commit_owner(self, m: Migration, now: float) -> None:
         """CAS the owner and migration phase together; ingress remains fenced until activation."""

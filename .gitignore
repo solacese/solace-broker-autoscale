@@ -13,10 +13,6 @@ venv/
 .coverage
 htmlcov/
 
-# Accuracy store - customer data, never commit (section 7, 12)
-accuracy.db
-*.accuracy.db
-
 # Compiled capacity models built from REAL customer data must never be committed.
 # The synthetic placeholder model (models/synthetic-v0.json) IS committed on purpose.
 models/*.json
@@ -57,5 +53,6 @@ OneDrive_*/
 *.ledger.db*
 assignment.db-*
 
-# Local manager demo binaries, traces and durable payment state
+# Local controller and managed-client state
+.state/
 state/

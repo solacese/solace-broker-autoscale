@@ -194,7 +194,8 @@ class AssignmentStore:
         current_shards = contract.get("shards", {})
         unchanged = (
             all(previous.get(key) == contract.get(key) for key in (
-                "schema", "bundle_scope", "cross_partition_transactions", "deployment_mode"
+                "schema", "bundle_scope", "cross_partition_transactions", "deployment_mode",
+                "routing_libraries",
             ))
             and isinstance(prior_shards, dict)
             and isinstance(current_shards, dict)

@@ -298,10 +298,12 @@ class Controller:
                     {"broker": placement.broker.broker_id, "shard": shard, "partition": partition},
                 )
                 self.queues.prepare(placement.broker.broker_id, shard, partition, enabled=True)
-                self.store.mark_partition_ready(shard, partition)
+                self.store.mark_partition_ready(shard, partition, now)
 
         if self.config.messaging.enabled and not pending:
-            self.topics.mark_ready(list(groups))
+            with self.assignments.transaction():
+                if self.topics.mark_ready(list(groups)):
+                    self.store.signal(now, "subscription-ready")
             self._prepared_groups = groups
 
     def _copy_factor(self, shard: str) -> tuple[int, bool]:
@@ -328,6 +330,9 @@ class Controller:
 
     def tick(self, now: float) -> ControlResult:
         """Advance durable work first; plan from complete fresh deltas only when no move is pending."""
+        refresh = getattr(self.queues, "refresh_requested", None)
+        if refresh is not None:
+            refresh.clear()
         if Path(self.config.actuation.kill_switch_file).exists():
             return ControlResult("halted", "kill switch present", len(self.store.pending()))
         pending = self.store.pending()

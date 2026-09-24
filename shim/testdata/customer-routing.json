@@ -1,0 +1,34 @@
+[
+  {
+    "name": "ascii-key",
+    "shard": "orders",
+    "result": "key",
+    "value": "acme:order-42",
+    "partition128": 48
+  },
+  {
+    "name": "unicode-key",
+    "shard": "orders",
+    "result": "key",
+    "value": "租户:注文-42",
+    "partition128": 63
+  },
+  {
+    "name": "ascii-digest",
+    "shard": "orders",
+    "result": "sha256",
+    "tenant": "acme",
+    "order_id": "order-42",
+    "value": "42bd4c195759e49e514ff6a56ac03869af666b9504738ca512bb5c9d1d0c2a56",
+    "partition128": 86
+  },
+  {
+    "name": "unicode-digest",
+    "shard": "orders",
+    "result": "sha256",
+    "tenant": "租户",
+    "order_id": "注文-42",
+    "value": "a55d1ffff21641e445b019940cdf3a8d1bb6c2a28f877a3c7ea92a834261af47",
+    "partition128": 71
+  }
+]

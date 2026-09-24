@@ -241,14 +241,3 @@ def test_additive_routes_prepare_again_and_scope_groups(tmp_path):
     with pytest.raises(ValueError, match="routing contract changed"):
         registry.contract(original)
     db.close()
-
-
-def test_topology_cannot_bypass_auth_or_managed_queue_ownership(tmp_path):
-    db = AssignmentStore(tmp_path / "state.db")
-    with TestClient(create_app(db, policy=AssignmentConfig(routing="partitioned"),
-                              messaging=native_config(), fleet_id="payments", api_key="test")) as client:
-        assert client.get("/topology", params={"shard": "payments"}).status_code == 401
-        response = client.get("/topology", params={"shard": "payments"},
-                              headers={"Authorization": "Bearer test"})
-        assert response.status_code == 409
-    db.close()

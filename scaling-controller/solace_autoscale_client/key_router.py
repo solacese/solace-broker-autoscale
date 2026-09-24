@@ -24,6 +24,7 @@ class KeyRouter:
     mode: str = "guaranteed"
     protocol: str = "smf"
     _assignments: dict[int, Assignment] = field(default_factory=dict, repr=False)
+    required_revision: int = field(default=0, repr=False)
 
     def partition_for(self, key: str) -> int:
         """sha256-json-v1; kept identical to the assignment server for cross-client stability."""
@@ -41,12 +42,18 @@ class KeyRouter:
         if not 0 <= partition < self.partitions:
             raise ValueError("partition outside configured range")
         cached = self._assignments.get(partition)
-        if (not refresh and cached is not None and self.resolver._usable(cached)
+        if (not refresh and cached is not None and cached.revision >= self.required_revision
+                and self.resolver._usable(cached)
                 and self.resolver._clock() < cached.fetched_at + cached.lease_seconds):
             return cached
         result = self.resolver.resolve(self.shard, self.client_id, self.mode, self.protocol,
                                        partition=partition)
+        if self.resolver._clock() >= result.fetched_at + result.lease_seconds:
+            raise ResolverError("managed assignment lease expired before authoritative refresh")
+        if result.revision < self.required_revision:
+            raise ResolverError("controller returned a stale managed revision")
         if result.partition_id != partition or result.partition_count != self.partitions:
             raise ResolverError("client/server partition contract differs; refusing to route")
         self._assignments[partition] = result
+        self.required_revision = max(self.required_revision, result.revision)
         return result

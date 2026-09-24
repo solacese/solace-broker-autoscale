@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
+from threading import Event
 from typing import Any
 from urllib.parse import quote
 
@@ -53,7 +54,12 @@ class QueueManager:
         self.registry: TopicRegistry | None = None
         self.client_username = "autoscale-app"
         self._native_configured: set[str] = set()
+        self.refresh_requested = Event()
         self.client = httpx.Client(timeout=10, verify=True)
+
+    def request_refresh(self) -> None:
+        """Coalesce broker-event wakeups; SEMP remains the source of observations."""
+        self.refresh_requested.set()
 
     @staticmethod
     def _already_exists(response: httpx.Response) -> bool:

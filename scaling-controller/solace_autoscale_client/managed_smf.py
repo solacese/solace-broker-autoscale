@@ -142,6 +142,35 @@ class SmfConnections:
             result.set_exception(exc)
         return result
 
+    def discard(self, broker: str) -> None:
+        """Drop a failed cached service so reconnect creates a fresh session."""
+        with self.lock:
+            service = self.services.pop(broker, None)
+            publishers = [self.publishers.pop(broker, None), self.async_publishers.pop(broker, None)]
+        for publisher in publishers:
+            if publisher is not None:
+                try:
+                    publisher.terminate(grace_period=0)
+                except Exception:
+                    pass
+        if service is not None:
+            try:
+                service.disconnect()
+            except Exception:
+                pass
+
+    def direct_receiver(self, location: dict, topic: str) -> Any:
+        from solace.messaging.resources.topic_subscription import TopicSubscription
+
+        receiver = (
+            self.service(location)
+            .create_direct_message_receiver_builder()
+            .with_subscriptions([TopicSubscription.of(topic)])
+            .build()
+        )
+        receiver.start()
+        return receiver
+
     def close(self) -> None:
         """Close publishers and connections after consumer workers have stopped."""
         self.consumers.shutdown(wait=True, cancel_futures=True)

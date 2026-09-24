@@ -1,23 +1,10 @@
-// Package dispatch is the data path of the smart shim: it wraps the application's own messaging
-// client rather than proxying it. A PublisherShim applies the rule engine per message to pick a
-// target broker, partition key, and address, then hands the message to a Transport for that broker.
-// A ListenerShim subscribes across every broker the rules can target and re-runs the same rules so a
-// consumer sees a coherent per-key stream.
-//
-// The Transport interface is the seam between the shim logic and the wire. The real implementation
-// (transport/amqp) speaks AMQP 1.0; an in-memory implementation (transport/memory) lets the whole
-// shim be tested offline. The shim stamps the partition key as the AMQP group-id and also as a
-// "saas_partition_key" application property, so brokers and listeners can both read it.
+// Package dispatch defines the transport seam used by the managed Go messaging client.
+// The AMQP implementation lives in transport/amqp; applications may inject a test transport.
 package dispatch
 
 import "context"
 
-// PartitionKeyProperty is the application-property name the shim stamps with the partition key, in
-// addition to the AMQP group-id. Listeners read it back to demultiplex per-key streams.
-const PartitionKeyProperty = "saas_partition_key"
-
-// Message is one message crossing the shim. Properties carries application properties; the shim adds
-// the partition key under PartitionKeyProperty and sets GroupID from the same value.
+// Message is one message sent or received by the managed client transport.
 type Message struct {
 	Address    string            // topic / address to publish to
 	Body       []byte            // opaque payload

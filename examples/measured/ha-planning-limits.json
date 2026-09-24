@@ -1,8 +1,0 @@
-{
-  "enterprise-250": {"service_class_id": "ENTERPRISE_250_HIGHAVAILABILITY", "connections_max": 250, "spool_bytes_max": 50000000000},
-  "enterprise-1k": {"service_class_id": "ENTERPRISE_1K_HIGHAVAILABILITY", "connections_max": 1000, "spool_bytes_max": 200000000000},
-  "enterprise-5k": {"service_class_id": "ENTERPRISE_5K_HIGHAVAILABILITY", "connections_max": 5000, "spool_bytes_max": 400000000000},
-  "enterprise-10k": {"service_class_id": "ENTERPRISE_10K_HIGHAVAILABILITY", "connections_max": 10000, "spool_bytes_max": 600000000000},
-  "enterprise-50k": {"service_class_id": "ENTERPRISE_50K_HIGHAVAILABILITY", "connections_max": 50000, "spool_bytes_max": 800000000000},
-  "enterprise-100k": {"service_class_id": "ENTERPRISE_100K_HIGHAVAILABILITY", "connections_max": 100000, "spool_bytes_max": 1000000000000}
-}

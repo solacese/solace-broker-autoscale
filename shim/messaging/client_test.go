@@ -251,27 +251,35 @@ func TestPythonRoutingGoldenVectors(t *testing.T) {
 }
 
 type flowTransport struct {
-	messages  chan dispatch.Message
-	dials     atomic.Int32
-	failFirst atomic.Bool
+	messages      chan dispatch.Message
+	eventMessages chan dispatch.Message
+	dials         atomic.Int32
+	failFirst     atomic.Bool
 }
 
 func (t *flowTransport) Sender(context.Context, string) (dispatch.Sender, error) {
 	return nil, errors.New("unused")
 }
-func (t *flowTransport) Receiver(context.Context, string, string) (dispatch.Receiver, error) {
+func (t *flowTransport) Receiver(_ context.Context, _ string, source string) (dispatch.Receiver, error) {
 	t.dials.Add(1)
-	return &fakeReceiver{transport: t}, nil
+	messages := t.messages
+	if source == "topic://_autoscale/managed/test/changed" {
+		messages = t.eventMessages
+	}
+	return &fakeReceiver{transport: t, messages: messages}, nil
 }
 
-type fakeReceiver struct{ transport *flowTransport }
+type fakeReceiver struct {
+	transport *flowTransport
+	messages  chan dispatch.Message
+}
 
 func (r *fakeReceiver) Receive(ctx context.Context) (dispatch.Message, error) {
 	if r.transport.failFirst.CompareAndSwap(true, false) {
 		return dispatch.Message{}, errors.New("link disconnected")
 	}
 	select {
-	case m := <-r.transport.messages:
+	case m := <-r.messages:
 		return m, nil
 	case <-ctx.Done():
 		return dispatch.Message{}, ctx.Err()
@@ -355,6 +363,119 @@ func (t *uncertainTransport) Send(ctx context.Context, m dispatch.Message) error
 	}
 	return nil
 }
+func TestManagedHintsWakeTrustedRefreshAndIgnorePayloadRevision(t *testing.T) {
+	var revision atomic.Uint64
+	revision.Store(1)
+	var requests atomic.Int32
+	var attempts atomic.Int32
+	var failHTTP atomic.Bool
+	var owner atomic.Value
+	owner.Store("a")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if failHTTP.Load() {
+			w.WriteHeader(503)
+			return
+		}
+		switch r.URL.Path {
+		case "/messaging/config":
+			requests.Add(1)
+			cfg := testConfig()
+			cfg.Revision = revision.Load()
+			cfg.Events = eventConfig{Enabled: true, Broker: "control", VPN: "vpn", Topic: "_autoscale/managed/test/changed", Endpoints: map[string]string{"amqp": "amqp://control:5672"}}
+			json.NewEncoder(w).Encode(cfg)
+		case "/assignment":
+			var p int
+			json.Unmarshal([]byte(r.URL.Query().Get("partition")), &p)
+			json.NewEncoder(w).Encode(assignment{Broker: owner.Load().(string), Prefix: owner.Load().(string) + "/", Partition: p, Count: 8, Lease: 60, Revision: revision.Load(), Endpoints: map[string]string{"amqp": "amqp://data:5672"}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	tr := &flowTransport{messages: make(chan dispatch.Message), eventMessages: make(chan dispatch.Message, 16)}
+	c, err := Open(context.Background(), Options{ControllerURL: server.URL, OutboxPath: filepath.Join(t.TempDir(), "events.db"), Credentials: func(string) (string, string, error) { return "u", "p", nil }, Transport: tr, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	wait(t, func() bool { return tr.dials.Load() >= 1 })
+	for _, body := range []string{`{"revision":999999}`, `{"revision":0}`, `not-json`} {
+		tr.eventMessages <- dispatch.Message{Body: []byte(body)}
+	}
+	wait(t, func() bool { return requests.Load() >= 2 })
+	// The forged high revision never enters trusted state; only HTTP revision 1 is accepted.
+	c.mu.Lock()
+	if c.cfg.Revision != 1 {
+		t.Fatal(c.cfg.Revision)
+	}
+	c.mu.Unlock()
+	before := attempts.Load()
+	failHTTP.Store(true)
+	tr.eventMessages <- dispatch.Message{Body: []byte(`{"revision":999999}`)}
+	time.Sleep(350 * time.Millisecond)
+	if attempts.Load() <= before || c.Status().Paused {
+		t.Fatalf("HTTP failure did not preserve policy: requests=%d status=%+v", attempts.Load(), c.Status())
+	}
+	failHTTP.Store(false)
+	revision.Store(2)
+	owner.Store("b")
+	tr.eventMessages <- dispatch.Message{Body: []byte(`{"revision":2}`)}
+	wait(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.cfg.Revision == 2
+	})
+}
+
+func TestManagedEventStartupUsesImmutableConfigDuringEarlyRefresh(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messaging/config" {
+			w.WriteHeader(404)
+			return
+		}
+		cfg := testConfig()
+		cfg.Revision = uint64(requests.Add(1))
+		cfg.Events = eventConfig{Enabled: true, Broker: "control", VPN: "vpn", Topic: "_autoscale/managed/test/changed", Endpoints: map[string]string{"amqp": "amqp://control:5672"}}
+		json.NewEncoder(w).Encode(cfg)
+	}))
+	defer server.Close()
+	tr := &flowTransport{messages: make(chan dispatch.Message), eventMessages: make(chan dispatch.Message, 1)}
+	c, err := Open(context.Background(), Options{ControllerURL: server.URL, OutboxPath: filepath.Join(t.TempDir(), "startup.db"), Credentials: func(string) (string, string, error) { return "u", "p", nil }, Transport: tr, PollInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	wait(t, func() bool { return requests.Load() >= 2 && tr.dials.Load() >= 1 })
+}
+
+func TestManagedEventReceiverReconnects(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messaging/config" {
+			w.WriteHeader(404)
+			return
+		}
+		requests.Add(1)
+		cfg := testConfig()
+		cfg.Revision = 1
+		cfg.Events = eventConfig{Enabled: true, Broker: "control", VPN: "vpn", Topic: "_autoscale/managed/test/changed", Endpoints: map[string]string{"amqp": "amqp://control:5672"}}
+		json.NewEncoder(w).Encode(cfg)
+	}))
+	defer server.Close()
+	tr := &flowTransport{messages: make(chan dispatch.Message), eventMessages: make(chan dispatch.Message, 1)}
+	tr.failFirst.Store(true)
+	c, err := Open(context.Background(), Options{ControllerURL: server.URL, OutboxPath: filepath.Join(t.TempDir(), "reconnect.db"), Credentials: func(string) (string, string, error) { return "u", "p", nil }, Transport: tr, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	wait(t, func() bool { return tr.dials.Load() >= 2 })
+	tr.eventMessages <- dispatch.Message{Body: []byte(`duplicate-or-late`)}
+	wait(t, func() bool { return requests.Load() >= 2 })
+}
+
 func TestLostReceiptRetriesBeforeNextPublication(t *testing.T) {
 	var status atomic.Int32
 	var owner atomic.Value

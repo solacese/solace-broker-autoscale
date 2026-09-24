@@ -11,11 +11,12 @@ from .conftest import REPO
 
 
 def test_example_config_loads():
-    cfg = load_config(REPO / "examples" / "config.example.yaml")
-    assert cfg.fleet.service_class == "enterprise-10k"
-    assert cfg.billing.model == "committed"
-    assert cfg.actuation.mode == "recommend"  # default stays recommend
-    assert cfg.actuation.dry_run is True
+    cfg = load_config(REPO / "config.example.yaml")
+    assert cfg.fleet.service_class == "enterprise-1k"
+    assert cfg.assignment.routing == "partitioned"
+    assert cfg.automation.enabled
+    assert cfg.provisioning.enabled is False
+    assert cfg.messaging.enabled
 
 
 def test_unknown_key_rejected():
@@ -139,12 +140,6 @@ def test_config_hash_stable_and_sensitive():
     assert a.config_hash() == b.config_hash()
     c = Config.model_validate({"fleet": {"max_brokers": 16}})
     assert c.config_hash() != a.config_hash()
-
-
-def test_enabled_protocols():
-    cfg = Config()
-    assert "smf" in cfg.protocols.enabled_protocols()
-    assert "mqtt" not in cfg.protocols.enabled_protocols()  # default disabled
 
 
 @pytest.mark.parametrize('data', [

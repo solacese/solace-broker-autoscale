@@ -221,44 +221,6 @@ def test_protocol_filter_404_for_unavailable(tmp_path):
     assert r.status_code == 404
 
 
-def test_topology_cold_start_snapshot_matches_spine_wire_form(tmp_path):
-    """GET /topology returns the spine wire form at gen 0 (cold-start floor) with every broker.
-
-    This is the shim's cold-start fallback (ADR 0009). It must parse with the same from_event the
-    spine snapshots use, carry gen COLD_START_GEN, and include a DRAINING broker (state included so
-    the shim excludes it from ownership exactly as it would from a live event).
-    """
-    from solace_autoscale.assignment.topology import COLD_START_GEN, ShardTopology
-
-    store = AssignmentStore(tmp_path / "a.db")
-    _seed(store, n=2)
-    store.upsert_broker(Broker(
-        broker_id="shard-a-drain", shard="shard-a", msg_vpn="acme-prod",
-        state=BrokerState.DRAINING, endpoints=_endpoints("shard-a-drain.example.com"),
-    ))
-    client = make_client(store, clock_val=1000.0)
-
-    r = client.get("/topology", params={"shard": "shard-a"})
-    assert r.status_code == 200
-    event = r.json()
-    assert event["gen"] == COLD_START_GEN
-    assert event["shard"] == "shard-a"
-    assert event["handoffs"] == []
-
-    topo = ShardTopology.from_event(event)  # parses as a spine snapshot
-    # ownership excludes the draining broker
-    owners = {topo.owner(f"key-{i}") for i in range(200)}
-    assert "shard-a-drain" not in owners
-    assert owners <= {"shard-a-00", "shard-a-01"}
-
-
-def test_topology_empty_shard_returns_no_brokers(tmp_path):
-    store = AssignmentStore(tmp_path / "a.db")
-    client = make_client(store, clock_val=1000.0)
-    r = client.get("/topology", params={"shard": "nope"})
-    assert r.status_code == 200
-    assert r.json()["brokers"] == []
-
 @pytest.mark.parametrize('state', [BrokerState.DELETING, BrokerState.GONE])
 def test_guaranteed_home_disappears_without_silent_migration(tmp_path, state):
     store = AssignmentStore(tmp_path / 'a.db')

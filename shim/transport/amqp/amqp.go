@@ -1,7 +1,4 @@
-// Package amqp is the real AMQP 1.0 Transport for the smart shim, built on github.com/Azure/go-amqp.
-// It is the production counterpart to transport/memory: the shim logic in package dispatch is written
-// against the dispatch.Transport interface, so swapping this in for the in-memory transport is the
-// only change needed to talk to real Solace brokers.
+// Package amqp implements the managed client's AMQP 1.0 transport using github.com/Azure/go-amqp.
 //
 // A connection URI carries everything needed to dial one broker, for example
 // amqps://user:pass@host.messaging.solace.cloud:5671. The scheme selects TLS (amqps) or plaintext
@@ -59,9 +56,7 @@ func (t *Transport) dial(ctx context.Context, uri string) (*goamqp.Conn, error) 
 	return conn, nil
 }
 
-// Sender opens a connection, a session, and a sender link to the broker at uri. The link target is
-// set per message (go-amqp allows an anonymous sender with the address on the message), so one sender
-// serves every address on the broker.
+// Sender opens a connection, session, and anonymous sender link for all managed addresses.
 func (t *Transport) Sender(ctx context.Context, uri string) (dispatch.Sender, error) {
 	conn, err := t.dial(ctx, uri)
 	if err != nil {

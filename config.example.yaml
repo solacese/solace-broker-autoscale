@@ -1,0 +1,88 @@
+# Copy this file before use. Running the controller mutates only its managed queue/profile namespace.
+inventory: customer-inventory.yaml
+
+fleet:
+  service_class: enterprise-1k
+  min_brokers: 1
+  max_brokers: 2
+
+workload:
+  delivery: guaranteed
+
+metrics:
+  source: semp
+  scrape_interval: 10s
+  staleness_limit: 30s
+
+capacity:
+  # Compile this from measurements for the same provider, broker version, tier, and HA mode.
+  model: models/customer-profile.json
+  scenario: worst
+  fanout: 1
+  message_size_hint: 1024
+
+policy:
+  scale_up_window: 30s
+  cooldown: 15m
+  warm_pool: 1
+
+actuation:
+  # These values are required by the reconciliation runtime. This is not a dry run.
+  mode: scale-up-only
+  dry_run: false
+  require_confirmation: false
+  max_ops_in_flight: 1
+  max_ops_per_hour: 4
+  kill_switch_file: .state/autoscale.halt
+
+assignment:
+  store: .state/controller.db
+  routing: partitioned
+  strategy: rendezvous
+  partitions: 16
+  lease_seconds: 30
+
+# Uses only brokers already listed in customer-inventory.yaml.
+automation:
+  enabled: true
+  fleet_id: customer-alpha
+  poll_interval: 10s
+  migration_grace: 30s
+  empty_settle: 10s
+  migration_timeout: 15m
+  max_parallel_migrations: 1
+  max_migrations_per_hour: 4
+  min_target_consumers: 1
+  target_utilization: 0.65
+  trigger_utilization: 0.80
+  queue_spool_mb: 1000
+  events:
+    enabled: false
+  shards:
+    orders:
+      enabled: true
+      features:
+        transactions: none
+        replication: none
+        replay: false
+        tracing: false
+
+# Cloud creation remains disabled. The controller never creates or deletes a broker with this file.
+provisioning:
+  enabled: false
+  # Must already exist and be enabled on every inventoried broker/VPN.
+  client_username: autoscale-app
+
+messaging:
+  enabled: true
+  allow_dynamic_groups: false
+  routes:
+    - pattern: orders/*/*
+      shard: orders
+      key_evaluator:
+        name: order-lifecycle
+        version: 1.0.0
+        result: sha256
+  subscriptions:
+    - group: processor
+      topics: ["orders/>"]

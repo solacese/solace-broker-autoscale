@@ -1,0 +1,26 @@
+# One entry per existing HA service endpoint; never list standby nodes separately.
+provider: aws
+broker_version: REPLACE_WITH_MEASURED_BROKER_VERSION
+service_class: enterprise-1k
+deployment_mode: HA
+brokers:
+  - broker_id: orders-a
+    shard: orders
+    msg_vpn: REPLACE_WITH_MESSAGE_VPN
+    base_url: https://BROKER_A_MANAGEMENT_HOST:943
+    username_env: SOLACE_SEMP_USERNAME
+    password_env: SOLACE_SEMP_PASSWORD
+    endpoints:
+      smf: tcps://BROKER_A_MESSAGING_HOST:55443
+      amqp: amqps://BROKER_A_MESSAGING_HOST:5671
+    role: active
+  - broker_id: orders-b
+    shard: orders
+    msg_vpn: REPLACE_WITH_MESSAGE_VPN
+    base_url: https://BROKER_B_MANAGEMENT_HOST:943
+    username_env: SOLACE_SEMP_USERNAME
+    password_env: SOLACE_SEMP_PASSWORD
+    endpoints:
+      smf: tcps://BROKER_B_MESSAGING_HOST:55443
+      amqp: amqps://BROKER_B_MESSAGING_HOST:5671
+    role: warm

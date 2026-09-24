@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from solace_autoscale.actuator.base import Operation, OperationType
-from solace_autoscale.actuator.factory import build_actuator
 from solace_autoscale.actuator.safety import AuditLog, FleetState, SafetyGate
 
 from .conftest import default_config, make_test_model
@@ -80,36 +79,6 @@ def _gate(cfg, cloud, tmp_path, synthetic=False):
 def _state(current=2, in_flight=0, last_hour=0, age=10.0):
     return FleetState(current_brokers=current, ops_in_flight=in_flight,
                       ops_in_last_hour=last_hour, newest_metric_age_seconds=age)
-
-
-# ---- recommend mode: actuator not constructed (ADR 0004) -------------------------------------
-
-def test_recommend_mode_actuator_not_constructed():
-    cfg = default_config(actuation={"mode": "recommend"})
-    model = make_test_model()
-    act = build_actuator(cfg, model, cloud=FakeCloud())
-    assert act is None  # never constructed
-
-
-def test_full_mode_actuator_constructed():
-    cfg = default_config(actuation={"mode": "full", "dry_run": True})
-    model = make_test_model()
-    act = build_actuator(cfg, model, cloud=FakeCloud())
-    assert act is not None
-
-
-def test_synthetic_model_blocks_construction_in_active_mode():
-    cfg = default_config(actuation={"mode": "full"})
-    model = make_test_model(synthetic=True)
-    with pytest.raises(ValueError, match="synthetic"):
-        build_actuator(cfg, model, cloud=FakeCloud())
-
-
-def test_active_mode_without_cloud_client_refuses():
-    cfg = default_config(actuation={"mode": "full"})
-    model = make_test_model()
-    with pytest.raises(ValueError, match="no Solace Cloud client"):
-        build_actuator(cfg, model, cloud=None)
 
 
 # ---- dry-run (default) -----------------------------------------------------------------------

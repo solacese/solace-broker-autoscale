@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -31,6 +32,7 @@ class Assignment:
     partition_count: int | None = None
     queue_name: str | None = None
     topic_prefix: str | None = None
+    revision: int = 0
 
     def endpoint(self, protocol: str) -> str:
         if protocol not in self.endpoints:
@@ -53,9 +55,9 @@ class Resolver:
     timeout: float = 5.0
     max_stale_seconds: float | None = None
     api_key: str | None = field(default=None, repr=False)
-    _clock: callable = time.time  # type: ignore[valid-type]
+    _clock: Callable[[], float] = time.time
     _cache: dict[tuple, Assignment] = field(default_factory=dict)
-    _opener: callable | None = None  # test seam: (url)->bytes
+    _opener: Callable[[str], bytes] | None = None  # test seam
 
     def resolve(self, shard: str, client_id: str, mode: str = "direct",
                 protocol: str | None = None, *, routing_key: str | None = None,
@@ -69,6 +71,7 @@ class Resolver:
                 fetched_at=self._clock(), reused_existing=body.get("reused_existing", False),
                 partition_id=body.get("partition_id"), partition_count=body.get("partition_count"),
                 queue_name=body.get("queue_name"), topic_prefix=body.get("topic_prefix"),
+                revision=int(body.get("revision", 0)),
             )
             self._cache[key] = a
             return a

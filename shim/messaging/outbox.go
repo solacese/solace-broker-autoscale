@@ -17,12 +17,17 @@ var ErrFull = errors.New("durable outbox is full; publication was not accepted")
 var ErrClosed = errors.New("messaging client is closed")
 
 type record struct {
-	ID        string          `json:"event_id"`
-	Shard     string          `json:"shard"`
-	Partition int             `json:"partition"`
-	Topic     string          `json:"topic"`
-	Data      json.RawMessage `json:"data"`
-	Sequence  uint64          `json:"sequence"`
+	ID               string            `json:"event_id"`
+	Shard            string            `json:"shard"`
+	Partition        int               `json:"partition"`
+	Topic            string            `json:"topic"`
+	Data             json.RawMessage   `json:"data"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	RoutingKind      string            `json:"routing_kind,omitempty"`
+	RoutingValue     string            `json:"routing_value,omitempty"`
+	EvaluatorName    string            `json:"evaluator_name,omitempty"`
+	EvaluatorVersion string            `json:"evaluator_version,omitempty"`
+	Sequence         uint64            `json:"sequence"`
 }
 
 func (r record) lane() string { return fmt.Sprintf("%s/%d", r.Shard, r.Partition) }
@@ -83,6 +88,10 @@ func (o *outbox) enqueue(r record) error {
 		identity, _ := json.Marshal(r)
 		if prior := ids.Get([]byte(r.ID)); prior != nil {
 			if bytes.Equal(prior, identity) {
+				return nil
+			}
+			var old record
+			if json.Unmarshal(prior, &old) == nil && old.EvaluatorName == "" && r.EvaluatorName == "" && old.ID == r.ID && old.Shard == r.Shard && old.Partition == r.Partition && old.Topic == r.Topic && bytes.Equal(old.Data, r.Data) && len(old.Headers) == 0 && len(r.Headers) == 0 {
 				return nil
 			}
 			return errors.New("pending event ID reused with different content or routing")

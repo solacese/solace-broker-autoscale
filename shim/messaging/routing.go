@@ -12,11 +12,24 @@ import (
 	"unicode/utf8"
 )
 
+type evaluatorConfig struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Result  string `json:"result,omitempty"`
+}
 type route struct {
-	Pattern   string `json:"pattern"`
-	Shard     string `json:"shard"`
-	Dispatch  string `json:"dispatch"`
-	KeyLevels []int  `json:"key_levels"`
+	Pattern      string           `json:"pattern"`
+	Shard        string           `json:"shard"`
+	Dispatch     string           `json:"dispatch"`
+	KeyLevels    []int            `json:"key_levels"`
+	KeyEvaluator *evaluatorConfig `json:"key_evaluator,omitempty"`
+}
+type eventConfig struct {
+	Enabled   bool              `json:"enabled"`
+	Broker    string            `json:"broker_id"`
+	Endpoints map[string]string `json:"endpoints"`
+	VPN       string            `json:"msg_vpn"`
+	Topic     string            `json:"topic"`
 }
 type config struct {
 	Fleet      string              `json:"fleet_id"`
@@ -24,6 +37,8 @@ type config struct {
 	Routes     []route             `json:"routes"`
 	Groups     map[string][]string `json:"groups,omitempty"`
 	Ready      []string            `json:"ready_groups,omitempty"`
+	Revision   uint64              `json:"revision,omitempty"`
+	Events     eventConfig         `json:"events,omitempty"`
 }
 
 func (c config) contract() config {
@@ -53,9 +68,27 @@ func (c config) validate() error {
 	if c.Fleet == "" || c.Partitions < 1 || c.Partitions > 4096 || len(c.Routes) == 0 {
 		return errors.New("invalid managed messaging contract")
 	}
+	if c.Events.Enabled {
+		endpoint := c.Events.Endpoints["amqp"]
+		if c.Events.Broker == "" || c.Events.VPN == "" || c.Events.Topic == "" || endpoint == "" {
+			return errors.New("incomplete managed event endpoint")
+		}
+	}
 	for _, r := range c.Routes {
 		if r.Shard == "" || r.Pattern == "" {
 			return errors.New("invalid route")
+		}
+		if r.KeyEvaluator != nil {
+			if _, err := validateEvaluatorIdentity(r.KeyEvaluator.Name, r.KeyEvaluator.Version); err != nil {
+				return err
+			}
+			if r.KeyEvaluator.Result == "" {
+				r.KeyEvaluator.Result = "key"
+			}
+			if (r.KeyEvaluator.Result != "key" && r.KeyEvaluator.Result != "sha256") || len(r.KeyLevels) != 0 || (r.Dispatch != "" && r.Dispatch != "by-key") {
+				return errors.New("invalid routing evaluator route")
+			}
+			continue
 		}
 		switch r.Dispatch {
 		case "", "by-key":
@@ -69,6 +102,21 @@ func (c config) validate() error {
 	}
 	return nil
 }
+func overlaps(first, second string) bool {
+	left, right := strings.Split(first, "/"), strings.Split(second, "/")
+	limit := min(len(left), len(right))
+	for i := 0; i < limit; i++ {
+		a, b := left[i], right[i]
+		if a == ">" || b == ">" {
+			return true
+		}
+		if a != "*" && b != "*" && a != b {
+			return false
+		}
+	}
+	return len(left) == len(right)
+}
+
 func matches(pattern, topic string) bool {
 	p, t := strings.Split(pattern, "/"), strings.Split(topic, "/")
 	for i, v := range p {
@@ -133,6 +181,14 @@ func partitionFor(shard, key string, n int) int {
 	return int(new(big.Int).Mod(new(big.Int).SetBytes(digest[:]), big.NewInt(int64(n))).Int64())
 }
 func (c config) publication(topic, id string, data any) (record, error) {
+	return c.publicationMessage(&Publication{Topic: topic, EventID: id, Payload: data}, nil)
+}
+
+func (c config) publicationMessage(message *Publication, evaluators *EvaluatorRegistry) (record, error) {
+	if message == nil {
+		return record{}, errors.New("publication is required")
+	}
+	topic, id, data := message.Topic, message.EventID, message.Payload
 	if topic == "" || len(topic) > 128 || !utf8.ValidString(topic) || strings.HasPrefix(topic, "#") || strings.ContainsAny(topic, "*>\x00") {
 		return record{}, errors.New("requires concrete UTF-8 topic of at most 128 bytes")
 	}
@@ -176,19 +232,38 @@ func (c config) publication(topic, id string, data any) (record, error) {
 	if !matched {
 		return record{}, errors.New("no matching subscriber group")
 	}
-	var keys []string
-	switch selected.Dispatch {
-	case "by-topic":
-		keys = []string{"topic", topic}
-	case "single":
-		keys = []string{"route", selected.Pattern}
-	default:
-		for _, i := range selected.KeyLevels {
-			if i < 0 || i >= len(levels) {
-				return record{}, errors.New("invalid key level")
-			}
-			keys = append(keys, levels[i])
+	if err := validateHeaders(message.Headers); err != nil {
+		return record{}, err
+	}
+	var routingKind, routingValue, evaluatorName, evaluatorVersion string
+	var partition int
+	if selected.KeyEvaluator != nil {
+		evaluator, err := evaluators.require(selected.KeyEvaluator.Name, selected.KeyEvaluator.Version)
+		if err != nil {
+			return record{}, err
 		}
+		routingKind, routingValue, partition, err = resolveEvaluator(evaluator, selected.KeyEvaluator.Result, message, selected.Shard, c.Partitions)
+		if err != nil {
+			return record{}, err
+		}
+		evaluatorName, evaluatorVersion = selected.KeyEvaluator.Name, selected.KeyEvaluator.Version
+	} else {
+		var keys []string
+		switch selected.Dispatch {
+		case "by-topic":
+			keys = []string{"topic", topic}
+		case "single":
+			keys = []string{"route", selected.Pattern}
+		default:
+			for _, i := range selected.KeyLevels {
+				if i < 0 || i >= len(levels) {
+					return record{}, errors.New("invalid key level")
+				}
+				keys = append(keys, levels[i])
+			}
+		}
+		routingKind, routingValue = "key", jsonStrings(keys, true)
+		partition = partitionFor(selected.Shard, routingValue, c.Partitions)
 	}
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -197,5 +272,5 @@ func (c config) publication(topic, id string, data any) (record, error) {
 	if len(payload) > 1<<20 {
 		return record{}, errors.New("payload exceeds 1 MiB")
 	}
-	return record{ID: id, Shard: selected.Shard, Partition: partitionFor(selected.Shard, jsonStrings(keys, true), c.Partitions), Topic: topic, Data: payload}, nil
+	return record{ID: id, Shard: selected.Shard, Partition: partition, Topic: topic, Data: payload, Headers: message.Headers, RoutingKind: routingKind, RoutingValue: routingValue, EvaluatorName: evaluatorName, EvaluatorVersion: evaluatorVersion}, nil
 }
