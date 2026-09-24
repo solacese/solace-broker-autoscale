@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e '.[dev]'
+      - run: pip install '.[dev,compile,service,smf]'
       - run: ruff check solace_autoscale solace_autoscale_client tests ../examples
       - run: mypy solace_autoscale
       - run: pytest -m "not integration" -q

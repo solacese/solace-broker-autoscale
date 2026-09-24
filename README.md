@@ -18,7 +18,7 @@ The controller is not a message proxy. A logical partition is a stable bucket of
 Use this only for a supervised trial on dedicated, isolated, non-production brokers. The example configuration:
 
 - requires an explicit inventory and measured capacity model;
-- enables controller reconciliation, which creates/updates this fleet namespace's queues and client profile;
+- gives the controller sole ownership of generated queues and its client profile; incompatible pre-existing managed names are rejected rather than adopted;
 - disables Cloud provisioning and contains no broker deletion path;
 - declares advanced features off so unqualified state is not moved.
 
@@ -90,7 +90,7 @@ The managed Go API remains at `github.com/solacese/solace-broker-autoscale/shim/
 ## Guarantees and limits
 
 - Guaranteed delivery is at least once; deduplicate event IDs in the business transaction.
-- Ordering is per partition and publisher outbox, not global across publisher processes.
+- The local publisher outbox serializes each partition, but this alpha does not claim end-to-end ordering or exactly-once processing.
 - Stored backlog drains on the source; it is not copied to the destination.
 - Routing contracts and partition counts cannot be rewritten underneath durable state.
 - Transactions/XA, replay, tracing, and disaster recovery require matching placement declarations and migration evidence; unsupported combinations remain pinned.
