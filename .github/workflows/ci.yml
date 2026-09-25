@@ -23,6 +23,19 @@ jobs:
       - run: ruff check solace_autoscale solace_autoscale_client tests ../examples
       - run: mypy solace_autoscale
       - run: pytest -m "not integration" -q
+      - name: Verify clean source artifacts
+        if: matrix.python-version == '3.12'
+        working-directory: .
+        run: |
+          python -m pip install build
+          git archive --format=tar.gz --output=/tmp/solace-autoscale-source.tar.gz HEAD
+          mkdir /tmp/solace-autoscale-source
+          tar -xzf /tmp/solace-autoscale-source.tar.gz -C /tmp/solace-autoscale-source
+          python -m build /tmp/solace-autoscale-source/scaling-controller --outdir /tmp/solace-autoscale-dist
+          python -m venv /tmp/solace-autoscale-clean
+          /tmp/solace-autoscale-clean/bin/pip install '/tmp/solace-autoscale-dist/'*.whl
+          /tmp/solace-autoscale-clean/bin/solace-autoscale --version
+          /tmp/solace-autoscale-clean/bin/python -c 'import solace_autoscale, solace_autoscale_client'
       - name: Validate customer exercise
         working-directory: .
         run: python examples/customer_library.py

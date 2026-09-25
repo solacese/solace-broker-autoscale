@@ -64,9 +64,22 @@ def create_app(
 
     @app.get("/readyz")  # type: ignore[untyped-decorator, unused-ignore]
     def readyz() -> dict:
-        # ready if the store is reachable
         try:
             store.brokers_for_shard("__probe__")
+            if messaging.enabled:
+                partitions_ready = all(
+                    migrations.partition_ready(shard, partition)
+                    for shard in {route.shard for route in messaging.routes}
+                    for partition in range(policy.partitions)
+                )
+                groups = list(registry.groups())
+                if not partitions_ready or groups and not registry.ready(groups):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="managed partitions and subscriber groups are not bootstrapped",
+                    )
+        except HTTPException:
+            raise
         except Exception as e:  # pragma: no cover
             raise HTTPException(status_code=503, detail=f"store not ready: {e}") from e
         return {"status": "ready"}

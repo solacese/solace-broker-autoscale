@@ -1,86 +1,46 @@
 # Solace Broker Autoscale
 
-A community alpha control plane for spreading guaranteed messaging partitions across existing Solace brokers.
+A community alpha control plane for placing guaranteed-message partitions across existing Solace brokers.
+
+> **Status:** supervised pilot only. Use dedicated, isolated, non-production brokers. This is not an officially supported Solace product.
 
 ```text
-Message path:
-  publisher -> publisher shim -> Solace brokers -> subscriber shim -> subscriber
-
-Control plane:
-  publisher/subscriber shims -> assignment HTTP API (SQLite ownership)
-  controller reconciliation -> existing Solace brokers (SEMP)
+Message path: publisher -> managed Python/Go client -> Solace broker -> managed client -> subscriber
+Control plane: managed clients -> assignment API -> SQLite
+               controller -> SQLite and inventoried brokers through SEMP
 ```
 
-The controller is not a message proxy. A logical partition is a stable bucket of related messages with exactly one recorded broker owner at a time. It is an application-routing concept—not a broker's native partition and not the primary/standby nodes inside an HA service. Publisher and subscriber “shims” are embedded client APIs, not separate services. Python uses native SMF; Go uses AMQP 1.0. Both preserve the managed ownership and migration contract.
+The controller is not a message proxy. Customer code chooses a stable business key; the local client maps it to a logical partition and asks the assignment API for that partition's broker. The controller owns only its generated queues and client profile, observes them through SEMP, and performs controlled handover between inventoried brokers.
 
-## DMR and controlled handover
+## Quick start
 
-[Dynamic Message Routing (DMR)](https://docs.solace.com/Features/DMR/DMR-Overview.htm) is the broker-native mechanism for propagating subscription interest and routing messages across a broker network. Its [subscription management](https://docs.solace.com/Features/DMR/DMR-Subscription-Mgmt.htm) means matching subscriptions on multiple nodes can each attract the same messages; DMR is not fleet-wide work sharing for one logical workload. This project does not replace DMR: it adds application workload grouping, one-owner placement, and controlled migration of its own managed queues. DMR coexistence has not been tested or claimed here.
-
-During handover, the controller prepares an ingress-disabled target and waits for subscribers to discover and bind it while retaining the source flow. It then fences stale publishers at the source, drains ready, stored, and unacknowledged messages through a continuous empty/grace proof, atomically commits the owner, and only then activates target ingress. Notifications are hints that accelerate authoritative HTTP refresh, not a simultaneous-delivery requirement; rejected publications remain in the durable outbox for retry. Before commit, timeout recovery can restore the source only while the empty fenced target proves rollback safe; after commit, recovery moves forward to target activation. These are alpha state-machine guarantees, not claims of global ordering, exactly-once processing, production readiness, or tested DMR interoperability.
-
-## Status and safety
-
-Use this only for a supervised trial on dedicated, isolated, non-production brokers. The example configuration:
-
-- requires an explicit inventory and measured capacity model;
-- gives the controller sole ownership of generated queues and its client profile; incompatible pre-existing managed names are rejected rather than adopted;
-- disables Cloud provisioning and contains no broker deletion path;
-- declares advanced features off so unqualified state is not moved.
-
-The controller runtime intentionally rejects `dry_run: true`, recommendation mode, and the synthetic model. Starting it is therefore an explicit broker-configuration action, not a read-only preview. `run-controller.sh` starts the assignment API and reconciliation process against the same SQLite file; it never starts or tears down brokers.
-
-## Install and broker-free practice
-
-Requirements: Python 3.11+; Go is optional unless using the managed Go client.
+Requirements: Python 3.11+; Go is optional for the managed Go client.
 
 ```bash
 ./install.sh
 .venv/bin/python examples/customer_library.py
 ```
 
-The exercise runs without Docker, credentials, or a broker. It proves that two events for one tenant/order return the same SHA-256 routing result while another order differs. The customer function selects only a stable business key/digest; it cannot choose a broker.
+This broker-free exercise validates the customer routing function: events for one tenant/order produce one stable SHA-256 result, while another order differs.
 
-## Configure existing brokers
-
-1. Copy `config.example.yaml` and `inventory.example.yaml` as shown below.
-2. Replace every placeholder. Inventory one active endpoint per HA service—never its standby nodes separately.
-3. On **every listed broker/VPN**, create or enable the application username `autoscale-app`, set the same operator-chosen sample password, and grant the authentication/ACL permissions needed to publish managed topics and consume the controller-managed queues. Existing brokers do not get this username automatically.
-4. Set SEMP credentials through the environment names referenced by inventory. The controller uses them to make scoped queue and managed client-profile changes.
-5. Build `models/customer-profile.json` from measurements matching provider, broker version, HA tier, payloads, fanout, and features. See [PERFORMANCE.md](PERFORMANCE.md).
-6. Keep `.state/controller.db`, publisher state, and subscriber business/deduplication state on persistent local storage and back them up together.
+For a supervised broker trial:
 
 ```bash
 cp config.example.yaml customer.yaml
 cp inventory.example.yaml customer-inventory.yaml
-# customer.yaml already references customer-inventory.yaml
+# Replace every placeholder and build models/customer-profile.json from measurements.
 export SOLACE_SEMP_USERNAME='REPLACE_ME'
 export SOLACE_SEMP_PASSWORD='REPLACE_ME'
 ./run-controller.sh customer.yaml customer-inventory.yaml
 ```
 
-The API binds to `127.0.0.1:8099`. Set `SOLACE_ASSIGNMENT_API_KEY` before exposing it beyond loopback; clients pass the same value without the `Bearer` prefix.
+`run-controller.sh` starts the loopback assignment API and controller against the same SQLite file. `/healthz` reports that the API process is alive. `/readyz` reports only persisted bootstrap completion: every configured managed partition and subscriber group was marked ready. It does **not** prove that the controller is running or that brokers, SEMP, publishers, or subscribers are currently healthy. Starting the controller is a broker-configuration action, not a dry run.
 
-## Publish and subscribe
+On every inventoried broker/VPN, first create or enable the application username configured as `provisioning.client_username` (the example uses `autoscale-app`) with permissions to publish managed topics and consume controller-managed queues. Inventory one active endpoint per HA service, never standby nodes as separate brokers.
 
-The following walkthrough needs the configured controller and existing broker endpoints. In one terminal:
+## Customer library
 
-```bash
-export CONTROLLER_URL='http://127.0.0.1:8099'
-export SOLACE_CLIENT_USERNAME='autoscale-app'
-export SOLACE_CLIENT_PASSWORD='REPLACE_WITH_THE_PASSWORD_CONFIGURED_ON_EVERY_BROKER'
-.venv/bin/python examples/subscriber.py
-```
-
-After it reports ready, publish from another terminal with the same environment:
-
-```bash
-.venv/bin/python examples/publisher.py
-```
-
-`publish()` returns after durable local acceptance; `flush()` waits for broker confirmation. Preserve the publisher state directory across restart. Subscriber delivery is at least once: replace the example `print` with one business-database transaction that stores the event ID and applies the business effect before the handler returns.
-
-### Managed APIs
+`examples/customer_library.py` is the application-owned routing contract. Register the same evaluator name, version, and result type in every publisher and subscriber deployment. The function selects only stable business data; it cannot select a broker.
 
 Python:
 
@@ -91,25 +51,57 @@ client.publish("orders/acme/created", payload, event_id=event_id, headers=header
 client.subscribe(group="processor", handler=process)
 ```
 
-The managed Go API remains at `github.com/solacese/solace-broker-autoscale/shim/messaging`. This evaluator-based example also requires registering an equivalent `order-lifecycle@1.0.0` Go customer evaluator before opening the client.
+The Go API is `github.com/solacese/solace-broker-autoscale/shim/messaging`; register an equivalent evaluator before opening the client.
 
-## Guarantees and limits
+To exercise configured brokers, start the subscriber in terminal 1:
 
-- Guaranteed delivery is at least once; deduplicate event IDs in the business transaction.
-- The local publisher outbox serializes each partition, but this alpha does not claim end-to-end ordering or exactly-once processing.
-- Stored backlog drains on the source; it is not copied to the destination.
-- Routing contracts and partition counts cannot be rewritten underneath durable state.
-- Transactions/XA, replay, tracing, and disaster recovery require matching placement declarations and migration evidence; unsupported combinations remain pinned.
-- There is no multi-host controller HA, automatic scale-in/broker deletion, arbitrary existing-queue adoption, or disk-loss recovery.
-- Capacity is deployment-specific. The synthetic model is never valid for operations.
+```bash
+export CONTROLLER_URL='http://127.0.0.1:8099'
+export SOLACE_CLIENT_USERNAME='autoscale-app'
+export SOLACE_CLIENT_PASSWORD='REPLACE_WITH_THE_PASSWORD_CONFIGURED_ON_EVERY_BROKER'
+# Also export SOLACE_ASSIGNMENT_API_KEY if the API uses one.
+.venv/bin/python examples/subscriber.py
+```
+
+After it reports ready, export the same variables and publish from terminal 2:
+
+```bash
+.venv/bin/python examples/publisher.py
+```
+
+`publish()` returns after durable local acceptance; `flush()` waits for broker confirmation. Keep publisher state on persistent local storage. Subscriber delivery is at least once: atomically store the event ID with the business effect before the handler returns.
+
+## Handover and DMR
+
+[Dynamic Message Routing (DMR)](https://docs.solace.com/Features/DMR/DMR-Overview.htm) propagates subscription interest through a broker network. It is not fleet-wide work sharing for one logical workload: matching subscriptions on multiple nodes can each attract messages. This project does not replace DMR and has not qualified DMR coexistence.
+
+For a managed partition, handover is prepare → fence → drain → commit → activate:
+
+1. Prepare an ingress-disabled target and wait for its consumers.
+2. Fence source ingress so stale publishers are rejected and retain work in their durable outbox.
+3. Require continuously empty ready, stored, and unacknowledged state through the configured grace window.
+4. Atomically commit the owner in SQLite, then activate target ingress.
+
+Before commit, timeout recovery restores the source only when an empty fenced target proves rollback safe. After commit, recovery moves forward to target activation. Notifications are hints; HTTP/SQLite state and broker fences are authoritative.
+
+## Operational boundaries
+
+- Keep `.state/controller.db`, publisher outboxes, and subscriber business/deduplication state on persistent local storage; back up and restore them as one operational set.
+- The assignment API binds to `127.0.0.1:8099`. Non-loopback binding is rejected without `SOLACE_ASSIGNMENT_API_KEY`; use authenticated TLS termination before any network exposure.
+- Use a measured model matching provider, broker version, HA tier, payload, fanout, and feature scenario. The checked-in synthetic model is rejected by the controller. See [PERFORMANCE.md](PERFORMANCE.md).
+- Routing contracts, partition counts, broker identity, and recorded placement facts fail closed when changed beneath durable state.
+- Cloud provisioning is disabled in the customer example. The managed runtime has no broker deletion or automatic scale-in path.
+- Transactions/XA, replay, tracing, disaster recovery, and DMR interoperability are not qualified here; unsupported migration combinations remain pinned.
+- There is no multi-host controller HA, distributed state store, disk-loss recovery, exactly-once guarantee, or end-to-end ordering guarantee.
+- Production qualification still requires target-hardware capacity tests, crash/failover and disk-full testing, backup/restore drills, poison-message handling, long soak, saturation, security review, and an operated recovery runbook.
 
 ## Repository
 
-- `scaling-controller/solace_autoscale/` — controller, assignment API, migration, SEMP, placement, and capacity logic.
-- `scaling-controller/solace_autoscale_client/` — managed Python publisher/subscriber API.
-- `shim/messaging/` — managed Go publisher/subscriber API; `shim/transport/amqp/` is its wire transport.
-- `examples/` — one customer routing library plus minimal publisher/subscriber usage.
-- `PERFORMANCE.md` — calibration method, feature declarations, measured storage diagnostic, and release limits.
-- `install.sh`, `run-controller.sh` — dependency installation and controller startup.
+- `scaling-controller/solace_autoscale/` — controller, assignment API, migration, SEMP, placement, and capacity logic
+- `scaling-controller/solace_autoscale_client/` — managed Python publisher/subscriber library
+- `shim/messaging/` — managed Go publisher/subscriber library; `shim/transport/amqp/` is its transport
+- `examples/` — customer routing library plus minimal publisher and subscriber
+- `PERFORMANCE.md` — measurement and qualification requirements
+- `install.sh`, `run-controller.sh` — installation and supervised startup
 
 Community project · Apache 2.0 · Not an officially supported Solace product.

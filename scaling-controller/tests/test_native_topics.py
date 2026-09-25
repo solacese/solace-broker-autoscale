@@ -42,6 +42,35 @@ def native_config():
     )
 
 
+def test_readiness_waits_for_managed_bootstrap(tmp_path):
+    db = AssignmentStore(tmp_path / "state.db")
+    app = create_app(
+        db,
+        policy=AssignmentConfig(routing="partitioned", partitions=2),
+        fleet_id="payments",
+        messaging=MessagingConfig.model_validate(
+            {
+                "enabled": True,
+                "routes": [
+                    {"pattern": "payments/*/*", "shard": "payments", "key_levels": [1]}
+                ],
+                "subscriptions": [{"group": "ledger", "topics": ["payments/>"]}],
+            }
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+        assert response.status_code == 503
+        assert "not bootstrapped" in response.json()["detail"]
+        state = ControllerStore(db)
+        state.mark_partition_ready("payments", 0)
+        state.mark_partition_ready("payments", 1)
+        assert client.get("/readyz").status_code == 503
+        TopicRegistry(db).mark_ready(["ledger"])
+        assert client.get("/readyz").json() == {"status": "ready"}
+    db.close()
+
+
 def test_registry_and_api_keep_subscriptions_durable_and_freeze_during_migration(tmp_path):
     db = AssignmentStore(tmp_path / "state.db")
     for broker in ["a", "b"]:
