@@ -11,7 +11,13 @@ Control plane:
   controller reconciliation -> existing Solace brokers (SEMP)
 ```
 
-The controller is not a message proxy. A logical partition is a stable bucket of related messages with exactly one recorded broker owner at a time. It is an application-routing concept—not a broker's native partition and not the primary/standby nodes inside an HA service. The controller prepares managed queues, fences old writes, drains, then commits an owner handover. Publisher and subscriber “shims” are embedded client APIs, not separate services. Python uses native SMF; Go uses AMQP 1.0. Both preserve the managed ownership and migration contract.
+The controller is not a message proxy. A logical partition is a stable bucket of related messages with exactly one recorded broker owner at a time. It is an application-routing concept—not a broker's native partition and not the primary/standby nodes inside an HA service. Publisher and subscriber “shims” are embedded client APIs, not separate services. Python uses native SMF; Go uses AMQP 1.0. Both preserve the managed ownership and migration contract.
+
+## DMR and controlled handover
+
+[Dynamic Message Routing (DMR)](https://docs.solace.com/Features/DMR/DMR-Overview.htm) is the broker-native mechanism for propagating subscription interest and routing messages across a broker network. Its [subscription management](https://docs.solace.com/Features/DMR/DMR-Subscription-Mgmt.htm) means matching subscriptions on multiple nodes can each attract the same messages; DMR is not fleet-wide work sharing for one logical workload. This project does not replace DMR: it adds application workload grouping, one-owner placement, and controlled migration of its own managed queues. DMR coexistence has not been tested or claimed here.
+
+During handover, the controller prepares an ingress-disabled target and waits for subscribers to discover and bind it while retaining the source flow. It then fences stale publishers at the source, drains ready, stored, and unacknowledged messages through a continuous empty/grace proof, atomically commits the owner, and only then activates target ingress. Notifications are hints that accelerate authoritative HTTP refresh, not a simultaneous-delivery requirement; rejected publications remain in the durable outbox for retry. Before commit, timeout recovery can restore the source only while the empty fenced target proves rollback safe; after commit, recovery moves forward to target activation. These are alpha state-machine guarantees, not claims of global ordering, exactly-once processing, production readiness, or tested DMR interoperability.
 
 ## Status and safety
 
