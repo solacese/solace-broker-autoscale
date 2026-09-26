@@ -1,0 +1,20 @@
+# Build and test outputs
+/bin/
+/var/
+/tools/**/target/
+*.out
+*.test
+*.prof
+
+# Local qualification, browser, and agent state
+/.qualify-cloud/
+/.playwright-mcp/
+/.claude/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
+# Operating-system metadata
+.DS_Store

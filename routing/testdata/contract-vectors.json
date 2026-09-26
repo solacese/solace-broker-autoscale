@@ -1,0 +1,30 @@
+{
+  "contract": "sha256-length-prefixed-utf8-v1",
+  "length_prefix": "unsigned-32-bit-big-endian-byte-length",
+  "vectors": [
+    {
+      "name": "flight-operations",
+      "components": ["flight-operations-v1", "BA", "117", "2026-09-25", "LHR-JFK"],
+      "canonical_hex": "00000014666c696768742d6f7065726174696f6e732d7631000000024241000000033131370000000a323032362d30392d3235000000074c48522d4a464b",
+      "sha256": "979decdda63987635de3ff054b3c914662d5e4330eef4ce0d3a31ab616aafa96"
+    },
+    {
+      "name": "flight-operations-utf8-byte-length",
+      "components": ["flight-operations-v1", "JL", "5", "2026-09-25", "東京→羽田"],
+      "canonical_hex": "00000014666c696768742d6f7065726174696f6e732d7631000000024a4c00000001350000000a323032362d30392d32350000000fe69db1e4baace28692e7bebde794b0",
+      "sha256": "525f001917d2a22379639217943281f31a747e01fcb6847512a3daffe9456b57"
+    },
+    {
+      "name": "baggage-journey",
+      "components": ["baggage-journey-v1", "BA", "0123456789"],
+      "canonical_hex": "00000012626167676167652d6a6f75726e65792d76310000000242410000000a30313233343536373839",
+      "sha256": "7e955126e2c5fface0697e4d75b986f54c4e83cadf1cde449bde040c8618ffc9"
+    },
+    {
+      "name": "baggage-journey-utf8-byte-length",
+      "components": ["baggage-journey-v1", "NH", "手荷物-42"],
+      "canonical_hex": "00000012626167676167652d6a6f75726e65792d7631000000024e480000000ce6898be88db7e789a92d3432",
+      "sha256": "5b99fedd6799d03c1fa33074e3fdd10bdb443502080025240debab4e8a5cdd95"
+    }
+  ]
+}

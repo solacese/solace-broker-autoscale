@@ -1,0 +1,207 @@
+# Managed broker resources must stay under this DNS-style namespace.
+namespace: swlb
+
+control:
+  broker_id: broker-0
+  smf_endpoint: tcps://broker-0.example:55443
+  semp_endpoint: https://broker-0.example:943
+  message_vpn: workload-control
+  principal: workload-controller-1
+  username_env: SOLACE_CONTROL_USERNAME
+  password_env: SOLACE_CONTROL_PASSWORD
+  semp_username_env: SOLACE_CONTROL_SEMP_USERNAME
+  semp_password_env: SOLACE_CONTROL_SEMP_PASSWORD
+  # Each principal is provisioned with publish ACLs for only its exact
+  # participant-scoped registration/ack/telemetry topics.
+  participant_credentials:
+    - participant: flight-publisher-1
+      principal: flight-publisher-1
+      username_env: SOLACE_FLIGHT_PUBLISHER_CONTROL_USERNAME
+      password_env: SOLACE_FLIGHT_PUBLISHER_CONTROL_PASSWORD
+    - participant: baggage-publisher-1
+      principal: baggage-publisher-1
+      username_env: SOLACE_BAGGAGE_PUBLISHER_CONTROL_USERNAME
+      password_env: SOLACE_BAGGAGE_PUBLISHER_CONTROL_PASSWORD
+    - participant: flight-subscriber-1
+      principal: flight-subscriber-1
+      username_env: SOLACE_FLIGHT_SUBSCRIBER_CONTROL_USERNAME
+      password_env: SOLACE_FLIGHT_SUBSCRIBER_CONTROL_PASSWORD
+    - participant: baggage-subscriber-1
+      principal: baggage-subscriber-1
+      username_env: SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_USERNAME
+      password_env: SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_PASSWORD
+    - participant: workload-observer-1
+      principal: workload-observer-1
+      username_env: SOLACE_WORKLOAD_OBSERVER_CONTROL_USERNAME
+      password_env: SOLACE_WORKLOAD_OBSERVER_CONTROL_PASSWORD
+  membership_lvq_prefix: swlb.membership
+  control_topic_prefix: swlb/control/v1
+  resources:
+    membership_topic_prefix: swlb/control/v1/membership
+    membership_queue_prefix: swlb.membership
+    command_topic_prefix: swlb/control/v1/command
+    command_queue_prefix: swlb.command
+    registration_topic: swlb/control/v1/registration
+    registration_queue: swlb.registration
+    readiness_topic: swlb/control/v1/readiness
+    readiness_queue: swlb.readiness
+    telemetry_topic: swlb/control/v1/telemetry
+    telemetry_queue: swlb.telemetry
+
+data_brokers:
+  - id: broker-a
+    smf_endpoint: tcps://broker-a.example:55443
+    semp_endpoint: https://broker-a.example:943
+    message_vpn: airline-events
+    username_env: SOLACE_DATA_USERNAME
+    password_env: SOLACE_DATA_PASSWORD
+    semp_username_env: SOLACE_DATA_SEMP_USERNAME
+    semp_password_env: SOLACE_DATA_SEMP_PASSWORD
+    service_class: enterprise-5k-standalone
+    broker_version: "10.25.0"
+    eligible_groups: [flight-operations, baggage-tracking]
+    labels: {region: us-central}
+  - id: broker-b
+    smf_endpoint: tcps://broker-b.example:55443
+    semp_endpoint: https://broker-b.example:943
+    message_vpn: airline-events
+    username_env: SOLACE_DATA_USERNAME
+    password_env: SOLACE_DATA_PASSWORD
+    semp_username_env: SOLACE_DATA_SEMP_USERNAME
+    semp_password_env: SOLACE_DATA_SEMP_PASSWORD
+    service_class: enterprise-5k-standalone
+    broker_version: "10.25.0"
+    eligible_groups: [flight-operations, baggage-tracking]
+    labels: {region: us-central}
+  - id: broker-c
+    smf_endpoint: tcps://broker-c.example:55443
+    semp_endpoint: https://broker-c.example:943
+    message_vpn: airline-events
+    username_env: SOLACE_DATA_USERNAME
+    password_env: SOLACE_DATA_PASSWORD
+    semp_username_env: SOLACE_DATA_SEMP_USERNAME
+    semp_password_env: SOLACE_DATA_SEMP_PASSWORD
+    service_class: enterprise-5k-standalone
+    broker_version: "10.25.0"
+    eligible_groups: [flight-operations, baggage-tracking]
+    labels: {region: us-central}
+
+# Operator-supplied measurements for the exact service class and broker build
+# above. These illustrative values are not Solace-published service limits and
+# must be replaced with measurements qualified for the deployment workload.
+# Throughput is bytes/second, spool is bytes, and connections is a count.
+capacity_profiles:
+  - service_class: enterprise-5k-standalone
+    broker_version: "10.25.0"
+    limits:
+      ingress_bytes_per_second: 1000000000
+      egress_bytes_per_second: 1000000000
+      spool_bytes: 100000000000
+      connections: 10000
+
+runtime:
+  mode: production
+  controller: workload-controller-1
+  publishers: [flight-publisher-1, baggage-publisher-1]
+  subscribers: [flight-subscriber-1, baggage-subscriber-1]
+  observers: [workload-observer-1]
+
+publisher:
+  max_concurrency: 32
+  batch_size: 128
+  batch_wait: 10ms
+  publish_timeout: 10s
+  shutdown_timeout: 30s
+
+staleness:
+  membership_max_age: 5m
+  participant_max_age: 30s
+  telemetry_max_age: 15s
+
+scaling_groups:
+  - id: flight-operations
+    hash_contract: flight-operations-v1
+    customer_library_version: airline-routing-v1
+    ordered_broker_ids: [broker-a, broker-b, broker-c]
+    queue:
+      name_prefix: swlb.flight-operations
+      type: partitioned
+      access: non-exclusive
+      partitions: 12
+      max_redeliveries: 5
+      dead_message_queue: swlb.flight-operations.dmq
+    policy:
+      minimum_brokers: 2
+      maximum_brokers: 3
+      warm_brokers: 0
+      headroom_percent: 30
+      pressure_window: 5m
+      cooldown: 15m
+      # The controller supports one active transition per group. Independent
+      # groups can transition concurrently.
+      max_concurrent_changes: 1
+    handover:
+      readiness_timeout: 2m
+      telemetry_max_age: 15s
+      drain_grace: 30s
+      transition_timeout: 15m
+    required_publishers: [flight-publisher-1]
+    consumer_sets:
+      # Workers listed in one set compete on its queue. Add another set to fan
+      # out an independent copy through separate broker/epoch queues.
+      - id: operations
+        subscribers: [flight-subscriber-1]
+
+  - id: baggage-tracking
+    hash_contract: baggage-journey-v1
+    customer_library_version: airline-routing-v1
+    ordered_broker_ids: [broker-a, broker-b, broker-c]
+    queue:
+      name_prefix: swlb.baggage-tracking
+      type: exclusive
+      access: exclusive
+      max_redeliveries: 5
+      dead_message_queue: swlb.baggage-tracking.dmq
+    policy:
+      minimum_brokers: 2
+      maximum_brokers: 3
+      warm_brokers: 0
+      headroom_percent: 30
+      pressure_window: 5m
+      cooldown: 15m
+      # The controller supports one active transition per group. Independent
+      # groups can transition concurrently.
+      max_concurrent_changes: 1
+    handover:
+      readiness_timeout: 2m
+      telemetry_max_age: 15s
+      drain_grace: 30s
+      transition_timeout: 15m
+    required_publishers: [baggage-publisher-1]
+    consumer_sets:
+      - id: tracking
+        subscribers: [baggage-subscriber-1]
+
+persistence:
+  controller_state: ./var/controller-state.json
+  publisher_outbox: ./var/publisher-outbox
+  outbox_max_messages: 100000
+  outbox_max_bytes: 1073741824
+
+# Disabled by default: this example never creates paid services. The values are
+# non-secret deployment constraints for an operator who explicitly enables it.
+cloud:
+  enabled: false
+  provider: solace-cloud
+  api_base_url: https://api.solace.cloud
+  credential_env: SOLACE_CLOUD_TOKEN
+  region: us-central
+  datacenter_id: example-datacenter
+  broker_version: "10.25"
+  control_service_class: developer
+  data_service_class: enterprise
+  desired_services: 0
+  max_paid_services: 0
+  max_runtime: 8h
+  cleanup_timeout: 30m
+  delete_after_test: false
