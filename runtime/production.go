@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/solacese/solace-workload-balancer/broker0"
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/controller"
@@ -62,69 +61,48 @@ func (c *MembershipCatalog) Get(group string) (control.MembershipSnapshot, bool)
 	return snapshot.Clone(), ok
 }
 
-// BootstrapMembership browses every group before the policy loop starts. It
-// seeds a deterministic ACTIVE snapshot only after the browser positively
-// reports ErrNoRetainedMembership; every other browse failure is fatal.
-func BootstrapMembership(ctx context.Context, cfg config.Config, durable controller.PersistentState, browser broker0.Browser, publisher interface {
+// BootstrapMembership restores authoritative membership from controller durable
+// state. A group with no transition history may be initialized once; the initial
+// snapshot is persisted before publication so crash recovery remains idempotent.
+func BootstrapMembership(ctx context.Context, cfg config.Config, durable controller.PersistentState, publisher interface {
 	PublishSnapshot(context.Context, control.MembershipSnapshot) error
-}, catalog *MembershipCatalog, resources ...*ManagedEpochResources) error {
-	if browser == nil || publisher == nil || catalog == nil {
-		return errors.New("runtime: membership browser, publisher, and catalog are required")
+}, catalog *MembershipCatalog, resources *ManagedEpochResources, authority *controller.Controller) error {
+	if publisher == nil || catalog == nil || resources == nil || authority == nil {
+		return errors.New("runtime: membership dependencies are required")
 	}
 	for _, group := range cfg.Groups {
-		messages, err := browser.Browse(ctx, group.ID)
-		if errors.Is(err, ErrNoRetainedMembership) || errors.Is(err, broker0.ErrNoAuthoritativeState) {
-			if state := durable.Groups[group.ID]; state != nil {
-				return fmt.Errorf("runtime: group %q has durable transition history but no retained membership", group.ID)
+		snapshot, ok := durable.Membership[group.ID]
+		if !ok {
+			if durable.Groups[group.ID] != nil {
+				return fmt.Errorf("runtime: group %q has transition history but no authoritative membership", group.ID)
 			}
-			snapshot, buildErr := GenesisSnapshot(cfg.Namespace, group)
-			if buildErr != nil {
-				return buildErr
+			var err error
+			snapshot, err = GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
+			if err != nil {
+				return err
 			}
-			if len(resources) != 0 {
-				if resources[0] == nil {
-					return errors.New("runtime: managed epoch resources are required")
-				}
-				if err := resources[0].EnsureBootstrap(ctx, snapshot, nil); err != nil {
-					return fmt.Errorf("runtime: ensure initial epoch resources for %q: %w", group.ID, err)
-				}
+			if err := resources.EnsureBootstrap(ctx, snapshot, nil); err != nil {
+				return fmt.Errorf("runtime: ensure initial resources for %q: %w", group.ID, err)
+			}
+			if err := authority.SaveMembership(snapshot); err != nil {
+				return fmt.Errorf("runtime: persist initial membership for %q: %w", group.ID, err)
 			}
 			if err := publisher.PublishSnapshot(ctx, snapshot); err != nil {
 				return fmt.Errorf("runtime: publish initial membership for %q: %w", group.ID, err)
 			}
-			if err := catalog.Put(snapshot); err != nil {
+		} else {
+			if err := validateConfiguredSnapshot(group, snapshot); err != nil {
 				return err
 			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("runtime: browse retained membership for %q: %w", group.ID, err)
-		}
-		snapshot, err := selectRetainedSnapshot(group.ID, messages)
-		if err != nil {
-			return err
-		}
-		if err := validateConfiguredSnapshot(group, snapshot); err != nil {
-			return err
-		}
-		state := durable.Groups[group.ID]
-		if snapshot.Phase != control.PhaseActive && state == nil {
-			return fmt.Errorf("runtime: retained transition for %q has no durable controller state", group.ID)
-		}
-		if state != nil {
-			if snapshot.Transition != nil && snapshot.Transition.ID != state.Spec.ID {
-				return fmt.Errorf("runtime: retained transition for %q conflicts with durable controller state", group.ID)
+			state := durable.Groups[group.ID]
+			if snapshot.Phase != control.PhaseActive && state == nil {
+				return fmt.Errorf("runtime: authoritative transition for %q has no durable transition state", group.ID)
 			}
-			if !state.Completed && snapshot.Phase == control.PhaseActive && !matchesUnpublishedPrepareSourceActive(snapshot, state) && !matchesPublishedTargetActive(snapshot, state) {
-				return fmt.Errorf("runtime: retained ACTIVE membership for %q conflicts with an incomplete durable transition", group.ID)
+			if state != nil && snapshot.Transition != nil && snapshot.Transition.ID != state.Spec.ID {
+				return fmt.Errorf("runtime: authoritative transition for %q conflicts with durable state", group.ID)
 			}
-		}
-		if len(resources) != 0 {
-			if resources[0] == nil {
-				return errors.New("runtime: managed epoch resources are required")
-			}
-			if err := resources[0].EnsureBootstrap(ctx, snapshot, state); err != nil {
-				return fmt.Errorf("runtime: verify retained epoch resources for %q: %w", group.ID, err)
+			if err := resources.EnsureBootstrap(ctx, snapshot, state); err != nil {
+				return fmt.Errorf("runtime: verify authoritative resources for %q: %w", group.ID, err)
 			}
 		}
 		if err := catalog.Put(snapshot); err != nil {
@@ -134,33 +112,8 @@ func BootstrapMembership(ctx context.Context, cfg config.Config, durable control
 	return nil
 }
 
-func selectRetainedSnapshot(group string, messages []broker0.BrowsedMessage) (control.MembershipSnapshot, error) {
-	if len(messages) == 0 {
-		return control.MembershipSnapshot{}, ErrNoRetainedMembership
-	}
-	var selected control.MembershipSnapshot
-	for index, message := range messages {
-		if message.Kind != broker0.KindMembershipSnapshot {
-			return control.MembershipSnapshot{}, fmt.Errorf("runtime: retained message %d for %q has kind %q", index, group, message.Kind)
-		}
-		snapshot, err := control.ParseMembershipSnapshot(message.Payload)
-		if err != nil {
-			return control.MembershipSnapshot{}, fmt.Errorf("runtime: parse retained membership for %q: %w", group, err)
-		}
-		if snapshot.ScalingGroup != group {
-			return control.MembershipSnapshot{}, fmt.Errorf("runtime: retained membership for %q contains group %q", group, snapshot.ScalingGroup)
-		}
-		if selected.Revision == 0 || snapshot.Revision > selected.Revision {
-			selected = snapshot
-		} else if snapshot.Revision == selected.Revision && !membershipSnapshotsEqual(snapshot, selected) {
-			return control.MembershipSnapshot{}, fmt.Errorf("runtime: conflicting retained revision %d for %q", snapshot.Revision, group)
-		}
-	}
-	return selected, nil
-}
-
 func membershipSnapshotsEqual(left, right control.MembershipSnapshot) bool {
-	return left.Version == right.Version && left.Namespace == right.Namespace && left.LibraryVersion == right.LibraryVersion && left.ScalingGroup == right.ScalingGroup && left.Revision == right.Revision && left.Epoch == right.Epoch && left.Phase == right.Phase && left.HashContract == right.HashContract && left.Algorithm == right.Algorithm && left.Queue == right.Queue && left.Destination == right.Destination && left.CurrentMembership.Equal(right.CurrentMembership) && left.ProposedMembership.Equal(right.ProposedMembership) && slices.Equal(left.CurrentResources, right.CurrentResources) && slices.Equal(left.ProposedResources, right.ProposedResources) && ((left.Transition == nil && right.Transition == nil) || (left.Transition != nil && right.Transition != nil && *left.Transition == *right.Transition))
+	return left.Version == right.Version && left.Namespace == right.Namespace && left.LibraryVersion == right.LibraryVersion && left.ScalingGroup == right.ScalingGroup && left.Revision == right.Revision && left.Epoch == right.Epoch && left.Phase == right.Phase && left.HashContract == right.HashContract && left.Algorithm == right.Algorithm && left.Queue == right.Queue && left.Destination == right.Destination && left.CurrentMembership.Equal(right.CurrentMembership) && left.ProposedMembership.Equal(right.ProposedMembership) && slices.Equal(left.CurrentBrokers, right.CurrentBrokers) && slices.Equal(left.ProposedBrokers, right.ProposedBrokers) && slices.Equal(left.CurrentResources, right.CurrentResources) && slices.Equal(left.ProposedResources, right.ProposedResources) && ((left.Transition == nil && right.Transition == nil) || (left.Transition != nil && right.Transition != nil && *left.Transition == *right.Transition))
 }
 
 func matchesUnpublishedPrepareSourceActive(snapshot control.MembershipSnapshot, state *controller.GroupState) bool {
@@ -178,7 +131,7 @@ func sourceActiveSnapshot(spec controller.TransitionSpec) control.MembershipSnap
 	return control.MembershipSnapshot{
 		Version: control.SnapshotVersion, Namespace: spec.Namespace, LibraryVersion: spec.LibraryVersion,
 		ScalingGroup: spec.Group, Revision: spec.Revision - 1, Epoch: spec.FromEpoch, Phase: control.PhaseActive,
-		HashContract: spec.HashContract, Algorithm: spec.Algorithm, CurrentMembership: membership,
+		HashContract: spec.HashContract, Algorithm: spec.Algorithm, CurrentMembership: membership, CurrentBrokers: slices.Clone(spec.CurrentBrokers),
 		Queue: spec.Queue, Destination: spec.Destination, CurrentResources: slices.Clone(spec.CurrentResources),
 	}
 }
@@ -259,12 +212,12 @@ func targetActiveSnapshot(spec controller.TransitionSpec) control.MembershipSnap
 	return control.MembershipSnapshot{
 		Version: control.SnapshotVersion, Namespace: spec.Namespace, LibraryVersion: spec.LibraryVersion,
 		ScalingGroup: spec.Group, Revision: spec.Revision + 4, Epoch: spec.ToEpoch, Phase: control.PhaseActive,
-		HashContract: spec.HashContract, Algorithm: spec.Algorithm, CurrentMembership: brokerMembership(spec.Proposed),
+		HashContract: spec.HashContract, Algorithm: spec.Algorithm, CurrentMembership: brokerMembership(spec.Proposed), CurrentBrokers: slices.Clone(spec.ProposedBrokers),
 		Queue: spec.Queue, Destination: spec.Destination, CurrentResources: slices.Clone(spec.ProposedResources),
 	}
 }
 
-func GenesisSnapshot(namespace string, group config.ScalingGroup) (control.MembershipSnapshot, error) {
+func GenesisSnapshot(namespace string, group config.ScalingGroup, inventory []config.DataBroker) (control.MembershipSnapshot, error) {
 	names, err := control.NewManagedNames(namespace)
 	if err != nil {
 		return control.MembershipSnapshot{}, err
@@ -277,11 +230,13 @@ func GenesisSnapshot(namespace string, group config.ScalingGroup) (control.Membe
 	if err != nil {
 		return control.MembershipSnapshot{}, err
 	}
+	brokers := configuredBrokerDescriptors(group.OrderedBrokerIDs, inventory)
 	snapshot := control.MembershipSnapshot{
 		Version: control.SnapshotVersion, Namespace: namespace, LibraryVersion: group.CustomerLibrary,
 		ScalingGroup: group.ID, Revision: 1, Epoch: 1, Phase: control.PhaseActive,
-		HashContract: group.HashContract, Algorithm: control.AlgorithmSHA256BigEndianModulo,
+		HashContract: group.HashContract, Algorithm: group.EffectiveRoutingAlgorithm(),
 		CurrentMembership: slices.Clone(group.OrderedBrokerIDs),
+		CurrentBrokers:    brokers,
 		Queue:             control.QueueInfo{Name: group.Queue.NamePrefix, Durable: true},
 		Destination:       control.DestinationInfo{Kind: control.DestinationTopic, Name: destination},
 		CurrentResources:  resources,
@@ -289,8 +244,46 @@ func GenesisSnapshot(namespace string, group config.ScalingGroup) (control.Membe
 	return snapshot, snapshot.Validate()
 }
 
+func configuredBrokerDescriptors(ids []string, inventory []config.DataBroker) []control.BrokerDescriptor {
+	result := make([]control.BrokerDescriptor, 0, len(ids))
+	for _, id := range ids {
+		endpoint := ""
+		for _, broker := range inventory {
+			if broker.ID == id {
+				endpoint = broker.AMQPEndpoint
+				break
+			}
+		}
+		if endpoint == "" {
+			continue
+		}
+		result = append(result, control.BrokerDescriptor{ID: id, Endpoint: endpoint})
+	}
+	return result
+}
+func selectBrokerDescriptors(snapshot control.MembershipSnapshot, ids []string, inventory []config.DataBroker) ([]control.BrokerDescriptor, error) {
+	byID := make(map[string]string)
+	for _, descriptor := range append(slices.Clone(snapshot.CurrentBrokers), snapshot.ProposedBrokers...) {
+		byID[descriptor.ID] = descriptor.Endpoint
+	}
+	for _, broker := range inventory {
+		if broker.AMQPEndpoint != "" {
+			byID[broker.ID] = broker.AMQPEndpoint
+		}
+	}
+	result := make([]control.BrokerDescriptor, 0, len(ids))
+	for _, id := range ids {
+		endpoint := byID[id]
+		if endpoint == "" {
+			return nil, fmt.Errorf("runtime: no AMQP endpoint for broker %q", id)
+		}
+		result = append(result, control.BrokerDescriptor{ID: id, Endpoint: endpoint})
+	}
+	return result, nil
+}
+
 func validateConfiguredSnapshot(group config.ScalingGroup, snapshot control.MembershipSnapshot) error {
-	if snapshot.HashContract != group.HashContract || snapshot.LibraryVersion != group.CustomerLibrary || snapshot.Queue.Name != group.Queue.NamePrefix {
+	if snapshot.HashContract != group.HashContract || snapshot.Algorithm != group.EffectiveRoutingAlgorithm() || snapshot.LibraryVersion != group.CustomerLibrary || snapshot.Queue.Name != group.Queue.NamePrefix {
 		return fmt.Errorf("runtime: retained membership for %q conflicts with configured contract", group.ID)
 	}
 	return nil
@@ -580,7 +573,7 @@ func (a *RecommendationController) ApplyRecommendations(ctx context.Context, dec
 				}
 			}
 		}
-		spec, err := transitionSpec(a.Config.Namespace, configured, baseline, recommendation, decision.At)
+		spec, err := transitionSpec(a.Config.Namespace, configured, baseline, recommendation, decision.At, a.Config.DataBrokers)
 		if err != nil {
 			return err
 		}
@@ -597,7 +590,7 @@ func (a *RecommendationController) ApplyRecommendations(ctx context.Context, dec
 	return nil
 }
 
-func transitionSpec(namespace string, group config.ScalingGroup, baseline control.MembershipSnapshot, recommendation policy.Recommendation, at time.Time) (controller.TransitionSpec, error) {
+func transitionSpec(namespace string, group config.ScalingGroup, baseline control.MembershipSnapshot, recommendation policy.Recommendation, at time.Time, inventory []config.DataBroker) (controller.TransitionSpec, error) {
 	if at.IsZero() {
 		return controller.TransitionSpec{}, errors.New("runtime: policy decision timestamp is required")
 	}
@@ -617,13 +610,22 @@ func transitionSpec(namespace string, group config.ScalingGroup, baseline contro
 		}
 		return result
 	}
+	currentBrokers, err := selectBrokerDescriptors(baseline, recommendation.CurrentMembership, nil)
+	if err != nil {
+		return controller.TransitionSpec{}, err
+	}
+	proposedBrokers, err := selectBrokerDescriptors(baseline, recommendation.ProposedMembership, inventory)
+	if err != nil {
+		return controller.TransitionSpec{}, err
+	}
 	requirements := typedRequirements(group)
 	spec := controller.TransitionSpec{
 		ID: fmt.Sprintf("policy-%s-e%d-%d", group.ID, toEpoch, at.UTC().UnixNano()), Namespace: namespace,
 		LibraryVersion: group.CustomerLibrary, Group: group.ID, Revision: baseline.Revision + 1,
 		FromEpoch: baseline.Epoch, ToEpoch: toEpoch, Current: brokerMap(recommendation.CurrentMembership), Proposed: brokerMap(recommendation.ProposedMembership),
+		CurrentBrokers: currentBrokers, ProposedBrokers: proposedBrokers,
 		Queue: baseline.Queue, Destination: baseline.Destination, CurrentResources: slices.Clone(baseline.CurrentResources), ProposedResources: resources,
-		HashContract: group.HashContract, Algorithm: control.AlgorithmSHA256BigEndianModulo, DrainGrace: group.Handover.DrainGrace.Duration,
+		HashContract: group.HashContract, Algorithm: group.EffectiveRoutingAlgorithm(), DrainGrace: group.Handover.DrainGrace.Duration,
 		RoleRequirements: requirements,
 	}
 	return spec, spec.Validate()

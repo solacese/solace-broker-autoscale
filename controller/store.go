@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/solacese/solace-workload-balancer/control"
 )
 
 const stateVersion = 1
@@ -25,7 +27,7 @@ type JSONStore struct {
 func (s JSONStore) Load() (PersistentState, error) {
 	data, err := os.ReadFile(s.Path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return PersistentState{Version: stateVersion, Groups: make(map[string]*GroupState), History: make(map[string][]TransitionRecord), CleanupEvidence: make(map[string][]CleanupEvidence)}, nil
+		return PersistentState{Version: stateVersion, Membership: make(map[string]control.MembershipSnapshot), Groups: make(map[string]*GroupState), History: make(map[string][]TransitionRecord), CleanupEvidence: make(map[string][]CleanupEvidence)}, nil
 	}
 	if err != nil {
 		return PersistentState{}, fmt.Errorf("read controller state: %w", err)
@@ -36,6 +38,9 @@ func (s JSONStore) Load() (PersistentState, error) {
 	}
 	if state.Version != stateVersion {
 		return PersistentState{}, fmt.Errorf("unsupported controller state version %d", state.Version)
+	}
+	if state.Membership == nil {
+		state.Membership = make(map[string]control.MembershipSnapshot)
 	}
 	if state.Groups == nil {
 		state.Groups = make(map[string]*GroupState)

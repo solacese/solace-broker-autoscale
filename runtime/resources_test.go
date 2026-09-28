@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
@@ -115,9 +116,9 @@ func resourceTestConfig(groups ...config.ScalingGroup) config.Config {
 	return config.Config{
 		Namespace: "swlb",
 		DataBrokers: []config.DataBroker{
-			{ID: "broker-a", MessageVPN: "data-a"},
-			{ID: "broker-b", MessageVPN: "data-b"},
-			{ID: "broker-c", MessageVPN: "data-c"},
+			{ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data-a"},
+			{ID: "broker-b", AMQPEndpoint: "amqps://broker-b.invalid:5671", MessageVPN: "data-b"},
+			{ID: "broker-c", AMQPEndpoint: "amqps://broker-c.invalid:5671", MessageVPN: "data-c"},
 		},
 		Groups: groups,
 	}
@@ -128,7 +129,7 @@ func TestProductionRecommendationRejectsMissingResourceManager(t *testing.T) {
 	cfg := resourceTestConfig(group)
 	cfg.Runtime.Mode = config.RuntimeModeProduction
 	catalog := NewMembershipCatalog()
-	baseline, _ := GenesisSnapshot(cfg.Namespace, group)
+	baseline, _ := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	_ = catalog.Put(baseline)
 	publisher := &captureMembershipPublisher{}
 	commands := &CommandPublisher{Publisher: publisher, Catalog: catalog, Deadlines: map[string]time.Duration{group.ID: time.Minute}}
@@ -147,7 +148,7 @@ func TestRecommendationPreparesFencedResourcesBeforeBegin(t *testing.T) {
 	group := productionGroup()
 	cfg := resourceTestConfig(group)
 	catalog := NewMembershipCatalog()
-	baseline, err := GenesisSnapshot(cfg.Namespace, group)
+	baseline, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,19 +202,19 @@ func TestRecommendationPreparesFencedResourcesBeforeBegin(t *testing.T) {
 }
 
 func TestManagedEpochResourcesPreserveQueueTypes(t *testing.T) {
-	flight := productionGroup()
-	flight.ID = "flight"
-	flight.Queue = config.Queue{NamePrefix: "swlb.flight", Type: config.QueueTypePartitioned, Access: config.QueueAccessNonExclusive, Partitions: 12, MaxRedeliveries: 5, DeadMessageQueue: "swlb.flight.dmq"}
-	flight.OrderedBrokerIDs = []string{"broker-a"}
-	baggage := productionGroup()
-	baggage.ID = "baggage"
-	baggage.Queue = config.Queue{NamePrefix: "swlb.baggage", Type: config.QueueTypeExclusive, Access: config.QueueAccessExclusive, MaxRedeliveries: 5, DeadMessageQueue: "swlb.baggage.dmq"}
-	baggage.OrderedBrokerIDs = []string{"broker-b"}
-	cfg := resourceTestConfig(flight, baggage)
+	eventsA := productionGroup()
+	eventsA.ID = "events-a"
+	eventsA.Queue = config.Queue{NamePrefix: "swlb.events-a", Type: config.QueueTypePartitioned, Access: config.QueueAccessNonExclusive, Partitions: 12, MaxRedeliveries: 5, DeadMessageQueue: "swlb.events-a.dmq"}
+	eventsA.OrderedBrokerIDs = []string{"broker-a"}
+	eventsB := productionGroup()
+	eventsB.ID = "events-b"
+	eventsB.Queue = config.Queue{NamePrefix: "swlb.events-b", Type: config.QueueTypeExclusive, Access: config.QueueAccessExclusive, MaxRedeliveries: 5, DeadMessageQueue: "swlb.events-b.dmq"}
+	eventsB.OrderedBrokerIDs = []string{"broker-b"}
+	cfg := resourceTestConfig(eventsA, eventsB)
 	clients := map[string]SEMPQueueClient{"broker-a": &lifecycleQueueClient{}, "broker-b": &lifecycleQueueClient{}}
 	manager := &ManagedEpochResources{Config: cfg, Clients: clients}
 	for _, group := range cfg.Groups {
-		snapshot, err := GenesisSnapshot(cfg.Namespace, group)
+		snapshot, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,13 +222,13 @@ func TestManagedEpochResourcesPreserveQueueTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	flightSpec := clients["broker-a"].(*lifecycleQueueClient).ensured[0]
-	baggageSpec := clients["broker-b"].(*lifecycleQueueClient).ensured[0]
-	if flightSpec.AccessType != config.QueueAccessNonExclusive || flightSpec.PartitionCount != 12 {
-		t.Fatalf("Flight queue semantics lost: %#v", flightSpec)
+	eventsASpec := clients["broker-a"].(*lifecycleQueueClient).ensured[0]
+	eventsBSpec := clients["broker-b"].(*lifecycleQueueClient).ensured[0]
+	if eventsASpec.AccessType != config.QueueAccessNonExclusive || eventsASpec.PartitionCount != 12 {
+		t.Fatalf("EventsA queue semantics lost: %#v", eventsASpec)
 	}
-	if baggageSpec.AccessType != config.QueueAccessExclusive || baggageSpec.PartitionCount != 0 {
-		t.Fatalf("Baggage queue semantics lost: %#v", baggageSpec)
+	if eventsBSpec.AccessType != config.QueueAccessExclusive || eventsBSpec.PartitionCount != 0 {
+		t.Fatalf("EventsB queue semantics lost: %#v", eventsBSpec)
 	}
 }
 
@@ -235,7 +236,7 @@ func TestPreparePartialFailureDoesNotBeginOrDeleteAdoptedQueues(t *testing.T) {
 	group := productionGroup()
 	cfg := resourceTestConfig(group)
 	catalog := NewMembershipCatalog()
-	baseline, _ := GenesisSnapshot(cfg.Namespace, group)
+	baseline, _ := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	_ = catalog.Put(baseline)
 	publisher := &captureMembershipPublisher{}
 	commands := &CommandPublisher{Publisher: publisher, Catalog: catalog, Deadlines: map[string]time.Duration{group.ID: time.Minute}}
@@ -270,7 +271,11 @@ func TestBootstrapEnsuresGenesisResourcesBeforePublication(t *testing.T) {
 	client := &lifecycleQueueClient{}
 	manager := &ManagedEpochResources{Config: cfg, Clients: map[string]SEMPQueueClient{"broker-a": client}}
 	publisher := &captureMembershipPublisher{}
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{err: ErrNoRetainedMembership}, publisher, NewMembershipCatalog(), manager); err != nil {
+	authority, err := controller.Open(controller.JSONStore{Path: filepath.Join(t.TempDir(), "controller.json")}, passthroughFence{}, publisher, controller.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BootstrapMembership(context.Background(), cfg, authority.Snapshot(), publisher, NewMembershipCatalog(), manager, authority); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.ensured) != 1 || !client.ensured[0].IngressEnabled || !client.ensured[0].EgressEnabled {
@@ -288,7 +293,11 @@ func TestBootstrapDoesNotPublishGenesisAfterResourceFailure(t *testing.T) {
 	client := &lifecycleQueueClient{failEnsureAt: 1}
 	manager := &ManagedEpochResources{Config: cfg, Clients: map[string]SEMPQueueClient{"broker-a": client}}
 	publisher := &captureMembershipPublisher{}
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{err: ErrNoRetainedMembership}, publisher, NewMembershipCatalog(), manager); err == nil {
+	authority, err := controller.Open(controller.JSONStore{Path: filepath.Join(t.TempDir(), "controller.json")}, passthroughFence{}, publisher, controller.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BootstrapMembership(context.Background(), cfg, authority.Snapshot(), publisher, NewMembershipCatalog(), manager, authority); err == nil {
 		t.Fatal("bootstrap published without resources")
 	}
 	if len(publisher.snapshots) != 0 {
@@ -302,7 +311,7 @@ func TestManagedResourceRestartIsIdempotentAndRejectsMismatch(t *testing.T) {
 	cfg := resourceTestConfig(group)
 	client := &lifecycleQueueClient{}
 	manager := &ManagedEpochResources{Config: cfg, Clients: map[string]SEMPQueueClient{"broker-a": client}}
-	snapshot, _ := GenesisSnapshot(cfg.Namespace, group)
+	snapshot, _ := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err := manager.EnsureCurrent(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -396,9 +405,9 @@ func TestCleanupDeletesOnlyExactUnreferencedOldQueue(t *testing.T) {
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	other := productionGroup()
-	other.ID = "baggage"
-	other.Queue.NamePrefix = "swlb.baggage"
-	other.Queue.DeadMessageQueue = "swlb.baggage.dmq"
+	other.ID = "events-b"
+	other.Queue.NamePrefix = "swlb.events-b"
+	other.Queue.DeadMessageQueue = "swlb.events-b.dmq"
 	other.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group, other)
 	oldResources, _ := expectedEpochResources(cfg.Namespace, group, []string{"broker-a"}, 1)
@@ -411,11 +420,11 @@ func TestCleanupDeletesOnlyExactUnreferencedOldQueue(t *testing.T) {
 	evidence := controller.CleanupEvidence{TransitionID: "move", SourceEpoch: 1, TargetEpoch: 2, ZeroSince: now.Add(-2 * time.Second), DrainObservedAt: now.Add(-time.Second), FenceVerifiedAt: now.Add(-time.Second), CommittedAt: now, OldEpochFenced: true, Sources: []controller.DrainSourceEvidence{{Broker: old.BrokerID, Queue: old.QueueName, ZeroSince: now.Add(-2 * time.Second), ObservedAt: now.Add(-time.Second)}}}
 	state := controller.PersistentState{Groups: map[string]*controller.GroupState{group.ID: transition}, CleanupEvidence: map[string][]controller.CleanupEvidence{group.ID: {evidence}}}
 	catalog := NewMembershipCatalog()
-	current := control.MembershipSnapshot{Version: control.SnapshotVersion, Namespace: cfg.Namespace, LibraryVersion: group.CustomerLibrary, ScalingGroup: group.ID, Revision: 6, Epoch: 2, Phase: control.PhaseActive, HashContract: group.HashContract, Algorithm: control.AlgorithmSHA256BigEndianModulo, CurrentMembership: []string{"broker-a"}, Queue: control.QueueInfo{Name: group.Queue.NamePrefix, Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: newResources[0].IngressTopic}, CurrentResources: newResources}
+	current := control.MembershipSnapshot{Version: control.SnapshotVersion, Namespace: cfg.Namespace, LibraryVersion: group.CustomerLibrary, ScalingGroup: group.ID, Revision: 6, Epoch: 2, Phase: control.PhaseActive, HashContract: group.HashContract, Algorithm: control.AlgorithmRendezvousV1, CurrentMembership: []string{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://broker-a.example:5671"}}, Queue: control.QueueInfo{Name: group.Queue.NamePrefix, Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: newResources[0].IngressTopic}, CurrentResources: newResources}
 	if err := catalog.Put(current); err != nil {
 		t.Fatal(err)
 	}
-	otherSnapshot, _ := GenesisSnapshot(cfg.Namespace, other)
+	otherSnapshot, _ := GenesisSnapshot(cfg.Namespace, other, cfg.DataBrokers)
 	if err := catalog.Put(otherSnapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -437,9 +446,9 @@ func TestCleanupProtectsQueueReferencedByAnotherGroupOnSharedBroker(t *testing.T
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	other := productionGroup()
-	other.ID = "baggage"
-	other.Queue.NamePrefix = "swlb.baggage"
-	other.Queue.DeadMessageQueue = "swlb.baggage.dmq"
+	other.ID = "events-b"
+	other.Queue.NamePrefix = "swlb.events-b"
+	other.Queue.DeadMessageQueue = "swlb.events-b.dmq"
 	other.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group, other)
 	oldResources, _ := expectedEpochResources(cfg.Namespace, group, []string{"broker-a"}, 1)
@@ -476,7 +485,7 @@ func TestCleanupProtectsQueueReferencedByAnotherGroupOnSharedBroker(t *testing.T
 		resources []control.EpochResourceIdentity
 		epoch     uint64
 	}{{group, newResources, 2}, {other, []control.EpochResourceIdentity{old}, 1}} {
-		snapshot := control.MembershipSnapshot{Version: control.SnapshotVersion, Namespace: cfg.Namespace, LibraryVersion: entry.group.CustomerLibrary, ScalingGroup: entry.group.ID, Revision: 6, Epoch: entry.epoch, Phase: control.PhaseActive, HashContract: entry.group.HashContract, Algorithm: control.AlgorithmSHA256BigEndianModulo, CurrentMembership: []string{"broker-a"}, Queue: control.QueueInfo{Name: entry.group.Queue.NamePrefix, Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: entry.resources[0].IngressTopic}, CurrentResources: entry.resources}
+		snapshot := control.MembershipSnapshot{Version: control.SnapshotVersion, Namespace: cfg.Namespace, LibraryVersion: entry.group.CustomerLibrary, ScalingGroup: entry.group.ID, Revision: 6, Epoch: entry.epoch, Phase: control.PhaseActive, HashContract: entry.group.HashContract, Algorithm: control.AlgorithmRendezvousV1, CurrentMembership: []string{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://broker-a.example:5671"}}, Queue: control.QueueInfo{Name: entry.group.Queue.NamePrefix, Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: entry.resources[0].IngressTopic}, CurrentResources: entry.resources}
 		if err := catalog.Put(snapshot); err != nil {
 			t.Fatal(err)
 		}

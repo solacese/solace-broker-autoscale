@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log"
 
 	"github.com/solacese/solace-workload-balancer/customer"
-	"github.com/solacese/solace-workload-balancer/routing"
 	"github.com/solacese/solace-workload-balancer/shim/subscriber"
 )
 
@@ -17,12 +15,13 @@ func (exampleLibrary) GetScalingGroup(message customer.MessageView) (string, err
 	return message.Headers["scaling-group"], nil
 }
 
-func (exampleLibrary) GetBusinessHash(message customer.MessageView) ([sha256.Size]byte, error) {
-	if message.Headers["scaling-group"] == "flight-operations" {
-		return routing.FlightOperationsHash(message.Headers["carrier"], message.Headers["flight-number"], message.Headers["departure-date"], message.Headers["leg-id"])
-	}
-	return routing.BaggageHash(message.Headers["carrier"], message.Headers["bag-journey-id"])
+func (exampleLibrary) GetBusinessHash(message customer.MessageView) (customer.BusinessHash, error) {
+	return customer.EntityHash(message.Headers["scaling-group"], message.Headers["entity_id"])
 }
+func (exampleLibrary) GetRendezvousScore(input customer.ScoreInput) (customer.RoutingScore, error) {
+	return customer.SHA256RendezvousScore(input)
+}
+func (exampleLibrary) RoutingAlgorithm() string { return customer.RendezvousSHA256Contract }
 
 type delivery struct {
 	message customer.MessageView
@@ -44,11 +43,11 @@ func (d *delivery) RoutingMetadata() (subscriber.RoutingMetadata, error) {
 	if err != nil {
 		return subscriber.RoutingMetadata{}, err
 	}
-	contract := routing.BaggageDomain
-	if group == "flight-operations" {
-		contract = routing.FlightOperationsDomain
+	contract := customer.EntityAffinityContract
+	if group == "events-a" {
+		contract = customer.EntityAffinityContract
 	}
-	return subscriber.RoutingMetadata{Group: group, BusinessHash: hash, HashContract: contract, LibraryVersion: "airline-routing-v1", Epoch: 1, OriginalTopic: d.message.Topic}, nil
+	return subscriber.RoutingMetadata{Group: group, BusinessHash: hash, HashContract: contract, LibraryVersion: "entity-routing-v1", Epoch: 1, OriginalTopic: d.message.Topic}, nil
 }
 
 type consumer struct{}
@@ -78,18 +77,18 @@ func main() {
 	shim, err := subscriber.New(subscriber.Config{
 		Participant: "example-subscriber", Library: exampleLibrary{}, Handler: handler, Factory: factory{}, Reporter: reporter{},
 		Contracts: map[string]subscriber.Contract{
-			"flight-operations": {HashContract: routing.FlightOperationsDomain, LibraryVersion: "airline-routing-v1"},
-			"baggage-tracking":  {HashContract: routing.BaggageDomain, LibraryVersion: "airline-routing-v1"},
+			"events-a": {HashContract: customer.EntityAffinityContract, LibraryVersion: "entity-routing-v1"},
+			"events-b": {HashContract: customer.EntityAffinityContract, LibraryVersion: "entity-routing-v1"},
 		},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	binding := subscriber.Binding{Group: "flight-operations", BrokerID: "broker-a", Epoch: 1, Destination: "swlb.flight-operations.epoch.1"}
+	binding := subscriber.Binding{Group: "events-a", BrokerID: "broker-a", Epoch: 1, Destination: "swlb.eventsA.epoch.1"}
 	if err := shim.AddActive(context.Background(), binding); err != nil {
 		log.Fatal(err)
 	}
-	message := customer.MessageView{Topic: "airline/flight/status", EventID: "flight-event-1", Payload: []byte(`{"status":"boarding"}`), Headers: map[string]string{"scaling-group": "flight-operations", "carrier": "UA", "flight-number": "123", "departure-date": "2026-09-25", "leg-id": "ORD-LAX"}}
+	message := customer.MessageView{Topic: "synthetic/eventsA/status", EventID: "eventsA-event-1", Payload: []byte(`{"status":"boarding"}`), Headers: map[string]string{"scaling-group": "events-a", "entity_id": "UA", "event_type": "123", "timestamp": "2026-09-25", "sequence": "ORD-LAX"}}
 	d := &delivery{message: message}
 	if err := shim.Handle(context.Background(), binding, d); err != nil {
 		log.Fatal(err)

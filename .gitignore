@@ -1,5 +1,6 @@
 # Build and test outputs
 /bin/
+.local/
 /var/
 /tools/**/target/
 *.out
@@ -18,3 +19,7 @@
 
 # Operating-system metadata
 .DS_Store
+
+__pycache__/
+*.pyc
+artifacts/

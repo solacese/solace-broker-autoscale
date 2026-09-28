@@ -16,12 +16,12 @@ import (
 
 const (
 	// SnapshotVersion is the only wire version understood by this package.
-	SnapshotVersion uint32 = 2
-	// AlgorithmSHA256BigEndianModulo is the only broker-selection algorithm in v1.
-	AlgorithmSHA256BigEndianModulo = "sha256-unsigned-big-endian-modulo"
-	maxSnapshotBytes               = 1 << 20
-	maxIdentifierBytes             = 1024
-	maxMembershipSize              = 1 << 16
+	SnapshotVersion uint32 = 3
+	// AlgorithmRendezvousV1 is the canonical equal-weight rendezvous contract.
+	AlgorithmRendezvousV1 = "swlb-rendezvous-v1"
+	maxSnapshotBytes      = 1 << 20
+	maxIdentifierBytes    = 1024
+	maxMembershipSize     = 1 << 16
 )
 
 // Phase describes whether the ordered membership is serving normally or is in
@@ -78,9 +78,15 @@ type DestinationInfo struct {
 	Name string          `json:"name"`
 }
 
+// BrokerDescriptor maps an immutable logical broker ID to a credential-free AMQP
+// endpoint. Credentials remain local and are resolved by stable ID.
+type BrokerDescriptor struct {
+	ID       string `json:"id"`
+	Endpoint string `json:"endpoint"`
+}
+
 // EpochResourceIdentity names controller-managed resources for one consumer set
-// and routing epoch. These fields are identities only; endpoints and credentials
-// never belong in a control document.
+// and routing epoch. Credentials never belong in a control document.
 type EpochResourceIdentity struct {
 	Epoch        uint64 `json:"epoch"`
 	BrokerID     string `json:"broker_id"`
@@ -104,6 +110,8 @@ type MembershipSnapshot struct {
 	Algorithm          string                  `json:"algorithm"`
 	CurrentMembership  Membership              `json:"current_membership"`
 	ProposedMembership Membership              `json:"proposed_membership,omitempty"`
+	CurrentBrokers     []BrokerDescriptor      `json:"current_brokers"`
+	ProposedBrokers    []BrokerDescriptor      `json:"proposed_brokers,omitempty"`
 	Transition         *Transition             `json:"transition,omitempty"`
 	Queue              QueueInfo               `json:"queue"`
 	Destination        DestinationInfo         `json:"destination"`
@@ -117,6 +125,8 @@ func (s MembershipSnapshot) Clone() MembershipSnapshot {
 	clone := s
 	clone.CurrentMembership = s.CurrentMembership.Clone()
 	clone.ProposedMembership = s.ProposedMembership.Clone()
+	clone.CurrentBrokers = append([]BrokerDescriptor(nil), s.CurrentBrokers...)
+	clone.ProposedBrokers = append([]BrokerDescriptor(nil), s.ProposedBrokers...)
 	clone.CurrentResources = append([]EpochResourceIdentity(nil), s.CurrentResources...)
 	clone.ProposedResources = append([]EpochResourceIdentity(nil), s.ProposedResources...)
 	if s.Transition != nil {
@@ -154,13 +164,19 @@ func (s MembershipSnapshot) Validate() error {
 	if err := validateIdentifier("hash contract", s.HashContract); err != nil {
 		return err
 	}
-	if s.Algorithm != AlgorithmSHA256BigEndianModulo {
-		return fmt.Errorf("control: unsupported routing algorithm %q", s.Algorithm)
+	if err := validateIdentifier("routing algorithm", s.Algorithm); err != nil {
+		return err
 	}
 	if err := validateMembership("current membership", s.CurrentMembership, true); err != nil {
 		return err
 	}
 	if err := validateMembership("proposed membership", s.ProposedMembership, false); err != nil {
+		return err
+	}
+	if err := validateBrokerDescriptors("current brokers", s.CurrentBrokers, s.CurrentMembership, true); err != nil {
+		return err
+	}
+	if err := validateBrokerDescriptors("proposed brokers", s.ProposedBrokers, s.ProposedMembership, len(s.ProposedMembership) != 0); err != nil {
 		return err
 	}
 	if err := validateIdentifier("queue name", s.Queue.Name); err != nil {
@@ -181,7 +197,7 @@ func (s MembershipSnapshot) Validate() error {
 
 	switch s.Phase {
 	case PhaseActive:
-		if len(s.ProposedMembership) != 0 || s.Transition != nil || len(s.ProposedResources) != 0 {
+		if len(s.ProposedMembership) != 0 || s.Transition != nil || len(s.ProposedResources) != 0 || len(s.ProposedBrokers) != 0 {
 			return errors.New("control: ACTIVE snapshot must not contain proposed state or transition")
 		}
 	case PhaseCommitted:
@@ -225,8 +241,9 @@ func (s MembershipSnapshot) Validate() error {
 }
 
 // ParseMembershipSnapshot strictly decodes and validates one JSON object.
-// Unknown fields (including credential, token, and endpoint fields), duplicate
-// fields, trailing values, and inputs over one MiB are rejected.
+// Unknown fields (including credential or token fields), duplicate fields,
+// trailing values, and inputs over one MiB are rejected. Broker endpoints are
+// accepted only through validated BrokerDescriptor fields.
 func ParseMembershipSnapshot(data []byte) (MembershipSnapshot, error) {
 	var snapshot MembershipSnapshot
 	if len(data) > maxSnapshotBytes {
@@ -252,6 +269,50 @@ func ParseMembershipSnapshot(data []byte) (MembershipSnapshot, error) {
 		return MembershipSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func validateBrokerDescriptors(field string, descriptors []BrokerDescriptor, membership Membership, required bool) error {
+	if required && len(descriptors) != len(membership) {
+		return fmt.Errorf("control: %s must describe every membership broker", field)
+	}
+	if !required && len(descriptors) != 0 {
+		return fmt.Errorf("control: %s must be empty without membership", field)
+	}
+	members := make(map[string]struct{}, len(membership))
+	for _, id := range membership {
+		members[id] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(descriptors))
+	for index, descriptor := range descriptors {
+		if err := validateIdentifier(fmt.Sprintf("%s broker %d", field, index), descriptor.ID); err != nil {
+			return err
+		}
+		if _, ok := members[descriptor.ID]; !ok {
+			return fmt.Errorf("control: %s contains unknown broker %q", field, descriptor.ID)
+		}
+		if _, duplicate := seen[descriptor.ID]; duplicate {
+			return fmt.Errorf("control: %s repeats broker %q", field, descriptor.ID)
+		}
+		seen[descriptor.ID] = struct{}{}
+		endpoint, err := url.Parse(descriptor.Endpoint)
+		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.Path != "" && endpoint.Path != "/" || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Scheme != "amqp" && endpoint.Scheme != "amqps" && endpoint.Scheme != "amqp+ssl" {
+			return fmt.Errorf("control: %s broker %q endpoint must be an absolute credential-free AMQP URL", field, descriptor.ID)
+		}
+	}
+	return nil
+}
+
+func (s MembershipSnapshot) BrokerEndpoint(id string, proposed bool) (string, bool) {
+	descriptors := s.CurrentBrokers
+	if proposed {
+		descriptors = s.ProposedBrokers
+	}
+	for _, descriptor := range descriptors {
+		if descriptor.ID == id {
+			return descriptor.Endpoint, true
+		}
+	}
+	return "", false
 }
 
 func validateResources(field string, resources []EpochResourceIdentity, epoch uint64, membership Membership) error {
@@ -462,7 +523,7 @@ func snapshotsEqual(left, right MembershipSnapshot) bool {
 		left.Phase != right.Phase || left.HashContract != right.HashContract || left.Algorithm != right.Algorithm ||
 		!left.CurrentMembership.Equal(right.CurrentMembership) ||
 		!left.ProposedMembership.Equal(right.ProposedMembership) || left.Queue != right.Queue ||
-		left.Destination != right.Destination || !resourcesEqual(left.CurrentResources, right.CurrentResources) ||
+		left.Destination != right.Destination || !brokerDescriptorsEqual(left.CurrentBrokers, right.CurrentBrokers) || !brokerDescriptorsEqual(left.ProposedBrokers, right.ProposedBrokers) || !resourcesEqual(left.CurrentResources, right.CurrentResources) ||
 		!resourcesEqual(left.ProposedResources, right.ProposedResources) {
 		return false
 	}
@@ -470,6 +531,18 @@ func snapshotsEqual(left, right MembershipSnapshot) bool {
 		return left.Transition == nil && right.Transition == nil
 	}
 	return *left.Transition == *right.Transition
+}
+
+func brokerDescriptorsEqual(left, right []BrokerDescriptor) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func resourcesEqual(left, right []EpochResourceIdentity) bool {

@@ -171,11 +171,15 @@ func testSpec(group, id string) TransitionSpec {
 	return TransitionSpec{
 		ID: id, Group: group, Revision: 10, FromEpoch: 1, ToEpoch: 2,
 		Current:              []Broker{{ID: "old", Destination: "orders"}},
+		CurrentBrokers:       []control.BrokerDescriptor{{ID: "old", Endpoint: "amqps://old.example:5671"}},
+		ProposedBrokers:      []control.BrokerDescriptor{{ID: "new", Endpoint: "amqps://new.example:5671"}},
 		Proposed:             []Broker{{ID: "new", Destination: "orders"}},
 		Queue:                control.QueueInfo{Name: group + "-queue", Durable: true},
 		Destination:          control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
+		CurrentResources:     []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "old", ConsumerSet: "default", QueueName: group + "-queue", IngressTopic: "orders/e1/>"}},
+		ProposedResources:    []control.EpochResourceIdentity{{Epoch: 2, BrokerID: "new", ConsumerSet: "default", QueueName: group + ".new.e2", IngressTopic: "orders/e2/>"}},
 		HashContract:         "orders-v1",
-		Algorithm:            control.AlgorithmSHA256BigEndianModulo,
+		Algorithm:            control.AlgorithmRendezvousV1,
 		RequiredParticipants: []string{"sub-b", "sub-a"},
 	}
 }
@@ -238,51 +242,51 @@ func acknowledgeTyped(t *testing.T, controller *Controller, group, participant s
 
 func TestBlockedGroupDoesNotBlockIndependentGroup(t *testing.T) {
 	now := time.Unix(900, 0).UTC()
-	publisher := newBlockingPublisher("Flight")
+	publisher := newBlockingPublisher("EventsA")
 	path := filepath.Join(t.TempDir(), "state.json")
 	controller := openTestController(t, path, &now, &fakeFence{}, publisher)
-	for _, spec := range []TransitionSpec{testSpec("Flight", "flight-1"), testSpec("Baggage", "baggage-1")} {
+	for _, spec := range []TransitionSpec{testSpec("EventsA", "eventsA-1"), testSpec("EventsB", "eventsB-1")} {
 		if _, err := controller.Begin(spec); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	flightDone := make(chan error, 1)
+	eventsADone := make(chan error, 1)
 	go func() {
-		_, err := controller.Reconcile(context.Background(), "Flight")
-		flightDone <- err
+		_, err := controller.Reconcile(context.Background(), "EventsA")
+		eventsADone <- err
 	}()
 	select {
 	case <-publisher.started:
 	case <-time.After(time.Second):
-		t.Fatal("Flight publication did not block")
+		t.Fatal("EventsA publication did not block")
 	}
 	defer publisher.releaseBlocked()
 
-	baggageDone := make(chan error, 1)
+	eventsBDone := make(chan error, 1)
 	go func() {
-		_, err := controller.Reconcile(context.Background(), "Baggage")
-		baggageDone <- err
+		_, err := controller.Reconcile(context.Background(), "EventsB")
+		eventsBDone <- err
 	}()
 	select {
-	case err := <-baggageDone:
+	case err := <-eventsBDone:
 		if err != nil {
-			t.Fatalf("Baggage reconcile failed while Flight was blocked: %v", err)
+			t.Fatalf("EventsB reconcile failed while EventsA was blocked: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Baggage reconcile was blocked by Flight publication")
+		t.Fatal("EventsB reconcile was blocked by EventsA publication")
 	}
-	state, _ := controller.Group("Baggage")
+	state, _ := controller.Group("EventsB")
 	if !state.PreparePublished {
-		t.Fatal("Baggage publication was not persisted")
+		t.Fatal("EventsB publication was not persisted")
 	}
 
 	publisher.releaseBlocked()
-	if err := <-flightDone; err != nil {
-		t.Fatalf("Flight reconcile failed after release: %v", err)
+	if err := <-eventsADone; err != nil {
+		t.Fatalf("EventsA reconcile failed after release: %v", err)
 	}
 	restarted := openTestController(t, path, &now, &fakeFence{}, &fakePublisher{})
-	for _, group := range []string{"Flight", "Baggage"} {
+	for _, group := range []string{"EventsA", "EventsB"} {
 		state, ok := restarted.Group(group)
 		if !ok || !state.PreparePublished {
 			t.Fatalf("persisted %s state was lost: found=%v state=%#v", group, ok, state)
@@ -292,27 +296,27 @@ func TestBlockedGroupDoesNotBlockIndependentGroup(t *testing.T) {
 
 func TestSameGroupReconcileRemainsSerialized(t *testing.T) {
 	now := time.Unix(950, 0).UTC()
-	publisher := newBlockingPublisher("Flight")
+	publisher := newBlockingPublisher("EventsA")
 	controller := openTestController(t, filepath.Join(t.TempDir(), "state.json"), &now, &fakeFence{}, publisher)
-	if _, err := controller.Begin(testSpec("Flight", "flight-1")); err != nil {
+	if _, err := controller.Begin(testSpec("EventsA", "eventsA-1")); err != nil {
 		t.Fatal(err)
 	}
 
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := controller.Reconcile(context.Background(), "Flight")
+		_, err := controller.Reconcile(context.Background(), "EventsA")
 		firstDone <- err
 	}()
 	select {
 	case <-publisher.started:
 	case <-time.After(time.Second):
-		t.Fatal("first Flight publication did not block")
+		t.Fatal("first EventsA publication did not block")
 	}
 	defer publisher.releaseBlocked()
 
 	secondDone := make(chan error, 1)
 	go func() {
-		_, err := controller.Reconcile(context.Background(), "Flight")
+		_, err := controller.Reconcile(context.Background(), "EventsA")
 		secondDone <- err
 	}()
 	select {
@@ -320,18 +324,18 @@ func TestSameGroupReconcileRemainsSerialized(t *testing.T) {
 		t.Fatalf("same-group reconcile returned before the first completed: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if calls, maximum := publisher.counts("Flight"); calls != 1 || maximum != 1 {
-		t.Fatalf("concurrent Flight publications: calls=%d maximum=%d", calls, maximum)
+	if calls, maximum := publisher.counts("EventsA"); calls != 1 || maximum != 1 {
+		t.Fatalf("concurrent EventsA publications: calls=%d maximum=%d", calls, maximum)
 	}
 
 	publisher.releaseBlocked()
 	if err := <-firstDone; err != nil {
-		t.Fatalf("first Flight reconcile failed: %v", err)
+		t.Fatalf("first EventsA reconcile failed: %v", err)
 	}
 	if err := <-secondDone; err != nil {
-		t.Fatalf("second Flight reconcile failed: %v", err)
+		t.Fatalf("second EventsA reconcile failed: %v", err)
 	}
-	if calls, maximum := publisher.counts("Flight"); calls != 1 || maximum != 1 {
+	if calls, maximum := publisher.counts("EventsA"); calls != 1 || maximum != 1 {
 		t.Fatalf("same-group publication was not serialized: calls=%d maximum=%d", calls, maximum)
 	}
 }
@@ -523,7 +527,7 @@ func TestTransitionPhaseBoundariesAndNoCommitWithUnacked(t *testing.T) {
 	reconcileChanged(t, controller, spec.Group) // -> DRAIN
 	reconcileChanged(t, controller, spec.Group) // publish DRAIN
 
-	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, ObservedAt: now, Queued: Count{Known: false}, Stored: Count{Known: false}, Unacked: Count{Known: false}}); err != nil {
+	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, SourceBroker: "old", SourceQueue: spec.Queue.Name, ObservedAt: now, Queued: Count{Known: false}, Stored: Count{Known: false}, Unacked: Count{Known: false}}); err != nil {
 		t.Fatal(err)
 	}
 	changed, err = controller.Reconcile(context.Background(), spec.Group)
@@ -531,11 +535,11 @@ func TestTransitionPhaseBoundariesAndNoCommitWithUnacked(t *testing.T) {
 		t.Fatalf("unknown telemetry allowed commit: changed=%v err=%v", changed, err)
 	}
 	now = now.Add(time.Second)
-	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, ObservedAt: now, Queued: Count{Known: true, Value: 1}, Stored: Count{Known: true, Value: 1}, Unacked: Count{Known: true, Value: 1}}); err != nil {
+	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, SourceBroker: "old", SourceQueue: spec.Queue.Name, ObservedAt: now, Queued: Count{Known: true, Value: 1}, Stored: Count{Known: true, Value: 1}, Unacked: Count{Known: true, Value: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
-	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, ObservedAt: now, Queued: Count{Known: true}, Stored: Count{Known: true}, Unacked: Count{Known: true}}); err != nil {
+	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, SourceBroker: "old", SourceQueue: spec.Queue.Name, ObservedAt: now, Queued: Count{Known: true}, Stored: Count{Known: true}, Unacked: Count{Known: true}}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Second)
@@ -544,7 +548,7 @@ func TestTransitionPhaseBoundariesAndNoCommitWithUnacked(t *testing.T) {
 		t.Fatalf("zero shorter than grace allowed commit: changed=%v err=%v", changed, err)
 	}
 	now = now.Add(time.Second)
-	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, ObservedAt: now, Queued: Count{Known: true}, Stored: Count{Known: true}, Unacked: Count{Known: true}}); err != nil {
+	if err := controller.Observe(Telemetry{Group: spec.Group, TransitionID: spec.ID, Epoch: spec.FromEpoch, SourceBroker: "old", SourceQueue: spec.Queue.Name, ObservedAt: now, Queued: Count{Known: true}, Stored: Count{Known: true}, Unacked: Count{Known: true}}); err != nil {
 		t.Fatal(err)
 	}
 	acknowledgeAll(t, controller, spec, PhaseDrain, now)
@@ -689,18 +693,27 @@ func TestBeginSnapshotPreservesAuthoritativeMembershipOrder(t *testing.T) {
 	publisher := &fakePublisher{}
 	controller := openTestController(t, filepath.Join(t.TempDir(), "state.json"), &now, &fakeFence{}, publisher)
 	snapshot := control.MembershipSnapshot{
-		Version:            control.SnapshotVersion,
-		ScalingGroup:       "ordered",
-		Revision:           20,
-		Epoch:              7,
-		Phase:              control.PhasePrepare,
-		HashContract:       "ordered-v1",
-		Algorithm:          control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership:  control.Membership{"z", "a"},
+		Version:           control.SnapshotVersion,
+		ScalingGroup:      "ordered",
+		Revision:          20,
+		Epoch:             7,
+		Phase:             control.PhasePrepare,
+		HashContract:      "ordered-v1",
+		Algorithm:         control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"z", "a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "z", Endpoint: "amqps://z.example:5671"}, {ID: "a", Endpoint: "amqps://a.example:5671"}},
+		ProposedBrokers:    []control.BrokerDescriptor{{ID: "m", Endpoint: "amqps://m.example:5671"}, {ID: "b", Endpoint: "amqps://b.example:5671"}},
 		ProposedMembership: control.Membership{"m", "b"},
 		Transition:         &control.Transition{ID: "order-1", FromEpoch: 7, ToEpoch: 8},
-		Queue:              control.QueueInfo{Name: "ordered-queue", Durable: true},
-		Destination:        control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
+		CurrentResources: []control.EpochResourceIdentity{
+			{Epoch: 7, BrokerID: "z", ConsumerSet: "default", QueueName: "ordered.z.e7", IngressTopic: "orders/e7/>"},
+			{Epoch: 7, BrokerID: "a", ConsumerSet: "default", QueueName: "ordered.a.e7", IngressTopic: "orders/e7/>"},
+		},
+		ProposedResources: []control.EpochResourceIdentity{
+			{Epoch: 8, BrokerID: "m", ConsumerSet: "default", QueueName: "ordered.m.e8", IngressTopic: "orders/e8/>"},
+			{Epoch: 8, BrokerID: "b", ConsumerSet: "default", QueueName: "ordered.b.e8", IngressTopic: "orders/e8/>"},
+		},
+		Queue:       control.QueueInfo{Name: "ordered-queue", Durable: true},
+		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
 	}
 	state, err := controller.BeginSnapshot(snapshot, []string{"subscriber"})
 	if err != nil {
@@ -726,20 +739,20 @@ func TestGroupSpecificSafetyWindows(t *testing.T) {
 		Options{
 			Now: func() time.Time { return now },
 			PhaseTimeoutByGroup: map[string]time.Duration{
-				"Flight":  time.Minute,
-				"Baggage": 2 * time.Minute,
+				"EventsA": time.Minute,
+				"EventsB": 2 * time.Minute,
 			},
 			TelemetryFreshness: time.Minute,
 			TelemetryFreshnessByGroup: map[string]time.Duration{
-				"Flight":  5 * time.Second,
-				"Baggage": 15 * time.Second,
+				"EventsA": 5 * time.Second,
+				"EventsB": 15 * time.Second,
 			},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for group, timeout := range map[string]time.Duration{"Flight": time.Minute, "Baggage": 2 * time.Minute} {
+	for group, timeout := range map[string]time.Duration{"EventsA": time.Minute, "EventsB": 2 * time.Minute} {
 		state, err := controller.Begin(testSpec(group, group+"-1"))
 		if err != nil {
 			t.Fatal(err)
@@ -750,9 +763,10 @@ func TestGroupSpecificSafetyWindows(t *testing.T) {
 	}
 	zeroAt := now.Add(-10 * time.Second)
 	zero := Telemetry{ObservedAt: zeroAt, Queued: Count{Known: true}, Stored: Count{Known: true}, Unacked: Count{Known: true}}
-	for group, wantComplete := range map[string]bool{"Flight": false, "Baggage": true} {
+	for group, wantComplete := range map[string]bool{"EventsA": false, "EventsB": true} {
 		state := &GroupState{Spec: testSpec(group, group+"-drain"), Phase: PhaseDrain, PhaseEnteredAt: zeroAt.Add(-time.Second), LatestTelemetry: &zero, ZeroSince: &zeroAt}
 		state.Spec.DrainGrace = 0
+		state.Spec.CurrentResources = nil
 		if got := controller.drainComplete(state); got != wantComplete {
 			t.Fatalf("%s drainComplete = %v, want %v", group, got, wantComplete)
 		}
@@ -936,6 +950,7 @@ func TestDrainRequiresEverySourceAndTelemetryReplayIsIdempotent(t *testing.T) {
 	spec := testSpec("sources", "sources-1")
 	spec.Namespace = "acme"
 	spec.Current = []Broker{{ID: "broker-a", Destination: "orders"}, {ID: "broker-b", Destination: "orders"}}
+	spec.CurrentBrokers = []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://a.example:5671"}, {ID: "broker-b", Endpoint: "amqps://b.example:5671"}}
 	spec.CurrentResources = []control.EpochResourceIdentity{
 		{Epoch: spec.FromEpoch, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "orders-a-e1", IngressTopic: "orders/e1/>"},
 		{Epoch: spec.FromEpoch, BrokerID: "broker-b", ConsumerSet: "default", QueueName: "orders-b-e1", IngressTopic: "orders/e1/>"},

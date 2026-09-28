@@ -14,7 +14,7 @@ func managedSubscriptionFixture(t *testing.T, subscriptions []string) (*ManagedE
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group)
-	snapshot, err := GenesisSnapshot(cfg.Namespace, group)
+	snapshot, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestManagedEpochResourcesAdoptsExactDesiredSubscriptionSet(t *testing.T) {
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group)
-	snapshot, err := GenesisSnapshot(cfg.Namespace, group)
+	snapshot, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestManagedEpochResourcesCreatesAndVerifiesMissingDesiredSubscription(t *te
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group)
-	snapshot, err := GenesisSnapshot(cfg.Namespace, group)
+	snapshot, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestManagedEpochResourcesRejectsExtraSubscription(t *testing.T) {
 	group := productionGroup()
 	group.OrderedBrokerIDs = []string{"broker-a"}
 	cfg := resourceTestConfig(group)
-	snapshot, err := GenesisSnapshot(cfg.Namespace, group)
+	snapshot, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	if err != nil {
 		t.Fatal(err)
 	}

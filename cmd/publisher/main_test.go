@@ -44,7 +44,7 @@ func TestValidateOnlySkipsCredentialsAndAssembly(t *testing.T) {
 	lookedUp := false
 	assembled := false
 	var stdout bytes.Buffer
-	err := run(context.Background(), []string{"-config", path, "-participant", "flight-publisher-1", "-validate-only"}, strings.NewReader(""), &stdout, &bytes.Buffer{}, func(string) (string, bool) {
+	err := run(context.Background(), []string{"-config", path, "-participant", "events-a-publisher-1", "-validate-only"}, strings.NewReader(""), &stdout, &bytes.Buffer{}, func(string) (string, bool) {
 		lookedUp = true
 		return "", false
 	}, func(context.Context, config.Config, swlbruntime.Credentials, string, customer.CustomerLibrary) (process, error) {
@@ -64,7 +64,7 @@ func TestValidateOnlySkipsCredentialsAndAssembly(t *testing.T) {
 
 func TestPublisherRejectsSubscriberIdentity(t *testing.T) {
 	path := writeConfig(t)
-	err := run(context.Background(), []string{"-config", path, "-participant", "flight-subscriber-1", "-validate-only"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, nil, nil)
+	err := run(context.Background(), []string{"-config", path, "-participant", "events-a-subscriber-1", "-validate-only"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "not declared as publisher") {
 		t.Fatalf("error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestPublisherEOFStopsRuntime(t *testing.T) {
 	path := writeConfig(t)
 	values := participantEnvironment()
 	fake := &fakeProcess{started: make(chan struct{}), stopped: make(chan struct{})}
-	err := run(context.Background(), []string{"-config", path, "-participant", "flight-publisher-1"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, func(name string) (string, bool) {
+	err := run(context.Background(), []string{"-config", path, "-participant", "events-a-publisher-1"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, func(name string) (string, bool) {
 		value, ok := values[name]
 		return value, ok
 	}, func(context.Context, config.Config, swlbruntime.Credentials, string, customer.CustomerLibrary) (process, error) {
@@ -126,7 +126,7 @@ func writeConfig(t *testing.T) string {
 
 func participantEnvironment() map[string]string {
 	return map[string]string{
-		"SOLACE_FLIGHT_PUBLISHER_CONTROL_USERNAME": "flight-publisher-1", "SOLACE_FLIGHT_PUBLISHER_CONTROL_PASSWORD": "publisher-password",
+		"SOLACE_EVENTS_A_PUBLISHER_CONTROL_USERNAME": "events-a-publisher-1", "SOLACE_EVENTS_A_PUBLISHER_CONTROL_PASSWORD": "publisher-password",
 		"SOLACE_DATA_USERNAME": "data-user", "SOLACE_DATA_PASSWORD": "data-password",
 	}
 }

@@ -52,7 +52,7 @@ type Config struct {
 
 type ControlBroker struct {
 	BrokerID               string                         `yaml:"broker_id"`
-	SMFEndpoint            string                         `yaml:"smf_endpoint"`
+	AMQPEndpoint           string                         `yaml:"amqp_endpoint"`
 	SEMPEndpoint           string                         `yaml:"semp_endpoint,omitempty"`
 	MessageVPN             string                         `yaml:"message_vpn"`
 	Principal              string                         `yaml:"principal,omitempty"`
@@ -61,7 +61,6 @@ type ControlBroker struct {
 	SEMPUsernameEnv        string                         `yaml:"semp_username_env,omitempty"`
 	SEMPPasswordEnv        string                         `yaml:"semp_password_env,omitempty"`
 	ParticipantCredentials []ParticipantControlCredential `yaml:"participant_credentials,omitempty"`
-	MembershipLVQPrefix    string                         `yaml:"membership_lvq_prefix"`
 	ControlTopicPrefix     string                         `yaml:"control_topic_prefix"`
 	Resources              Broker0Resources               `yaml:"resources,omitempty"`
 }
@@ -94,7 +93,7 @@ type Broker0Resources struct {
 
 type DataBroker struct {
 	ID              string            `yaml:"id"`
-	SMFEndpoint     string            `yaml:"smf_endpoint"`
+	AMQPEndpoint    string            `yaml:"amqp_endpoint"`
 	SEMPEndpoint    string            `yaml:"semp_endpoint,omitempty"`
 	MessageVPN      string            `yaml:"message_vpn"`
 	UsernameEnv     string            `yaml:"username_env"`
@@ -170,6 +169,7 @@ const LegacyConsumerSetID = "default"
 type ScalingGroup struct {
 	ID                 string         `yaml:"id"`
 	HashContract       string         `yaml:"hash_contract"`
+	RoutingAlgorithm   string         `yaml:"routing_algorithm,omitempty"`
 	CustomerLibrary    string         `yaml:"customer_library_version"`
 	OrderedBrokerIDs   []string       `yaml:"ordered_broker_ids"`
 	Queue              Queue          `yaml:"queue"`
@@ -192,6 +192,13 @@ type ConsumerSet struct {
 
 // EffectiveConsumerSets returns explicit sets, or the unambiguous legacy
 // single-set projection when required_subscribers is used.
+func (g ScalingGroup) EffectiveRoutingAlgorithm() string {
+	if g.RoutingAlgorithm == "" {
+		return "swlb-rendezvous-v1"
+	}
+	return g.RoutingAlgorithm
+}
+
 func (g ScalingGroup) EffectiveConsumerSets() []ConsumerSet {
 	if len(g.ConsumerSets) != 0 {
 		result := make([]ConsumerSet, len(g.ConsumerSets))
@@ -394,7 +401,7 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(broker.MessageVPN) == "" {
 			return fmt.Errorf("%s: message VPN is required", path)
 		}
-		if err := validateEndpoint(path+".smf_endpoint", broker.SMFEndpoint, strict, "tcp", "tcps", "ws", "wss"); err != nil {
+		if err := validateEndpoint(path+".amqp_endpoint", broker.AMQPEndpoint, strict, "amqp", "amqps", "amqp+ssl"); err != nil {
 			return err
 		}
 		if err := validateCredentialPair(path, broker.UsernameEnv, broker.PasswordEnv); err != nil {
@@ -540,7 +547,7 @@ func (c Config) validateControl(strict bool) error {
 	if strings.TrimSpace(c.Control.MessageVPN) == "" {
 		return errors.New("control broker message VPN is required")
 	}
-	if err := validateEndpoint("control.smf_endpoint", c.Control.SMFEndpoint, strict, "tcp", "tcps", "ws", "wss"); err != nil {
+	if err := validateEndpoint("control.amqp_endpoint", c.Control.AMQPEndpoint, strict, "amqp", "amqps", "amqp+ssl"); err != nil {
 		return err
 	}
 	if err := validateCredentialPair("control", c.Control.UsernameEnv, c.Control.PasswordEnv); err != nil {
@@ -557,16 +564,10 @@ func (c Config) validateControl(strict bool) error {
 	if err := validateSEMPCredentials("control", c.Control.SEMPEndpoint, c.Control.SEMPUsernameEnv, c.Control.SEMPPasswordEnv, strict); err != nil {
 		return err
 	}
-	if err := validateManagedName("control.membership_lvq_prefix", c.Control.MembershipLVQPrefix, true); err != nil {
-		return err
-	}
 	if err := validateManagedName("control.control_topic_prefix", c.Control.ControlTopicPrefix, true); err != nil {
 		return err
 	}
 	if strict {
-		if err := validateNamespaceOwnership(c.Namespace, "control.membership_lvq_prefix", c.Control.MembershipLVQPrefix); err != nil {
-			return err
-		}
 		if err := validateNamespaceOwnership(c.Namespace, "control.control_topic_prefix", c.Control.ControlTopicPrefix); err != nil {
 			return err
 		}
@@ -689,6 +690,12 @@ func (c Config) validateGroup(index int, group ScalingGroup, brokerIDs map[strin
 	}
 	if strings.TrimSpace(group.HashContract) == "" || strings.TrimSpace(group.CustomerLibrary) == "" {
 		return fmt.Errorf("%s: contract versions are required", path)
+	}
+	if group.RoutingAlgorithm == "" {
+		group.RoutingAlgorithm = "swlb-rendezvous-v1"
+	}
+	if err := validateIdentifier(path+".routing_algorithm", group.RoutingAlgorithm); err != nil {
+		return err
 	}
 
 	seenBrokers := make(map[string]struct{}, len(group.OrderedBrokerIDs))
@@ -820,14 +827,9 @@ func validateQueue(group string, queue Queue, namespace string, strict bool) err
 			return fmt.Errorf("scaling group %q exclusive queue cannot set partitions", group)
 		}
 	case QueueTypePartitioned:
-		if queue.Access != QueueAccessNonExclusive {
-			return fmt.Errorf("scaling group %q partitioned queue requires non-exclusive access", group)
-		}
-		if queue.Partitions < 1 {
-			return fmt.Errorf("scaling group %q partitioned queue requires positive partitions", group)
-		}
+		return fmt.Errorf("scaling group %q partitioned queues are not supported by the AMQP 1.0 v1 runtime; use an exclusive queue with one serialized consumer", group)
 	default:
-		return fmt.Errorf("scaling group %q queue type must be exclusive or partitioned", group)
+		return fmt.Errorf("scaling group %q queue type must be exclusive for the AMQP 1.0 v1 runtime", group)
 	}
 	return nil
 }
@@ -972,7 +974,7 @@ func validateEndpoint(field, value string, secureOnly bool, schemes ...string) e
 	if !allowed {
 		return fmt.Errorf("%s uses unsupported scheme %q", field, endpoint.Scheme)
 	}
-	if secureOnly && endpoint.Scheme != "https" && endpoint.Scheme != "tcps" && endpoint.Scheme != "wss" {
+	if secureOnly && endpoint.Scheme != "https" && endpoint.Scheme != "tcps" && endpoint.Scheme != "wss" && endpoint.Scheme != "amqps" && endpoint.Scheme != "amqp+ssl" {
 		return fmt.Errorf("%s must use a secure transport in production or cloud mode", field)
 	}
 	return nil

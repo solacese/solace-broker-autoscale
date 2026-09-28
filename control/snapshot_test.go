@@ -9,15 +9,20 @@ import (
 func validActiveSnapshot() MembershipSnapshot {
 	return MembershipSnapshot{
 		Version:           SnapshotVersion,
-		ScalingGroup:      "flight-operations",
+		ScalingGroup:      "events-a",
 		Revision:          7,
 		Epoch:             3,
 		Phase:             PhaseActive,
-		HashContract:      "flight-operations-v1",
-		Algorithm:         AlgorithmSHA256BigEndianModulo,
+		HashContract:      "entity-affinity-v1",
+		Algorithm:         AlgorithmRendezvousV1,
 		CurrentMembership: Membership{"broker-z", "broker-a"},
-		Queue:             QueueInfo{Name: "flight.operations", Durable: true},
-		Destination:       DestinationInfo{Kind: DestinationTopic, Name: "flights/>"},
+		CurrentBrokers:    []BrokerDescriptor{{ID: "broker-z", Endpoint: "amqps://z.example:5671"}, {ID: "broker-a", Endpoint: "amqps://a.example:5671"}},
+		CurrentResources: []EpochResourceIdentity{
+			{Epoch: 3, BrokerID: "broker-z", ConsumerSet: "default", QueueName: "eventsA.operations.broker-z", IngressTopic: "events/>"},
+			{Epoch: 3, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "eventsA.operations.broker-a", IngressTopic: "events/>"},
+		},
+		Queue:       QueueInfo{Name: "eventsA.operations", Durable: true},
+		Destination: DestinationInfo{Kind: DestinationTopic, Name: "events/>"},
 	}
 }
 
@@ -26,8 +31,22 @@ func validTransitionSnapshot(phase Phase) MembershipSnapshot {
 	snapshot.Revision++
 	snapshot.Phase = phase
 	snapshot.ProposedMembership = Membership{"broker-z", "broker-a", "broker-m"}
+	snapshot.ProposedBrokers = []BrokerDescriptor{{ID: "broker-z", Endpoint: "amqps://z.example:5671"}, {ID: "broker-a", Endpoint: "amqps://a.example:5671"}, {ID: "broker-m", Endpoint: "amqps://m.example:5671"}}
+	snapshot.ProposedResources = []EpochResourceIdentity{
+		{Epoch: 4, BrokerID: "broker-z", ConsumerSet: "default", QueueName: "eventsA.operations.broker-z.e4", IngressTopic: "events/e4/>"},
+		{Epoch: 4, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "eventsA.operations.broker-a.e4", IngressTopic: "events/e4/>"},
+		{Epoch: 4, BrokerID: "broker-m", ConsumerSet: "default", QueueName: "eventsA.operations.broker-m.e4", IngressTopic: "events/e4/>"},
+	}
 	snapshot.Transition = &Transition{ID: "scale-20260925-1", FromEpoch: 3, ToEpoch: 4}
 	return snapshot
+}
+
+func TestMembershipSnapshotAcceptsOpaqueRoutingAlgorithm(t *testing.T) {
+	snapshot := validActiveSnapshot()
+	snapshot.Algorithm = "customer-xxhash-score-v2"
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMembershipSnapshotValidPhases(t *testing.T) {
@@ -40,7 +59,11 @@ func TestMembershipSnapshotValidPhases(t *testing.T) {
 			snapshot := validTransitionSnapshot(PhaseCommitted)
 			snapshot.Epoch = snapshot.Transition.ToEpoch
 			snapshot.CurrentMembership = snapshot.ProposedMembership.Clone()
+			snapshot.CurrentBrokers = append([]BrokerDescriptor(nil), snapshot.ProposedBrokers...)
+			snapshot.CurrentResources = append([]EpochResourceIdentity(nil), snapshot.ProposedResources...)
 			snapshot.ProposedMembership = nil
+			snapshot.ProposedBrokers = nil
+			snapshot.ProposedResources = nil
 			return snapshot
 		}(),
 	} {
@@ -57,7 +80,8 @@ func TestMembershipSnapshotValidation(t *testing.T) {
 		"zero revision":        func(s *MembershipSnapshot) { s.Revision = 0 },
 		"zero epoch":           func(s *MembershipSnapshot) { s.Epoch = 0 },
 		"empty hash contract":  func(s *MembershipSnapshot) { s.HashContract = "" },
-		"unknown algorithm":    func(s *MembershipSnapshot) { s.Algorithm = "rendezvous" },
+		"empty algorithm":      func(s *MembershipSnapshot) { s.Algorithm = "" },
+		"invalid algorithm":    func(s *MembershipSnapshot) { s.Algorithm = "bad\x00algorithm" },
 		"unknown phase":        func(s *MembershipSnapshot) { s.Phase = "UNKNOWN" },
 		"empty membership":     func(s *MembershipSnapshot) { s.CurrentMembership = nil },
 		"duplicate membership": func(s *MembershipSnapshot) { s.CurrentMembership = Membership{"b1", "b1"} },
@@ -112,6 +136,8 @@ func TestTransitionValidation(t *testing.T) {
 func TestReorderOnlyTransitionIsExplicitAndValid(t *testing.T) {
 	snapshot := validTransitionSnapshot(PhasePrepare)
 	snapshot.ProposedMembership = Membership{"broker-a", "broker-z"}
+	snapshot.ProposedBrokers = descriptors(snapshot.ProposedMembership)
+	snapshot.ProposedResources = snapshot.ProposedResources[:2]
 	if err := snapshot.Validate(); err != nil {
 		t.Fatalf("Validate() rejected coordinated reorder: %v", err)
 	}
@@ -160,7 +186,7 @@ func TestParseMembershipSnapshotStrictJSON(t *testing.T) {
 
 	tests := map[string]string{
 		"unknown field":     strings.TrimSuffix(string(valid), "}") + `,"endpoint":"amqp://broker"}`,
-		"duplicate field":   strings.Replace(string(valid), `"version":2`, `"version":2,"version":2`, 1),
+		"duplicate field":   strings.Replace(string(valid), `"version":3`, `"version":3,"version":3`, 1),
 		"trailing value":    string(valid) + `{}`,
 		"secret field":      strings.TrimSuffix(string(valid), "}") + `,"password":"do-not-accept"}`,
 		"nested secret":     strings.TrimSuffix(string(valid), "}") + `,"metadata":{"api_token":"do-not-accept"}}`,

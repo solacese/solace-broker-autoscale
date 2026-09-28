@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	amqp "github.com/Azure/go-amqp"
 	"github.com/solacese/solace-workload-balancer/broker0"
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
@@ -15,31 +16,25 @@ import (
 	"github.com/solacese/solace-workload-balancer/outbox"
 	shimPublisher "github.com/solacese/solace-workload-balancer/shim/publisher"
 	shimSubscriber "github.com/solacese/solace-workload-balancer/shim/subscriber"
-	"solace.dev/go/messaging/pkg/solace"
 )
 
 // ParticipantAssembler exposes native construction seams for command tests.
 type ParticipantAssembler struct {
-	ConnectControl func(context.Context, config.Config, Credentials, string) (*SMFConnection, error)
-	ConnectData    func(context.Context, config.DataBroker, BrokerCredentials, string) (solace.MessagingService, error)
-	NewBrowser     func(config.Config, Credentials, broker0.MembershipQueueResolver) (broker0.Browser, error)
+	ConnectControl func(context.Context, config.Config, Credentials, string) (*AMQPControlConnection, error)
+	ConnectData    func(context.Context, config.DataBroker, BrokerCredentials, string) (*integration.AMQPConnection, error)
 }
 
 func DefaultParticipantAssembler() ParticipantAssembler {
 	return ParticipantAssembler{
-		ConnectControl: func(ctx context.Context, cfg config.Config, credentials Credentials, participant string) (*SMFConnection, error) {
+		ConnectControl: func(ctx context.Context, cfg config.Config, credentials Credentials, participant string) (*AMQPControlConnection, error) {
 			if credentials.Control.Principal == "" {
 				return nil, errors.New("runtime: participant Broker 0 principal is required")
 			}
-			return ConnectBroker0(ctx, cfg.Control.SMFEndpoint, cfg.Control.MessageVPN, credentials.Control.SMFUsername, credentials.Control.SMFPassword, participant)
+			return ConnectAMQPBroker0(ctx, cfg.Control.AMQPEndpoint, credentials.Control.SMFUsername, credentials.Control.SMFPassword, participant)
 		},
-		ConnectData: func(ctx context.Context, broker config.DataBroker, credentials BrokerCredentials, participant string) (solace.MessagingService, error) {
-			return integration.ConnectContext(ctx, integration.Connection{
-				Host: broker.SMFEndpoint, MessageVPN: broker.MessageVPN, Username: credentials.SMFUsername,
-				Password: credentials.SMFPassword, ApplicationID: participant + "." + broker.ID,
-			})
+		ConnectData: func(ctx context.Context, broker config.DataBroker, credentials BrokerCredentials, participant string) (*integration.AMQPConnection, error) {
+			return integration.ConnectAMQP(ctx, broker.AMQPEndpoint, credentials.SMFUsername, credentials.SMFPassword, participant+"."+broker.ID, nil)
 		},
-		NewBrowser: newProductionBrowser,
 	}
 }
 
@@ -54,41 +49,34 @@ func AssemblePublisherParticipant(ctx context.Context, cfg config.Config, creden
 			err = errors.Join(err, owners.Close())
 		}
 	}()
-	controlConnection, nativeControlPublisher, publisher, browser, updateSubscriber, updateOperations, commandOperations, err := assembleParticipantControl(ctx, cfg, credentials, participant, control.RolePublisher, groups, assembler, owners)
+	controlConnection, nativeControlPublisher, publisher, requester, updateSubscriber, updateOperations, commandOperations, err := assembleParticipantControl(ctx, cfg, credentials, participant, control.RolePublisher, groups, assembler, owners)
 	if err != nil {
 		return nil, err
 	}
 	_ = controlConnection
 
-	services, err := connectDataServices(ctx, cfg, groups, credentials, participant, assembler, owners)
+	pool, err := participantDataPool(cfg, groups, credentials, participant, assembler)
 	if err != nil {
 		return nil, err
 	}
+	owners.Closers = append(owners.Closers, pool)
 	store, err := outbox.Open(filepath.Join(cfg.Persistence.PublisherOutbox, participant+".db"), outbox.Limits{MaxMessages: cfg.Persistence.OutboxMaxMessages, MaxBytes: cfg.Persistence.OutboxMaxBytes})
 	if err != nil {
 		return nil, err
 	}
 	owners.Closers = append(owners.Closers, store)
-	asyncPublishers := make(map[string]*integration.AsyncPersistentPublisher, len(services))
-	for brokerID, service := range services {
-		native, buildErr := integration.NewAsyncPersistentPublisher(service, uint(cfg.Publisher.MaxConcurrency))
-		if buildErr != nil {
-			return nil, fmt.Errorf("runtime: create data publisher for %q: %w", brokerID, buildErr)
-		}
-		asyncPublishers[brokerID] = native
-		owners.Closers = append(owners.Closers, native)
-	}
+
 	publisherContracts, _ := participantContracts(groups)
 	shim, err := shimPublisher.New(shimPublisher.Config{
 		Outbox: store, CustomerLibrary: library,
-		Broker:    integration.PublisherAdapter{}, // synchronous path is unused by AsyncDispatcher
+		Broker:    unavailableSyncPublisher{}, // synchronous path is unused by AsyncDispatcher
 		Contracts: publisherContracts,
 	})
 	if err != nil {
 		return nil, err
 	}
-	dispatcher, err := shimPublisher.NewAsyncDispatcher(shim, integration.AsyncPublisherAdapter{Publishers: asyncPublishers, PartitionPolicy: participantPartitionPolicy(groups)}, shimPublisher.AsyncDispatcherConfig{
-		MaxInFlight: cfg.Publisher.MaxConcurrency, AckTimeout: cfg.Publisher.PublishTimeout.Duration,
+	dispatcher, err := shimPublisher.NewAsyncDispatcher(shim, &integration.AMQPAsyncPublisher{Pool: pool}, shimPublisher.AsyncDispatcherConfig{
+		MaxInEventsA: cfg.Publisher.MaxConcurrency, AckTimeout: cfg.Publisher.PublishTimeout.Duration,
 		CompletionBatchSize: cfg.Publisher.BatchSize, CompletionFlushPeriod: cfg.Publisher.BatchWait.Duration,
 	})
 	if err != nil {
@@ -102,11 +90,11 @@ func AssemblePublisherParticipant(ctx context.Context, cfg config.Config, creden
 	if err != nil {
 		return nil, err
 	}
-	components, err := commandComponents(ctx, cfg, controlConnection.Service, participant, control.RolePublisher, groupIDs, handler)
+	components, err := commandComponents(ctx, cfg, controlConnection.Session, participant, control.RolePublisher, groupIDs, handler)
 	if err != nil {
 		return nil, err
 	}
-	participantProcess, err := newParticipantWithCommands(updateSubscriber, browser, applier, updateOperations, groups, participant, cfg, components)
+	participantProcess, err := newParticipantWithCommands(updateSubscriber, requester, applier, updateOperations, groups, participant, control.RolePublisher, cfg, components)
 	if err != nil {
 		return nil, err
 	}
@@ -128,30 +116,21 @@ func AssembleSubscriberParticipant(ctx context.Context, cfg config.Config, crede
 			err = errors.Join(err, owners.Close())
 		}
 	}()
-	controlConnection, _, publisher, browser, updateSubscriber, updateOperations, commandOperations, err := assembleParticipantControl(ctx, cfg, credentials, participant, control.RoleSubscriber, groups, assembler, owners)
+	controlConnection, _, publisher, requester, updateSubscriber, updateOperations, commandOperations, err := assembleParticipantControl(ctx, cfg, credentials, participant, control.RoleSubscriber, groups, assembler, owners)
 	if err != nil {
 		return nil, err
 	}
-	services, err := connectDataServices(ctx, cfg, groups, credentials, participant, assembler, owners)
+	pool, err := participantDataPool(cfg, groups, credentials, participant, assembler)
 	if err != nil {
 		return nil, err
 	}
+	owners.Closers = append(owners.Closers, pool)
 	_, subscriberContracts := participantContracts(groups)
 	readiness := NewSubscriberReadiness()
-	exclusiveGroups := make(map[string]bool, len(groups))
-	consumersPerBinding := make(map[string]int, len(groups))
-	for _, group := range groups {
-		exclusive := group.Queue.Type == "exclusive" || group.Queue.Access == "exclusive"
-		exclusiveGroups[group.ID] = exclusive
-		if exclusive {
-			consumersPerBinding[group.ID] = 1
-		} else {
-			consumersPerBinding[group.ID] = max(1, group.Queue.Partitions)
-		}
-	}
+
 	var shim *shimSubscriber.Shim
 	factory := subscriberParticipantFactory{
-		Delegate:   integration.ConsumerFactory{Services: services, ExclusiveGroups: exclusiveGroups, ConsumersPerBinding: consumersPerBinding},
+		Delegate:   integration.AMQPConsumerFactory{Pool: pool},
 		Subscriber: func() subscriberSettlementController { return shim },
 	}
 	shim, err = shimSubscriber.New(shimSubscriber.Config{
@@ -173,11 +152,11 @@ func AssembleSubscriberParticipant(ctx context.Context, cfg config.Config, crede
 	if err != nil {
 		return nil, err
 	}
-	components, err := commandComponents(ctx, cfg, controlConnection.Service, participant, control.RoleSubscriber, groupIDs, commandHandler)
+	components, err := commandComponents(ctx, cfg, controlConnection.Session, participant, control.RoleSubscriber, groupIDs, commandHandler)
 	if err != nil {
 		return nil, err
 	}
-	participantProcess, err := newParticipantWithCommands(updateSubscriber, browser, applier, updateOperations, groups, participant, cfg, components)
+	participantProcess, err := newParticipantWithCommands(updateSubscriber, requester, applier, updateOperations, groups, participant, control.RoleSubscriber, cfg, components)
 	if err != nil {
 		return nil, err
 	}
@@ -203,19 +182,19 @@ func participantAssemblyInputs(cfg config.Config, participant string, role contr
 	if library == nil {
 		return nil, errors.New("runtime: customer library is required")
 	}
-	if assembler.ConnectControl == nil || assembler.ConnectData == nil || assembler.NewBrowser == nil {
+	if assembler.ConnectControl == nil || assembler.ConnectData == nil {
 		return nil, errors.New("runtime: participant assembler dependencies are required")
 	}
 	return ParticipantGroups(cfg, participant, role)
 }
 
-func assembleParticipantControl(ctx context.Context, cfg config.Config, credentials Credentials, participant string, role control.ParticipantRole, groups []config.ScalingGroup, assembler ParticipantAssembler, owners *CloseGroup) (*SMFConnection, *NativePublisher, *broker0.PersistentControlPublisher, broker0.Browser, broker0.UpdateSubscriber, broker0.OperationStore, broker0.OperationStore, error) {
+func assembleParticipantControl(ctx context.Context, cfg config.Config, credentials Credentials, participant string, role control.ParticipantRole, groups []config.ScalingGroup, assembler ParticipantAssembler, owners *CloseGroup) (*AMQPControlConnection, *AMQPNativePublisher, *broker0.PersistentControlPublisher, broker0.SnapshotRequester, broker0.UpdateSubscriber, broker0.OperationStore, broker0.OperationStore, error) {
 	connection, err := assembler.ConnectControl(ctx, cfg, credentials, participant)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	owners.Closers = append(owners.Closers, connection)
-	nativePublisher, err := NewNativePublisher(connection.Service, cfg.Publisher.PublishTimeout.Duration)
+	nativePublisher, err := NewAMQPNativePublisher(connection)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
@@ -237,52 +216,62 @@ func assembleParticipantControl(ctx context.Context, cfg config.Config, credenti
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
-	controlPublisher, err := broker0.NewPersistentControlPublisherWithTargets(nativePublisher, publishOperations, broker0.DestinationResolverFunc(func(kind broker0.Kind, group string) (string, error) {
-		return "", fmt.Errorf("runtime: participant publication kind %q must be identity-scoped", kind)
-	}), broker0.TargetDestinationResolverFunc(func(kind broker0.Kind, group string, messageRole control.ParticipantRole, requestedParticipant string) (string, error) {
-		if requestedParticipant != participant || messageRole != role {
-			return "", errors.New("runtime: participant publication scope mismatch")
-		}
-		switch kind {
-		case broker0.KindAcknowledgement:
-			return names.AcknowledgementTopicFor(group, messageRole, requestedParticipant)
-		case broker0.KindRegistration:
-			return names.RegistrationTopicFor(group, messageRole, requestedParticipant)
-		case broker0.KindTelemetry:
-			return names.TelemetryTopicFor(group, messageRole, requestedParticipant)
-		default:
-			return "", fmt.Errorf("runtime: unsupported participant publication kind %q", kind)
-		}
-	}))
+	controlPublisher, err := broker0.NewPersistentControlPublisherWithTargets(nativePublisher, publishOperations,
+		broker0.DestinationResolverFunc(func(kind broker0.Kind, group string) (string, error) {
+			return "", fmt.Errorf("runtime: participant publication kind %q must be identity-scoped", kind)
+		}),
+		broker0.TargetDestinationResolverFunc(func(kind broker0.Kind, group string, messageRole control.ParticipantRole, requested string) (string, error) {
+			if requested != participant || messageRole != role {
+				return "", errors.New("runtime: participant publication scope mismatch")
+			}
+			switch kind {
+			case broker0.KindAcknowledgement:
+				return names.AcknowledgementTopicFor(group, messageRole, requested)
+			case broker0.KindRegistration:
+				return names.RegistrationTopicFor(group, messageRole, requested)
+			case broker0.KindTelemetry:
+				return names.TelemetryTopicFor(group, messageRole, requested)
+			default:
+				return "", fmt.Errorf("runtime: unsupported participant publication kind %q", kind)
+			}
+		}))
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
 	}
-	membershipResolver := broker0.MembershipQueueResolverFunc(func(_ context.Context, group string) (string, error) {
-		if !hasConfiguredGroup(groups, group) {
-			return "", fmt.Errorf("runtime: participant is not assigned to group %q", group)
-		}
-		return names.MembershipQueue(group)
-	})
-	browser, err := assembler.NewBrowser(cfg, credentials, membershipResolver)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
-	}
-	if closer, ok := browser.(interface{ Close() error }); ok {
-		owners.Closers = append(owners.Closers, closer)
-	}
-	factory := NativeDurableReceiverFactory{Service: connection.Service, Poll: participantReceivePoll}
-	updates := broker0.DurableUpdateSubscriber{Factory: factory, Resolver: broker0.UpdateQueueResolverFunc(func(_ context.Context, group, requestedParticipant string) (string, error) {
-		if requestedParticipant != participant || !hasConfiguredGroup(groups, group) {
+	factory := AMQPDurableReceiverFactory{Session: connection.Session}
+	updates := broker0.DurableUpdateSubscriber{Factory: factory, Resolver: broker0.UpdateQueueResolverFunc(func(_ context.Context, group, requested string) (string, error) {
+		if requested != participant || !hasConfiguredGroup(groups, group) {
 			return "", errors.New("runtime: update queue scope does not match participant")
 		}
 		return names.UpdateQueue(group, participant)
 	})}
-	_ = role
-	return connection, nativePublisher, controlPublisher, browser, updates, updateOperations, commandOperations, nil
+	requester := &groupSnapshotRequester{Session: connection.Session, Names: names, Participant: participant, Role: role}
+	return connection, nativePublisher, controlPublisher, requester, updates, updateOperations, commandOperations, nil
 }
 
-func commandComponents(ctx context.Context, cfg config.Config, service solace.MessagingService, participant string, role control.ParticipantRole, groups []string, handler *broker0.CommandHandler) (map[string]Component, error) {
-	factory := NativeDurableReceiverFactory{Service: service, Poll: participantReceivePoll}
+type groupSnapshotRequester struct {
+	Session     *amqp.Session
+	Names       control.ManagedNames
+	Participant string
+	Role        control.ParticipantRole
+}
+
+func (r *groupSnapshotRequester) RequestSnapshot(ctx context.Context, request control.SnapshotRequest) (control.SnapshotResponse, error) {
+	if request.Participant != r.Participant || request.Role != r.Role {
+		return control.SnapshotResponse{}, errors.New("runtime: snapshot request scope mismatch")
+	}
+	requestAddress, err := r.Names.SnapshotRequestTopic(request.Group, request.Role, request.Participant)
+	if err != nil {
+		return control.SnapshotResponse{}, err
+	}
+	replyAddress, err := r.Names.SnapshotReplyQueue(request.Group, request.Role, request.Participant)
+	if err != nil {
+		return control.SnapshotResponse{}, err
+	}
+	return (integration.AMQPRequestClient{Session: r.Session, RequestAddress: requestAddress, ReplyAddress: replyAddress}).RequestSnapshot(ctx, request)
+}
+func commandComponents(ctx context.Context, cfg config.Config, session *amqp.Session, participant string, role control.ParticipantRole, groups []string, handler *broker0.CommandHandler) (map[string]Component, error) {
+	factory := AMQPDurableReceiverFactory{Session: session}
 	names, err := control.NewManagedNames(cfg.Namespace)
 	if err != nil {
 		return nil, err
@@ -304,8 +293,8 @@ func commandComponents(ctx context.Context, cfg config.Config, service solace.Me
 	return components, nil
 }
 
-func newParticipantWithCommands(subscriber broker0.UpdateSubscriber, browser broker0.Browser, applier broker0.SnapshotApplier, operations broker0.OperationStore, groups []config.ScalingGroup, participant string, cfg config.Config, commands map[string]Component) (*ParticipantProcess, error) {
-	membership, err := NewParticipant(subscriber, browser, applier, operations, groups, participant, cfg.Staleness.MembershipMaxAge.Duration/2, cfg.Staleness.MembershipMaxAge.Duration, cfg.Publisher.ShutdownTimeout.Duration)
+func newParticipantWithCommands(subscriber broker0.UpdateSubscriber, requester broker0.SnapshotRequester, applier broker0.SnapshotApplier, operations broker0.OperationStore, groups []config.ScalingGroup, participant string, role control.ParticipantRole, cfg config.Config, commands map[string]Component) (*ParticipantProcess, error) {
+	membership, err := NewParticipant(subscriber, requester, applier, operations, cfg.Namespace, groups, participant, role, cfg.Staleness.MembershipMaxAge.Duration/2, cfg.Staleness.MembershipMaxAge.Duration, cfg.Publisher.ShutdownTimeout.Duration)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +370,28 @@ func (f subscriberParticipantFactory) Prepare(ctx context.Context, binding shimS
 	})
 }
 
-func connectDataServices(ctx context.Context, cfg config.Config, groups []config.ScalingGroup, credentials Credentials, participant string, assembler ParticipantAssembler, owners *CloseGroup) (map[string]solace.MessagingService, error) {
+func participantDataPool(cfg config.Config, groups []config.ScalingGroup, credentials Credentials, participant string, assembler ParticipantAssembler) (*integration.AMQPConnectionPool, error) {
+	brokers := make(map[string]config.DataBroker)
+	for _, broker := range cfg.DataBrokers {
+		for _, group := range broker.EligibleGroups {
+			if hasConfiguredGroup(groups, group) {
+				brokers[broker.ID] = broker
+				break
+			}
+		}
+	}
+	maxConnections := max(1, min(cfg.Publisher.MaxConcurrency, len(brokers)))
+	return integration.NewAMQPConnectionPool(maxConnections, 5*time.Minute, func(ctx context.Context, brokerID, endpoint string) (*integration.AMQPConnection, error) {
+		broker, ok := brokers[brokerID]
+		if !ok {
+			return nil, fmt.Errorf("runtime: broker %q is not eligible for participant", brokerID)
+		}
+		broker.AMQPEndpoint = endpoint
+		return assembler.ConnectData(ctx, broker, credentials.DataBrokers[brokerID], participant)
+	})
+}
+
+func connectDataServices(ctx context.Context, cfg config.Config, groups []config.ScalingGroup, credentials Credentials, participant string, assembler ParticipantAssembler, owners *CloseGroup) (map[string]*integration.AMQPConnection, error) {
 	required := make(map[string]struct{})
 	for _, broker := range cfg.DataBrokers {
 		for _, groupID := range broker.EligibleGroups {
@@ -391,7 +401,7 @@ func connectDataServices(ctx context.Context, cfg config.Config, groups []config
 			}
 		}
 	}
-	services := make(map[string]solace.MessagingService, len(required))
+	services := make(map[string]*integration.AMQPConnection, len(required))
 	for _, broker := range cfg.DataBrokers {
 		if _, needed := required[broker.ID]; !needed {
 			continue
@@ -401,26 +411,9 @@ func connectDataServices(ctx context.Context, cfg config.Config, groups []config
 			return nil, fmt.Errorf("runtime: connect data broker %q: %w", broker.ID, err)
 		}
 		services[broker.ID] = service
-		owners.Closers = append(owners.Closers, serviceCloser{service: service})
+		owners.Closers = append(owners.Closers, service)
 	}
 	return services, nil
-}
-
-func connectPublisherData(ctx context.Context, cfg config.Config, groups []config.ScalingGroup, credentials Credentials, participant string, assembler ParticipantAssembler, owners *CloseGroup) (map[string]solace.MessagingService, map[string]*integration.AsyncPersistentPublisher, error) {
-	services, err := connectDataServices(ctx, cfg, groups, credentials, participant, assembler, owners)
-	if err != nil {
-		return nil, nil, err
-	}
-	publishers := make(map[string]*integration.AsyncPersistentPublisher, len(services))
-	for brokerID, service := range services {
-		publisher, err := integration.NewAsyncPersistentPublisher(service, uint(cfg.Publisher.MaxConcurrency))
-		if err != nil {
-			return nil, nil, fmt.Errorf("runtime: create data publisher for %q: %w", brokerID, err)
-		}
-		publishers[brokerID] = publisher
-		owners.Closers = append(owners.Closers, publisher)
-	}
-	return services, publishers, nil
 }
 
 func configuredGroupIDs(groups []config.ScalingGroup) []string {
@@ -438,15 +431,6 @@ func hasConfiguredGroup(groups []config.ScalingGroup, id string) bool {
 		}
 	}
 	return false
-}
-
-type serviceCloser struct{ service solace.MessagingService }
-
-func (c serviceCloser) Close() error {
-	if c.service == nil || !c.service.IsConnected() {
-		return nil
-	}
-	return c.service.Disconnect()
 }
 
 type contextCloser struct {

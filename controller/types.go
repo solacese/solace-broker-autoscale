@@ -50,6 +50,8 @@ type TransitionSpec struct {
 	ToEpoch           uint64                          `json:"to_epoch"`
 	Current           []Broker                        `json:"current"`
 	Proposed          []Broker                        `json:"proposed"`
+	CurrentBrokers    []control.BrokerDescriptor      `json:"current_brokers"`
+	ProposedBrokers   []control.BrokerDescriptor      `json:"proposed_brokers"`
 	Queue             control.QueueInfo               `json:"queue"`
 	Destination       control.DestinationInfo         `json:"destination"`
 	CurrentResources  []control.EpochResourceIdentity `json:"current_resources,omitempty"`
@@ -94,6 +96,8 @@ func TransitionSpecFromSnapshot(snapshot control.MembershipSnapshot, requiredPar
 		ToEpoch:              snapshot.Transition.ToEpoch,
 		Queue:                snapshot.Queue,
 		Destination:          snapshot.Destination,
+		CurrentBrokers:       append([]control.BrokerDescriptor(nil), snapshot.CurrentBrokers...),
+		ProposedBrokers:      append([]control.BrokerDescriptor(nil), snapshot.ProposedBrokers...),
 		CurrentResources:     append([]control.EpochResourceIdentity(nil), snapshot.CurrentResources...),
 		ProposedResources:    append([]control.EpochResourceIdentity(nil), snapshot.ProposedResources...),
 		HashContract:         snapshot.HashContract,
@@ -125,8 +129,8 @@ func (s TransitionSpec) Validate() error {
 	if s.Revision == 0 || s.Revision > ^uint64(0)-5 {
 		return errors.New("transition revision must allow five forward publications")
 	}
-	if s.HashContract == "" || s.Algorithm != control.AlgorithmSHA256BigEndianModulo {
-		return errors.New("supported hash contract and routing algorithm are required")
+	if s.HashContract == "" || s.Algorithm == "" {
+		return errors.New("hash contract and routing algorithm identifiers are required")
 	}
 	if s.Queue.Name == "" || !s.Queue.Durable {
 		return errors.New("a durable queue is required")

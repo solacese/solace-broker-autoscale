@@ -15,24 +15,24 @@ import (
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/customer"
+	"github.com/solacese/solace-workload-balancer/integration"
 	"github.com/solacese/solace-workload-balancer/outbox"
 	shimPublisher "github.com/solacese/solace-workload-balancer/shim/publisher"
-	"solace.dev/go/messaging/pkg/solace"
 )
 
 func TestParticipantGroupsSelectsOnlyRequiredRoleGroups(t *testing.T) {
 	cfg := config.Config{
 		Runtime: config.RuntimeIdentities{Publishers: []string{"publisher-1"}, Subscribers: []string{"subscriber-1"}},
 		Groups: []config.ScalingGroup{
-			{ID: "flight", RequiredPublishers: []string{"publisher-1"}, RequiredSubscribers: []string{"subscriber-1"}},
-			{ID: "baggage", RequiredPublishers: []string{"publisher-2"}, RequiredSubscribers: []string{"subscriber-1"}},
+			{ID: "events-a", RequiredPublishers: []string{"publisher-1"}, RequiredSubscribers: []string{"subscriber-1"}},
+			{ID: "events-b", RequiredPublishers: []string{"publisher-2"}, RequiredSubscribers: []string{"subscriber-1"}},
 		},
 	}
 	groups, err := ParticipantGroups(cfg, "publisher-1", control.RolePublisher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || groups[0].ID != "flight" {
+	if len(groups) != 1 || groups[0].ID != "events-a" {
 		t.Fatalf("groups = %#v", groups)
 	}
 }
@@ -40,19 +40,19 @@ func TestParticipantGroupsSelectsOnlyRequiredRoleGroups(t *testing.T) {
 func TestConnectDataServicesUsesAssignedGroupEligibility(t *testing.T) {
 	cfg := config.Config{
 		DataBrokers: []config.DataBroker{
-			{ID: "initial-a", EligibleGroups: []string{"flight"}},
-			{ID: "scale-out-a", EligibleGroups: []string{"flight"}},
-			{ID: "shared", EligibleGroups: []string{"flight", "baggage"}},
+			{ID: "initial-a", EligibleGroups: []string{"events-a"}},
+			{ID: "scale-out-a", EligibleGroups: []string{"events-a"}},
+			{ID: "shared", EligibleGroups: []string{"events-a", "events-b"}},
 			{ID: "other", EligibleGroups: []string{"cargo"}},
 			{ID: "disabled", EligibleGroups: []string{}},
 		},
 	}
-	groups := []config.ScalingGroup{{ID: "flight", OrderedBrokerIDs: []string{"initial-a"}}, {ID: "baggage"}}
+	groups := []config.ScalingGroup{{ID: "events-a", OrderedBrokerIDs: []string{"initial-a"}}, {ID: "events-b"}}
 	credentials := Credentials{DataBrokers: map[string]BrokerCredentials{
 		"initial-a": {SMFUsername: "initial-user"}, "scale-out-a": {SMFUsername: "scale-user"}, "shared": {SMFUsername: "shared-user"},
 	}}
 	var connected []string
-	assembler := ParticipantAssembler{ConnectData: func(_ context.Context, broker config.DataBroker, credential BrokerCredentials, participant string) (solace.MessagingService, error) {
+	assembler := ParticipantAssembler{ConnectData: func(_ context.Context, broker config.DataBroker, credential BrokerCredentials, participant string) (*integration.AMQPConnection, error) {
 		if credential.SMFUsername == "" || participant != "publisher-1" {
 			t.Fatalf("connection for %q used unexpected credentials or participant", broker.ID)
 		}
@@ -88,11 +88,11 @@ func TestParticipantRegistrationPublishesAppliedSnapshotScope(t *testing.T) {
 		Now: func() time.Time { return time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC) },
 	}
 	snapshot := control.MembershipSnapshot{
-		Version: control.SnapshotVersion, Namespace: "swlb", LibraryVersion: "airline-routing-v1",
-		ScalingGroup: "flight", Revision: 1, Epoch: 1, Phase: control.PhaseActive,
-		HashContract: "flight-operations-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership: control.Membership{"broker-a"}, Queue: control.QueueInfo{Name: "swlb.flight", Durable: true},
-		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "swlb/data/flight/epoch/1"},
+		Version: control.SnapshotVersion, Namespace: "swlb", LibraryVersion: "entity-routing-v1",
+		ScalingGroup: "events-a", Revision: 1, Epoch: 1, Phase: control.PhaseActive,
+		HashContract: "entity-affinity-v1", Algorithm: control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://broker-a.invalid:5671"}}, Queue: control.QueueInfo{Name: "swlb.eventsA", Durable: true},
+		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "swlb/data/eventsA/epoch/1"},
 	}
 	if err := registration.Publish(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestCommandWaitsForMatchingAuthoritativeSnapshot(t *testing.T) {
 	state := NewParticipantPhaseState()
 	issuedAt := time.Now().UTC()
 	command := control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "command-1", Namespace: "swlb", Group: "flight",
+		Version: control.ProtocolVersion, MessageID: "command-1", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition-1", Epoch: 2, Phase: control.PhasePrepare, Participant: "subscriber-1",
 		Role: control.RoleSubscriber, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Second),
 	}
@@ -122,9 +122,9 @@ func TestCommandWaitsForMatchingAuthoritativeSnapshot(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	state.Record(control.MembershipSnapshot{
-		Version: control.SnapshotVersion, Namespace: "swlb", LibraryVersion: "v1", ScalingGroup: "flight",
+		Version: control.SnapshotVersion, Namespace: "swlb", LibraryVersion: "v1", ScalingGroup: "events-a",
 		Revision: 2, Epoch: 1, Phase: control.PhasePrepare, HashContract: "contract",
-		Algorithm: control.AlgorithmSHA256BigEndianModulo, CurrentMembership: control.Membership{"a"},
+		Algorithm: control.AlgorithmRendezvousV1, CurrentMembership: control.Membership{"a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "a", Endpoint: "amqps://a.invalid:5671"}},
 		ProposedMembership: control.Membership{"a", "b"}, Transition: &control.Transition{ID: "transition-1", FromEpoch: 1, ToEpoch: 2},
 		Queue: control.QueueInfo{Name: "queue", Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "topic"},
 	})
@@ -139,6 +139,7 @@ func TestPublisherRunDispatchRetriesImmediateRejectionAndKeepsOtherLanesRunning(
 		t.Fatal(err)
 	}
 	library := customer.CustomerLibraryFuncs{
+		Algorithm:    customer.RendezvousSHA256Contract,
 		ScalingGroup: func(customer.MessageView) (string, error) { return "orders", nil },
 		BusinessHash: func(message customer.MessageView) (customer.BusinessHash, error) {
 			return sha256.Sum256([]byte(message.Headers["key"])), nil
@@ -154,7 +155,7 @@ func TestPublisherRunDispatchRetriesImmediateRejectionAndKeepsOtherLanesRunning(
 	if err := publisher.ApplyMembership(control.MembershipSnapshot{
 		Version: control.SnapshotVersion, Namespace: "swlb", LibraryVersion: "v1", ScalingGroup: "orders",
 		Revision: 1, Epoch: 1, Phase: control.PhaseActive, HashContract: "contract",
-		Algorithm: control.AlgorithmSHA256BigEndianModulo, CurrentMembership: control.Membership{"broker-a"},
+		Algorithm: control.AlgorithmRendezvousV1, CurrentMembership: control.Membership{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://broker-a.invalid:5671"}}, CurrentResources: []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "queue.a", IngressTopic: "topic/>"}},
 		Queue: control.QueueInfo{Name: "queue", Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "topic"},
 	}); err != nil {
 		t.Fatal(err)
@@ -178,7 +179,7 @@ func TestPublisherRunDispatchRetriesImmediateRejectionAndKeepsOtherLanesRunning(
 		return runtimePublishFuture{result: shimPublisher.AsyncPublishResult{Attempt: attempt, Outcome: shimPublisher.OutcomeAcknowledged}}, nil
 	})
 	dispatcher, err := shimPublisher.NewAsyncDispatcher(publisher, broker, shimPublisher.AsyncDispatcherConfig{
-		MaxInFlight: 2, AckTimeout: time.Second, CompletionBatchSize: 2, CompletionFlushPeriod: time.Millisecond,
+		MaxInEventsA: 2, AckTimeout: time.Second, CompletionBatchSize: 2, CompletionFlushPeriod: time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +245,7 @@ func TestPublisherSnapshotApplierFailClosedRemovesAuthority(t *testing.T) {
 	// verifies the runtime adapter rejects a nil/unconfigured transport instead of
 	// silently claiming fail-closed success.
 	applier := &PublisherSnapshotApplier{}
-	if err := applier.FailClosed(context.Background(), "flight", broker0.ErrMembershipStale); err == nil {
+	if err := applier.FailClosed(context.Background(), "events-a", broker0.ErrMembershipStale); err == nil {
 		t.Fatal("expected unconfigured publisher applier failure")
 	}
 }

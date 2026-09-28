@@ -17,15 +17,21 @@ import (
 func activeSnapshot(revision uint64) control.MembershipSnapshot {
 	return control.MembershipSnapshot{
 		Version:           control.SnapshotVersion,
+		Namespace:         "swlb",
 		ScalingGroup:      "orders",
 		Revision:          revision,
 		Epoch:             1,
 		Phase:             control.PhaseActive,
 		HashContract:      "orders-v1",
-		Algorithm:         control.AlgorithmSHA256BigEndianModulo,
+		Algorithm:         control.AlgorithmRendezvousV1,
 		CurrentMembership: control.Membership{"broker-b", "broker-a"},
-		Queue:             control.QueueInfo{Name: "orders-q", Durable: true},
-		Destination:       control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
+		CurrentBrokers:    []control.BrokerDescriptor{{ID: "broker-b", Endpoint: "amqps://b.example:5671"}, {ID: "broker-a", Endpoint: "amqps://a.example:5671"}},
+		CurrentResources: []control.EpochResourceIdentity{
+			{Epoch: 1, BrokerID: "broker-b", ConsumerSet: "default", QueueName: "orders-b", IngressTopic: "orders"},
+			{Epoch: 1, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "orders-a", IngressTopic: "orders"},
+		},
+		Queue:       control.QueueInfo{Name: "orders-q", Durable: true},
+		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
 	}
 }
 
@@ -679,9 +685,11 @@ func TestControllerInboxRejectsStaleAcknowledgementAfterPhaseAdvanceAndContinues
 	}
 	spec := controller.TransitionSpec{
 		ID: "move-1", Namespace: "swlb", Group: "orders", Revision: 10, FromEpoch: 1, ToEpoch: 2,
-		Current: []controller.Broker{{ID: "old", Destination: "orders"}}, Proposed: []controller.Broker{{ID: "new", Destination: "orders"}},
+		Current: []controller.Broker{{ID: "old", Destination: "orders"}}, CurrentBrokers: []control.BrokerDescriptor{{ID: "old", Endpoint: "amqps://old.example:5671"}}, ProposedBrokers: []control.BrokerDescriptor{{ID: "new", Endpoint: "amqps://new.example:5671"}}, Proposed: []controller.Broker{{ID: "new", Destination: "orders"}},
 		Queue: control.QueueInfo{Name: "orders-q", Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
-		HashContract: "orders-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
+		HashContract: "orders-v1", Algorithm: control.AlgorithmRendezvousV1,
+		CurrentResources:  []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "old", ConsumerSet: "default", QueueName: "orders.old.e1", IngressTopic: "orders/e1/>"}},
+		ProposedResources: []control.EpochResourceIdentity{{Epoch: 2, BrokerID: "new", ConsumerSet: "default", QueueName: "orders.new.e2", IngressTopic: "orders/e2/>"}},
 		RoleRequirements: map[controller.Phase][]controller.ParticipantRequirement{
 			controller.PhasePrepare:  {{Participant: "subscriber-1", Role: control.RoleSubscriber}},
 			controller.PhasePause:    {{Participant: "publisher-1", Role: control.RolePublisher}},
@@ -932,40 +940,6 @@ func (subscriber *fakeSubscriber) Subscribe(_ context.Context, group, participan
 	return UpdateSubscription{Deliveries: subscriber.deliveries, Reconnects: subscriber.reconnects, Errors: subscriber.errors}, nil
 }
 
-type browseResponse struct {
-	messages []BrowsedMessage
-	err      error
-}
-
-type fakeBrowser struct {
-	mu         sync.Mutex
-	subscriber *fakeSubscriber
-	responses  chan browseResponse
-	calls      int
-	called     chan int
-}
-
-func (browser *fakeBrowser) Browse(ctx context.Context, _ string) ([]BrowsedMessage, error) {
-	browser.mu.Lock()
-	browser.calls++
-	call := browser.calls
-	subscribed := browser.subscriber.subscribed
-	browser.mu.Unlock()
-	if !subscribed {
-		return nil, errors.New("browse occurred before subscribe")
-	}
-	select {
-	case browser.called <- call:
-	default:
-	}
-	select {
-	case response := <-browser.responses:
-		return response.messages, response.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
 type fakeApplier struct {
 	mu          sync.Mutex
 	applied     []Message
@@ -1006,25 +980,53 @@ func (applier *fakeApplier) FailClosed(_ context.Context, _ string, cause error)
 	return nil
 }
 
-func snapshotBrowseMessage(t *testing.T, operationID string, snapshot control.MembershipSnapshot) BrowsedMessage {
+func snapshotPayload(t *testing.T, snapshot control.MembershipSnapshot) []byte {
 	t.Helper()
 	payload, err := encodeMembershipSnapshot(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return BrowsedMessage{Kind: KindMembershipSnapshot, OperationID: operationID, Payload: payload}
+	return payload
 }
 
 func snapshotDelivery(t *testing.T, operationID string, snapshot control.MembershipSnapshot) *fakeDelivery {
 	t.Helper()
-	message := snapshotBrowseMessage(t, operationID, snapshot)
-	return &fakeDelivery{kind: message.Kind, operationID: message.OperationID, payload: message.Payload}
+	return &fakeDelivery{kind: KindMembershipSnapshot, operationID: operationID, payload: snapshotPayload(t, snapshot)}
 }
 
-func newOrchestratorTest(t *testing.T, browser *fakeBrowser, subscriber *fakeSubscriber, applier *fakeApplier, operations OperationStore, interval, staleness time.Duration) *GroupOrchestrator {
+type fakeSnapshotRequester struct {
+	responses chan snapshotResponse
+	called    chan control.SnapshotRequest
+}
+
+type snapshotResponse struct {
+	snapshot control.MembershipSnapshot
+	err      error
+}
+
+func (r *fakeSnapshotRequester) RequestSnapshot(ctx context.Context, request control.SnapshotRequest) (control.SnapshotResponse, error) {
+	select {
+	case r.called <- request:
+	case <-ctx.Done():
+		return control.SnapshotResponse{}, ctx.Err()
+	}
+	select {
+	case response := <-r.responses:
+		if response.err != nil {
+			return control.SnapshotResponse{}, response.err
+		}
+		return control.SnapshotResponse{Version: control.BootstrapProtocolVersion, CorrelationID: request.CorrelationID, Namespace: request.Namespace, Group: request.Group, Participant: request.Participant, Role: request.Role, Snapshot: response.snapshot}, nil
+	case <-ctx.Done():
+		return control.SnapshotResponse{}, ctx.Err()
+	}
+}
+
+func newOrchestratorTest(t *testing.T, requester *fakeSnapshotRequester, subscriber *fakeSubscriber, applier *fakeApplier, operations OperationStore, interval, staleness time.Duration) *GroupOrchestrator {
 	t.Helper()
-	orchestrator, err := NewGroupOrchestrator(subscriber, browser, applier, operations, OrchestratorOptions{
-		Group: "orders", Participant: "publisher-1", RebrowseInterval: interval, MaxStaleness: staleness,
+	orchestrator, err := NewGroupOrchestrator(subscriber, requester, applier, operations, OrchestratorOptions{
+		Namespace: "swlb", Group: "orders", Participant: "publisher-1", Role: control.RolePublisher,
+		RefreshInterval: interval, MaxStaleness: staleness, RequestTimeout: 20 * time.Millisecond,
+		RetryInitial: 2 * time.Millisecond, RetryMaximum: 10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1043,276 +1045,128 @@ func waitMessage(t *testing.T, channel <-chan Message) Message {
 	}
 }
 
-func waitCall(t *testing.T, channel <-chan int) int {
+func waitRequest(t *testing.T, channel <-chan control.SnapshotRequest) control.SnapshotRequest {
 	t.Helper()
 	select {
-	case call := <-channel:
-		return call
+	case request := <-channel:
+		return request
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for browse")
-		return 0
+		t.Fatal("timed out waiting for snapshot request")
+		return control.SnapshotRequest{}
 	}
 }
 
-func TestOrchestratorSubscribesBuffersAppliesThenACKs(t *testing.T) {
+func TestOrchestratorSubscribesBuffersAndReconcilesResponse(t *testing.T) {
 	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 2), called: make(chan int, 2)}
+	requester := &fakeSnapshotRequester{responses: make(chan snapshotResponse, 2), called: make(chan control.SnapshotRequest, 2)}
 	applier := &fakeApplier{applyCalled: make(chan Message, 2), applyGate: make(chan struct{})}
-	operations := newMemoryOperations()
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, operations, time.Hour, 2*time.Hour)
-
+	orchestrator := newOrchestratorTest(t, requester, subscriber, applier, newMemoryOperations(), time.Hour, 2*time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() { result <- orchestrator.Run(ctx) }()
-	if call := waitCall(t, browser.called); call != 1 {
-		t.Fatalf("initial browse call = %d", call)
+	request := waitRequest(t, requester.called)
+	if request.Group != "orders" || request.Participant != "publisher-1" || request.CorrelationID == "" {
+		t.Fatalf("request = %#v", request)
 	}
-
-	update := activeSnapshot(2)
-	delivery := snapshotDelivery(t, "snapshot-2", update)
-	subscriber.deliveries <- delivery
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-	applied := waitMessage(t, applier.applyCalled)
-	if applied.Snapshot == nil || applied.Snapshot.Revision != 2 {
-		t.Fatalf("reconciled snapshot = %#v", applied.Snapshot)
+	update := snapshotDelivery(t, "snapshot-2", activeSnapshot(2))
+	subscriber.deliveries <- update
+	requester.responses <- snapshotResponse{snapshot: activeSnapshot(1)}
+	if applied := waitMessage(t, applier.applyCalled); applied.Snapshot.Revision != 2 {
+		t.Fatalf("revision = %d", applied.Snapshot.Revision)
 	}
-	if delivery.ackCount() != 0 {
-		t.Fatal("buffered update ACKed before state application completed")
-	}
-	close(applier.applyGate)
-
-	deadline := time.After(time.Second)
-	for delivery.ackCount() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("buffered update was not ACKed after apply")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	snapshot, ok := orchestrator.Snapshot()
-	if !ok || snapshot.Revision != 2 {
-		t.Fatalf("orchestrator snapshot = %#v, %v", snapshot, ok)
-	}
-	if len(applier.failures) != 1 || !errors.Is(applier.failures[0], ErrNoAuthoritativeState) {
-		t.Fatalf("initial fail-closed calls = %#v", applier.failures)
-	}
-
-	cancel()
-	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() cancellation error = %v", err)
-	}
-}
-
-func TestOrchestratorReconcilesCompletedLiveDeliveryBeforeACK(t *testing.T) {
-	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 1), called: make(chan int, 1)}
-	applier := &fakeApplier{applyCalled: make(chan Message, 1), applyGate: make(chan struct{})}
-	operations := newMemoryOperations()
-	operations.operations["snapshot-2"] = true
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, operations, time.Hour, 2*time.Hour)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	result := make(chan error, 1)
-	go func() { result <- orchestrator.Run(ctx) }()
-	waitCall(t, browser.called)
-	replayed := snapshotDelivery(t, "snapshot-2", activeSnapshot(2))
-	subscriber.deliveries <- replayed
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-	applied := waitMessage(t, applier.applyCalled)
-	if applied.Snapshot.Revision != 2 {
-		t.Fatalf("completed live delivery did not participate in reconciliation: %#v", applied.Snapshot)
-	}
-	if replayed.ackCount() != 0 {
-		t.Fatal("completed live delivery was ACKed before reconciliation completed")
+	if update.ackCount() != 0 {
+		t.Fatal("buffered update ACKed before apply")
 	}
 	close(applier.applyGate)
 	deadline := time.After(time.Second)
-	for replayed.ackCount() == 0 {
+	for update.ackCount() == 0 {
 		select {
 		case <-deadline:
-			t.Fatal("completed live delivery was not ACKed after reconciliation")
+			t.Fatal("update not ACKed")
 		default:
 			time.Sleep(time.Millisecond)
 		}
 	}
 	cancel()
 	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() cancellation error = %v", err)
+		t.Fatalf("Run() = %v", err)
 	}
 }
 
-func TestOrchestratorDoesNotACKWhenApplyFails(t *testing.T) {
+func TestOrchestratorRequestsAgainOnReconnectAndIgnoresStaleResponse(t *testing.T) {
 	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 1), called: make(chan int, 1)}
-	applier := &fakeApplier{applyErr: errors.New("local state unavailable")}
-	operations := newMemoryOperations()
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, operations, time.Hour, 2*time.Hour)
-	buffered := snapshotDelivery(t, "snapshot-2", activeSnapshot(2))
-
-	result := make(chan error, 1)
-	go func() { result <- orchestrator.Run(context.Background()) }()
-	waitCall(t, browser.called)
-	subscriber.deliveries <- buffered
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("apply failure was hidden")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("orchestrator did not return after apply failure")
-	}
-	if buffered.ackCount() != 0 || len(operations.records) != 0 {
-		t.Fatalf("failed apply was completed: acks:%d records:%v", buffered.ackCount(), operations.records)
-	}
-	if _, ok := orchestrator.Snapshot(); ok {
-		t.Fatal("failed state application became usable")
-	}
-}
-
-func TestOrchestratorDoesNotACKWhenDedupeRecordFails(t *testing.T) {
-	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 1), called: make(chan int, 1)}
-	applier := &fakeApplier{applyCalled: make(chan Message, 1)}
-	operations := newMemoryOperations()
-	operations.recordErr = errors.New("dedupe disk full")
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, operations, time.Hour, 2*time.Hour)
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-
-	result := make(chan error, 1)
-	go func() { result <- orchestrator.Run(context.Background()) }()
-	waitMessage(t, applier.applyCalled)
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("operation-store failure was hidden")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("orchestrator did not return after operation-store failure")
-	}
-	if _, ok := orchestrator.Snapshot(); ok {
-		t.Fatal("state stayed usable after operation-store failure")
-	}
-}
-
-func TestOrchestratorRebrowsesOnReconnect(t *testing.T) {
-	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 2), called: make(chan int, 2)}
+	requester := &fakeSnapshotRequester{responses: make(chan snapshotResponse, 2), called: make(chan control.SnapshotRequest, 2)}
 	applier := &fakeApplier{applyCalled: make(chan Message, 3)}
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, newMemoryOperations(), time.Hour, 2*time.Hour)
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-
+	orchestrator := newOrchestratorTest(t, requester, subscriber, applier, newMemoryOperations(), time.Hour, 2*time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() { result <- orchestrator.Run(ctx) }()
-	waitCall(t, browser.called)
-	first := waitMessage(t, applier.applyCalled)
-	if first.Snapshot.Revision != 1 {
-		t.Fatalf("first revision = %d", first.Snapshot.Revision)
-	}
-
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-2", activeSnapshot(2))}}
-	subscriber.reconnects <- struct{}{}
-	if call := waitCall(t, browser.called); call != 2 {
-		t.Fatalf("reconnect browse call = %d", call)
-	}
-	second := waitMessage(t, applier.applyCalled)
-	if second.Snapshot.Revision != 2 {
-		t.Fatalf("reconnect revision = %d", second.Snapshot.Revision)
-	}
-	cancel()
-	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() cancellation error = %v", err)
-	}
-}
-
-func TestOrchestratorIgnoresPeriodicBrowseSupersededByLiveUpdate(t *testing.T) {
-	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 2), called: make(chan int, 2)}
-	applier := &fakeApplier{applyCalled: make(chan Message, 2)}
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, newMemoryOperations(), time.Hour, 2*time.Hour)
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() { result <- orchestrator.Run(ctx) }()
-	waitCall(t, browser.called)
+	waitRequest(t, requester.called)
+	requester.responses <- snapshotResponse{snapshot: activeSnapshot(1)}
 	waitMessage(t, applier.applyCalled)
-
 	subscriber.reconnects <- struct{}{}
-	if call := waitCall(t, browser.called); call != 2 {
-		t.Fatalf("periodic browse call = %d", call)
-	}
+	waitRequest(t, requester.called)
 	live := snapshotDelivery(t, "snapshot-2", activeSnapshot(2))
 	subscriber.deliveries <- live
-	if applied := waitMessage(t, applier.applyCalled); applied.Snapshot.Revision != 2 {
-		t.Fatalf("live revision = %d", applied.Snapshot.Revision)
+	if _, ok := orchestrator.Snapshot(); ok {
+		t.Fatal("routing remained enabled before reconnect refresh")
 	}
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-
-	deadline := time.After(time.Second)
-	for {
-		if snapshot, ok := orchestrator.Snapshot(); ok && snapshot.Revision == 2 {
-			break
-		}
-		select {
-		case err := <-result:
-			t.Fatalf("stale browse failed orchestrator: %v", err)
-		case <-deadline:
-			t.Fatal("orchestrator did not retain live revision")
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	requester.responses <- snapshotResponse{snapshot: activeSnapshot(1)}
+	if applied := waitMessage(t, applier.applyCalled); applied.Snapshot.Revision != 2 {
+		t.Fatalf("revision = %d", applied.Snapshot.Revision)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if snapshot, ok := orchestrator.Snapshot(); !ok || snapshot.Revision != 2 {
+		t.Fatalf("snapshot = %#v, %t", snapshot, ok)
 	}
 	cancel()
 	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() cancellation error = %v", err)
+		t.Fatalf("Run() = %v", err)
 	}
 }
 
-func TestOrchestratorFailsClosedWhenAuthoritativeBrowseStaysStale(t *testing.T) {
+func TestOrchestratorRetriesUnavailableControllerThenRecovers(t *testing.T) {
 	subscriber := newFakeSubscriber()
-	browser := &fakeBrowser{subscriber: subscriber, responses: make(chan browseResponse, 32), called: make(chan int, 32)}
-	applier := &fakeApplier{applyCalled: make(chan Message, 2)}
-	orchestrator := newOrchestratorTest(t, browser, subscriber, applier, newMemoryOperations(), 5*time.Millisecond, 40*time.Millisecond)
-	browser.responses <- browseResponse{messages: []BrowsedMessage{snapshotBrowseMessage(t, "snapshot-1", activeSnapshot(1))}}
-	for index := 0; index < 20; index++ {
-		browser.responses <- browseResponse{err: errors.New("Broker 0 unavailable")}
+	requester := &fakeSnapshotRequester{responses: make(chan snapshotResponse, 3), called: make(chan control.SnapshotRequest, 3)}
+	requester.responses <- snapshotResponse{err: errors.New("controller unavailable")}
+	requester.responses <- snapshotResponse{snapshot: activeSnapshot(1)}
+	applier := &fakeApplier{applyCalled: make(chan Message, 1)}
+	orchestrator := newOrchestratorTest(t, requester, subscriber, applier, newMemoryOperations(), 100*time.Millisecond, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- orchestrator.Run(ctx) }()
+	waitRequest(t, requester.called)
+	waitRequest(t, requester.called)
+	waitMessage(t, applier.applyCalled)
+	if _, ok := orchestrator.Snapshot(); !ok {
+		t.Fatal("recovery did not install state")
 	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v", err)
+	}
+}
 
+func TestOrchestratorFailsClosedWhenControllerStaysUnavailable(t *testing.T) {
+	subscriber := newFakeSubscriber()
+	requester := &fakeSnapshotRequester{responses: make(chan snapshotResponse, 32), called: make(chan control.SnapshotRequest, 32)}
+	for range 20 {
+		requester.responses <- snapshotResponse{err: errors.New("controller unavailable")}
+	}
+	applier := &fakeApplier{}
+	orchestrator := newOrchestratorTest(t, requester, subscriber, applier, newMemoryOperations(), 5*time.Millisecond, 40*time.Millisecond)
 	result := make(chan error, 1)
 	go func() { result <- orchestrator.Run(context.Background()) }()
-	waitMessage(t, applier.applyCalled)
 	select {
 	case err := <-result:
 		if !errors.Is(err, ErrMembershipStale) {
-			t.Fatalf("Run() error = %v", err)
+			t.Fatalf("Run() = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("orchestrator did not fail closed after staleness limit")
+		t.Fatal("did not fail closed")
 	}
 	if _, ok := orchestrator.Snapshot(); ok {
-		t.Fatal("stale membership remained usable")
-	}
-	applier.mu.Lock()
-	defer applier.mu.Unlock()
-	if len(applier.failures) < 2 || !errors.Is(applier.failures[len(applier.failures)-1], ErrMembershipStale) {
-		t.Fatalf("fail-closed causes = %#v", applier.failures)
-	}
-}
-
-func TestSelectBrowsedRejectsConflictingState(t *testing.T) {
-	first := activeSnapshot(1)
-	second := activeSnapshot(1)
-	second.Queue.Name = "different"
-	messages := []Message{
-		{Kind: KindMembershipSnapshot, OperationID: "one", Group: first.ScalingGroup, Snapshot: &first},
-		{Kind: KindMembershipSnapshot, OperationID: "two", Group: second.ScalingGroup, Snapshot: &second},
-	}
-	if _, err := selectBrowsed(messages); !errors.Is(err, control.ErrConflictingUpdate) {
-		t.Fatalf("selectBrowsed() error = %v", err)
+		t.Fatal("stale state remained usable")
 	}
 }
 

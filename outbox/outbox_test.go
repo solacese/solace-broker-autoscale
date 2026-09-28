@@ -11,17 +11,17 @@ import (
 	"testing"
 )
 
-func TestRecoveryRetainsInFlightAsAckUncertain(t *testing.T) {
+func TestRecoveryRetainsInEventsAAsAckUncertain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outbox.db")
 	store := openTestStore(t, path, Limits{})
 	accepted, err := store.Accept(testRecord("event-1", "key-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Assign(accepted.EventID, Assignment{Epoch: 3, Broker: "broker-a", Destination: "orders"}); err != nil {
+	if err := store.Assign(accepted.EventID, Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 3, Broker: "broker-a", Destination: "orders"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlight(accepted.EventID); err != nil {
+	if err := store.MarkInEventsA(accepted.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -88,7 +88,7 @@ func TestStatsRetainProcessHighWaterMarks(t *testing.T) {
 	if peak.HighWaterMessages != 2 || peak.HighWaterBytes != peak.Bytes {
 		t.Fatalf("peak stats = %+v", peak)
 	}
-	if err := store.MarkInFlightBatch([]string{first.EventID, second.EventID}); err != nil {
+	if err := store.MarkInEventsABatch([]string{first.EventID, second.EventID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CompleteBatch([]Completion{
@@ -109,7 +109,7 @@ func TestAckUncertaintyRequiresExplicitRetryAndBlocksOnlySameKey(t *testing.T) {
 	second := acceptAssigned(t, store, testRecord("event-2", "key-a"))
 	other := acceptAssigned(t, store, testRecord("event-3", "key-b"))
 
-	if err := store.MarkInFlight(first.EventID); err != nil {
+	if err := store.MarkInEventsA(first.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkAckUncertain(first.EventID, "ACK deadline elapsed; duplicate delivery is possible if retried"); err != nil {
@@ -135,7 +135,7 @@ func TestAckUncertaintyRequiresExplicitRetryAndBlocksOnlySameKey(t *testing.T) {
 func TestStaleAckCannotDeleteNewerRetry(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "outbox.db"), Limits{})
 	record := acceptAssigned(t, store, testRecord("event-1", "key-a"))
-	if err := store.MarkInFlight(record.EventID); err != nil {
+	if err := store.MarkInEventsA(record.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkAckUncertain(record.EventID, "timeout"); err != nil {
@@ -144,10 +144,10 @@ func TestStaleAckCannotDeleteNewerRetry(t *testing.T) {
 	if err := store.RetryAckUncertain(record.EventID); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Assign(record.EventID, Assignment{Epoch: 2, Broker: "broker-b", Destination: "destination-2"}); err != nil {
+	if err := store.Assign(record.EventID, Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 2, Broker: "broker-b", Destination: "destination-2"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlight(record.EventID); err != nil {
+	if err := store.MarkInEventsA(record.EventID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,7 +158,7 @@ func TestStaleAckCannotDeleteNewerRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.State != StateInFlight || current.Attempts != 2 || current.Epoch != 2 {
+	if current.State != StateInEventsA || current.Attempts != 2 || current.Epoch != 2 {
 		t.Fatalf("newer retry changed by stale ACK: %#v", current)
 	}
 	if err := store.Ack(record.EventID, 2, 2); err != nil {
@@ -178,7 +178,7 @@ func TestSameKeyFIFOAcrossRejectedRetry(t *testing.T) {
 	if len(eligible) != 1 || eligible[0].EventID != first.EventID {
 		t.Fatalf("first eligible = %#v", eligible)
 	}
-	if err := store.MarkInFlight(first.EventID); err != nil {
+	if err := store.MarkInEventsA(first.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkRejected(first.EventID, "broker rejected before acceptance"); err != nil {
@@ -188,7 +188,7 @@ func TestSameKeyFIFOAcrossRejectedRetry(t *testing.T) {
 	if len(eligible) != 1 || eligible[0].EventID != first.EventID {
 		t.Fatalf("retry eligible = %#v, follower %q overtook", eligible, second.EventID)
 	}
-	if err := store.MarkInFlight(first.EventID); err != nil {
+	if err := store.MarkInEventsA(first.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Ack(first.EventID, 2, first.Epoch); err != nil {
@@ -231,7 +231,7 @@ func TestEligibleIndexPreservesOrderAcrossMixedTransitionsAndRecovery(t *testing
 	assertEligibleIDs(t, store, 2, firstA.EventID, firstC.EventID)
 	assertEligibleIDs(t, store, 10, firstA.EventID, firstC.EventID, firstD.EventID)
 
-	if err := store.MarkInFlightBatch([]string{firstA.EventID, firstC.EventID}); err != nil {
+	if err := store.MarkInEventsABatch([]string{firstA.EventID, firstC.EventID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkRejected(firstC.EventID, "retry"); err != nil {
@@ -242,12 +242,12 @@ func TestEligibleIndexPreservesOrderAcrossMixedTransitionsAndRecovery(t *testing
 	if err := store.MarkAckUncertain(firstA.EventID, "timeout"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Assign(blockedB.EventID, Assignment{Epoch: 1, Broker: "broker-a", Destination: "destination"}); err != nil {
+	if err := store.Assign(blockedB.EventID, Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 1, Broker: "broker-a", Destination: "destination"}); err != nil {
 		t.Fatal(err)
 	}
 	assertEligibleIDs(t, store, 10, blockedB.EventID, firstC.EventID, firstD.EventID)
 
-	if err := store.MarkInFlight(blockedB.EventID); err != nil {
+	if err := store.MarkInEventsA(blockedB.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Ack(blockedB.EventID, 1, 1); err != nil {
@@ -259,7 +259,7 @@ func TestEligibleIndexPreservesOrderAcrossMixedTransitionsAndRecovery(t *testing
 		t.Fatal(err)
 	}
 	assertEligibleIDs(t, store, 10, firstA.EventID, firstC.EventID, secondB.EventID, firstD.EventID)
-	if err := store.MarkInFlight(firstA.EventID); err != nil {
+	if err := store.MarkInEventsA(firstA.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Ack(firstA.EventID, 2, firstA.Epoch); err != nil {
@@ -267,7 +267,7 @@ func TestEligibleIndexPreservesOrderAcrossMixedTransitionsAndRecovery(t *testing
 	}
 	assertEligibleIDs(t, store, 10, firstC.EventID, secondA.EventID, secondB.EventID, firstD.EventID)
 
-	if err := store.MarkInFlight(firstD.EventID); err != nil {
+	if err := store.MarkInEventsA(firstD.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -298,13 +298,13 @@ func TestEligibleIndexChangesOnlyAfterDurableCommit(t *testing.T) {
 
 	injected := errors.New("injected index transition failure")
 	store.beforeCommit = func(operation string) error {
-		if operation == "mark in flight" {
+		if operation == "mark in eventsA" {
 			return injected
 		}
 		return nil
 	}
-	if err := store.MarkInFlight(first.EventID); !errors.Is(err, injected) {
-		t.Fatalf("MarkInFlight error = %v, want injected failure", err)
+	if err := store.MarkInEventsA(first.EventID); !errors.Is(err, injected) {
+		t.Fatalf("MarkInEventsA error = %v, want injected failure", err)
 	}
 	assertEligibleIDs(t, store, 10, first.EventID, second.EventID)
 }
@@ -356,13 +356,13 @@ func TestBatchStateTransitionsAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	assignments := []AssignmentUpdate{
-		{EventID: accepted[0].EventID, Assignment: Assignment{Epoch: 1, Broker: "a", Destination: "orders"}},
-		{EventID: accepted[1].EventID, Assignment: Assignment{Epoch: 2, Broker: "b", Destination: "orders"}},
+		{EventID: accepted[0].EventID, Assignment: Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 1, Broker: "a", Destination: "orders"}},
+		{EventID: accepted[1].EventID, Assignment: Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 2, Broker: "b", Destination: "orders"}},
 	}
 	if err := store.AssignBatch(assignments); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlightBatch([]string{"event-1", "missing"}); !errors.Is(err, ErrNotFound) {
+	if err := store.MarkInEventsABatch([]string{"event-1", "missing"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("invalid batch error = %v, want ErrNotFound", err)
 	}
 	for _, eventID := range []string{"event-1", "event-2"} {
@@ -374,7 +374,7 @@ func TestBatchStateTransitionsAreAtomic(t *testing.T) {
 			t.Fatalf("record after rejected batch = %#v", record)
 		}
 	}
-	if err := store.MarkInFlightBatch([]string{"event-1", "event-2"}); err != nil {
+	if err := store.MarkInEventsABatch([]string{"event-1", "event-2"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkAckUncertainBatch([]StateUpdate{{EventID: "event-1", Reason: "timeout"}, {EventID: "event-2", Reason: "disconnect"}}); err != nil {
@@ -383,7 +383,7 @@ func TestBatchStateTransitionsAreAtomic(t *testing.T) {
 	if err := store.RetryAckUncertainBatch([]string{"event-1", "event-2"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlightBatch([]string{"event-1", "event-2"}); err != nil {
+	if err := store.MarkInEventsABatch([]string{"event-1", "event-2"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CompleteBatch([]Completion{
@@ -415,7 +415,7 @@ func TestCompleteBatchAppliesMixedMatchingAttemptsAtomically(t *testing.T) {
 	if _, err := store.AcceptBatch(records); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlightBatch([]string{"acked", "rejected", "uncertain", "stale"}); err != nil {
+	if err := store.MarkInEventsABatch([]string{"acked", "rejected", "uncertain", "stale"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -446,7 +446,7 @@ func TestCompleteBatchAppliesMixedMatchingAttemptsAtomically(t *testing.T) {
 	}
 	assertRecord("rejected", StateReady, "buffer full")
 	assertRecord("uncertain", StateAckUncertain, "connection lost")
-	assertRecord("stale", StateInFlight, "")
+	assertRecord("stale", StateInEventsA, "")
 	assertEligibleIDs(t, store, 10, "rejected")
 
 	if err := store.Close(); err != nil {
@@ -472,11 +472,11 @@ func TestCompleteBatchAppliesMixedMatchingAttemptsAtomically(t *testing.T) {
 	}
 }
 
-func TestCompleteBatchWriteFailureLeavesEveryAttemptInFlight(t *testing.T) {
+func TestCompleteBatchWriteFailureLeavesEveryAttemptInEventsA(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "outbox.db"), Limits{})
 	first := acceptAssigned(t, store, testRecord("event-1", "key-1"))
 	second := acceptAssigned(t, store, testRecord("event-2", "key-2"))
-	if err := store.MarkInFlightBatch([]string{first.EventID, second.EventID}); err != nil {
+	if err := store.MarkInEventsABatch([]string{first.EventID, second.EventID}); err != nil {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected completion failure")
@@ -495,7 +495,7 @@ func TestCompleteBatchWriteFailureLeavesEveryAttemptInFlight(t *testing.T) {
 	}
 	for _, eventID := range []string{first.EventID, second.EventID} {
 		record, getErr := store.Get(eventID)
-		if getErr != nil || record.State != StateInFlight || record.Attempts != 1 {
+		if getErr != nil || record.State != StateInEventsA || record.Attempts != 1 {
 			t.Fatalf("record %q after rollback = %#v, %v", eventID, record, getErr)
 		}
 	}
@@ -517,15 +517,15 @@ func TestInvalidStateTransitionsLeaveRecordUnchanged(t *testing.T) {
 			t.Fatalf("record state=%q attempts=%d, want %q/%d", record.State, record.Attempts, want, attempts)
 		}
 	}
-	if err := store.MarkInFlight(accepted.EventID); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("unassigned MarkInFlight error = %v", err)
+	if err := store.MarkInEventsA(accepted.EventID); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("unassigned MarkInEventsA error = %v", err)
 	}
 	if err := store.Ack(accepted.EventID, 1, 1); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("unassigned Ack error = %v", err)
 	}
 	assertState(StateUnassigned, 0)
 
-	assignment := Assignment{Epoch: 1, Broker: "broker", Destination: "destination"}
+	assignment := Assignment{BrokerEndpoint: "amqps://broker.example:5671", Epoch: 1, Broker: "broker", Destination: "destination"}
 	if err := store.Assign(accepted.EventID, assignment); err != nil {
 		t.Fatal(err)
 	}
@@ -540,16 +540,16 @@ func TestInvalidStateTransitionsLeaveRecordUnchanged(t *testing.T) {
 	}
 	assertState(StateReady, 0)
 
-	if err := store.MarkInFlight(accepted.EventID); err != nil {
+	if err := store.MarkInEventsA(accepted.EventID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Assign(accepted.EventID, assignment); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("in-flight Assign error = %v", err)
+		t.Fatalf("in-progress Assign error = %v", err)
 	}
 	if err := store.RetryAckUncertain(accepted.EventID); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("in-flight RetryAckUncertain error = %v", err)
+		t.Fatalf("in-progress RetryAckUncertain error = %v", err)
 	}
-	assertState(StateInFlight, 1)
+	assertState(StateInEventsA, 1)
 
 	if err := store.MarkAckUncertain(accepted.EventID, "timeout"); err != nil {
 		t.Fatal(err)
@@ -842,7 +842,7 @@ func BenchmarkEligibleLimitOneScaling(b *testing.B) {
 			if _, err := store.AcceptBatch(records); err != nil {
 				b.Fatal(err)
 			}
-			if err := store.MarkInFlight("event-0"); err != nil {
+			if err := store.MarkInEventsA("event-0"); err != nil {
 				b.Fatal(err)
 			}
 			want := fmt.Sprintf("event-%d", size-1)

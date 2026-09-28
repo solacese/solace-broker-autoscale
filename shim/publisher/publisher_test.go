@@ -30,6 +30,10 @@ func (fixedLibrary) GetBusinessHash(message customer.MessageView) (customer.Busi
 	key, _ := message.Payload.(string)
 	return sha256.Sum256([]byte(key)), nil
 }
+func (fixedLibrary) GetRendezvousScore(input customer.ScoreInput) (customer.RoutingScore, error) {
+	return customer.SHA256RendezvousScore(input)
+}
+func (fixedLibrary) RoutingAlgorithm() string { return customer.RendezvousSHA256Contract }
 
 type brokerResult struct {
 	outcome PublishOutcome
@@ -67,6 +71,54 @@ func TestAcceptFailsClosedBeforeMembership(t *testing.T) {
 	}
 	if len(broker.calls) != 0 {
 		t.Fatalf("Accept made %d broker calls", len(broker.calls))
+	}
+}
+
+type customLibrary struct{ fixedLibrary }
+
+func (customLibrary) RoutingAlgorithm() string { return "customer-xor-score-v1" }
+func (customLibrary) GetRendezvousScore(input customer.ScoreInput) (customer.RoutingScore, error) {
+	var score customer.RoutingScore
+	copy(score[:], input.BusinessHash[:])
+	for index, value := range []byte(input.BrokerID) {
+		score[index%len(score)] ^= value
+	}
+	return score, nil
+}
+
+func TestCustomAlgorithmFlowsThroughSnapshotPublisherAndOutbox(t *testing.T) {
+	store, err := outbox.Open(filepath.Join(t.TempDir(), "custom.db"), outbox.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	library := customLibrary{}
+	publisher, err := New(Config{Outbox: store, CustomerLibrary: library, Broker: &fakeBroker{}, ScalingGroup: "orders", HashContract: "custom-business-v1", LibraryVersion: "custom-library-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := activeSnapshot(1, 1, "broker-a", "broker-b")
+	snapshot.HashContract = "custom-business-v1"
+	snapshot.LibraryVersion = "custom-library-v1"
+	snapshot.Algorithm = library.RoutingAlgorithm()
+	if err := publisher.ApplyMembership(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := publisher.Accept(message("custom-event", "entity-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Get(receipt.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RoutingAlgorithm != library.RoutingAlgorithm() || record.HashContract != snapshot.HashContract || record.Broker == "" {
+		t.Fatalf("durable routing contract not preserved: %#v", record)
+	}
+	mismatch := snapshot.Clone()
+	mismatch.Revision++
+	mismatch.Algorithm = "different-score-v1"
+	if err := publisher.ApplyMembership(mismatch); err == nil {
+		t.Fatal("algorithm mismatch was accepted")
 	}
 }
 
@@ -214,6 +266,10 @@ func TestAcceptIsDurableButDoesNotPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stored, getErr := store.Get(receipt.EventID)
+	if getErr != nil || stored.BrokerEndpoint == "" {
+		t.Fatalf("stored broker endpoint missing: %#v err=%v", stored, getErr)
+	}
 	if receipt.State != outbox.StateReady {
 		t.Fatalf("receipt state = %q, want ready", receipt.State)
 	}
@@ -333,7 +389,7 @@ func TestAmbiguousAckRetainsRecordAndOtherKeyProgresses(t *testing.T) {
 	}
 }
 
-func TestRetryAckUncertainReassignsToCurrentEpoch(t *testing.T) {
+func TestRetryAckUncertainRejectsRouteChangeWithoutMutation(t *testing.T) {
 	publisher, store, broker := newTestPublisher(t)
 	apply(t, publisher, activeSnapshot(1, 1, "broker-a"))
 	receipt, err := publisher.Accept(message("event-1", "key-a"))
@@ -342,18 +398,16 @@ func TestRetryAckUncertainReassignsToCurrentEpoch(t *testing.T) {
 	}
 	broker.results = []brokerResult{{outcome: OutcomeUnknown, err: errors.New("ACK timeout")}}
 	if _, err := publisher.Dispatch(context.Background(), 1); !errors.Is(err, ErrAckUncertain) {
-		t.Fatalf("Dispatch() error = %v", err)
+		t.Fatalf("Dispatch=%v", err)
 	}
+	before, _ := store.Get(receipt.EventID)
 	apply(t, publisher, activeSnapshot(2, 2, "broker-b"))
-	if err := publisher.RetryAckUncertain(receipt.EventID); err != nil {
-		t.Fatal(err)
+	if err := publisher.RetryAckUncertain(receipt.EventID); err == nil {
+		t.Fatal("cross-epoch uncertain retry accepted")
 	}
-	record, err := store.Get(receipt.EventID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if record.Epoch != 2 || record.Broker != "broker-b" || record.State != outbox.StateReady {
-		t.Fatalf("retry assignment = %#v", record)
+	after, _ := store.Get(receipt.EventID)
+	if after.State != outbox.StateAckUncertain || after.Epoch != before.Epoch || after.Broker != before.Broker || after.Destination != before.Destination {
+		t.Fatalf("uncertain record mutated: before=%#v after=%#v", before, after)
 	}
 }
 
@@ -368,7 +422,7 @@ func TestDispatchUsesRoutingAndAttachesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("business-key"))
-	wantBroker, err := routing.BrokerForHash(digest, snapshot.CurrentMembership)
+	wantBroker, err := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), snapshot.ScalingGroup, digest, snapshot.CurrentMembership)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,11 +500,11 @@ func TestAssignmentUsesSelectedBrokerEpochResource(t *testing.T) {
 	}
 	for key := 0; key < 1000; key++ {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("key-%d", key)))
-		broker, err := routing.BrokerForHash(digest, snapshot.CurrentMembership)
+		broker, err := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), snapshot.ScalingGroup, digest, snapshot.CurrentMembership)
 		if err != nil || broker != "broker-b" {
 			continue
 		}
-		assignment, err := assignmentFor(hex.EncodeToString(digest[:]), snapshot)
+		assignment, err := assignmentFor(fixedLibrary{}, hex.EncodeToString(digest[:]), snapshot)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -476,7 +530,7 @@ func TestAssignmentDestinationMatchesBoundedIngressSubscription(t *testing.T) {
 		Epoch: 3, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "orders-a-e3", IngressTopic: ingressTopic,
 	}}
 	digest := sha256.Sum256([]byte("key"))
-	assignment, err := assignmentFor(hex.EncodeToString(digest[:]), snapshot)
+	assignment, err := assignmentFor(fixedLibrary{}, hex.EncodeToString(digest[:]), snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,11 +554,11 @@ func TestAssignmentRejectsMissingSelectedBrokerResource(t *testing.T) {
 	}
 	for key := 0; key < 1000; key++ {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("key-%d", key)))
-		broker, err := routing.BrokerForHash(digest, snapshot.CurrentMembership)
+		broker, err := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), snapshot.ScalingGroup, digest, snapshot.CurrentMembership)
 		if err != nil || broker != "broker-b" {
 			continue
 		}
-		if _, err := assignmentFor(hex.EncodeToString(digest[:]), snapshot); err == nil {
+		if _, err := assignmentFor(fixedLibrary{}, hex.EncodeToString(digest[:]), snapshot); err == nil {
 			t.Fatal("missing selected-broker resource was accepted")
 		}
 		return
@@ -512,22 +566,76 @@ func TestAssignmentRejectsMissingSelectedBrokerResource(t *testing.T) {
 	t.Fatal("no hash selected broker-b")
 }
 
+func TestRendezvousCacheIgnoresEndpointAndInvalidatesOnRevision(t *testing.T) {
+	publisher, _, _ := newTestPublisher(t)
+	first := activeSnapshot(1, 1, "broker-a", "broker-b")
+	message := message("event-1", "cache-key")
+	apply(t, publisher, first)
+	receipt, err := publisher.Accept(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := first.Clone()
+	updated.Revision++
+	updated.Destination.Name = "new-logical-endpoint"
+	for i := range updated.CurrentResources {
+		updated.CurrentResources[i].IngressTopic = "new/input/>"
+	}
+	// Routing compatibility correctly rejects endpoint/resource mutation at one
+	// epoch, while raw rendezvous placement remains broker-ID-only.
+	hash, _ := fixedLibrary{}.GetBusinessHash(message)
+	before, _ := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), first.ScalingGroup, hash, first.CurrentMembership)
+	after, _ := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), updated.ScalingGroup, hash, updated.CurrentMembership)
+	if before != after || receipt.Broker != before {
+		t.Fatalf("endpoint update changed placement: %s/%s/%s", receipt.Broker, before, after)
+	}
+	publisher.mu.Lock()
+	oldCount := len(publisher.placementCache)
+	publisher.mu.Unlock()
+	paused := pausedSnapshot(2, 1)
+	apply(t, publisher, paused)
+	active := activeSnapshot(3, 2, "broker-b", "broker-c")
+	apply(t, publisher, active)
+	publisher.mu.Lock()
+	_, cached := publisher.placementCache[placementCacheKey{group: "orders", hash: receipt.Hash, revision: active.Revision}]
+	newCount := len(publisher.placementCache)
+	publisher.mu.Unlock()
+	if !cached || newCount < oldCount {
+		t.Fatalf("activation cache not repopulated: old=%d new=%d", oldCount, newCount)
+	}
+}
+
 func activeSnapshot(revision, epoch uint64, brokers ...string) control.MembershipSnapshot {
+	resources := make([]control.EpochResourceIdentity, len(brokers))
+	for index, broker := range brokers {
+		resources[index] = control.EpochResourceIdentity{Epoch: epoch, BrokerID: broker, ConsumerSet: "default", QueueName: "orders." + broker, IngressTopic: "orders/input/>"}
+	}
 	return control.MembershipSnapshot{
 		Version: control.SnapshotVersion, LibraryVersion: "library-v1", ScalingGroup: "orders", Revision: revision,
-		Epoch: epoch, Phase: control.PhaseActive, HashContract: "sha256/customer-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo, CurrentMembership: brokers,
+		Epoch: epoch, Phase: control.PhaseActive, HashContract: "sha256/customer-v1", Algorithm: control.AlgorithmRendezvousV1, CurrentMembership: brokers,
 		Queue:       control.QueueInfo{Name: "orders", Durable: true},
 		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders/input"},
+		CurrentBrokers: func() []control.BrokerDescriptor {
+			result := make([]control.BrokerDescriptor, len(brokers))
+			for i, b := range brokers {
+				result[i] = control.BrokerDescriptor{ID: b, Endpoint: "amqps://" + b + ".example:5671"}
+			}
+			return result
+		}(),
+		CurrentResources: resources,
 	}
 }
 
 func pausedSnapshot(revision, epoch uint64) control.MembershipSnapshot {
 	return control.MembershipSnapshot{
 		Version: control.SnapshotVersion, LibraryVersion: "library-v1", ScalingGroup: "orders", Revision: revision,
-		Epoch: epoch, Phase: control.PhasePaused, HashContract: "sha256/customer-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
+		Epoch: epoch, Phase: control.PhasePaused, HashContract: "sha256/customer-v1", Algorithm: control.AlgorithmRendezvousV1,
 		CurrentMembership: control.Membership{"broker-a"}, ProposedMembership: control.Membership{"broker-b", "broker-c"},
-		Transition:  &control.Transition{ID: "transition-1", FromEpoch: epoch, ToEpoch: epoch + 1},
-		Queue:       control.QueueInfo{Name: "orders", Durable: true},
-		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders/input"},
+		Transition:     &control.Transition{ID: "transition-1", FromEpoch: epoch, ToEpoch: epoch + 1},
+		CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://a.example:5671"}}, ProposedBrokers: []control.BrokerDescriptor{{ID: "broker-b", Endpoint: "amqps://b.example:5671"}, {ID: "broker-c", Endpoint: "amqps://c.example:5671"}},
+		CurrentResources:  []control.EpochResourceIdentity{{Epoch: epoch, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "orders.broker-a", IngressTopic: "orders/input/>"}},
+		ProposedResources: []control.EpochResourceIdentity{{Epoch: epoch + 1, BrokerID: "broker-b", ConsumerSet: "default", QueueName: "orders.broker-b", IngressTopic: "orders/input/>"}, {Epoch: epoch + 1, BrokerID: "broker-c", ConsumerSet: "default", QueueName: "orders.broker-c", IngressTopic: "orders/input/>"}},
+		Queue:             control.QueueInfo{Name: "orders", Durable: true},
+		Destination:       control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders/input"},
 	}
 }

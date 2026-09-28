@@ -126,6 +126,7 @@ func (d *fakeRoutedDelivery) RoutingMetadata() (RoutingMetadata, error) {
 
 func testLibrary() customer.CustomerLibrary {
 	return customer.CustomerLibraryFuncs{
+		Algorithm:    customer.RendezvousSHA256Contract,
 		ScalingGroup: func(message customer.MessageView) (string, error) { return message.Headers["group"], nil },
 		BusinessHash: func(message customer.MessageView) (customer.BusinessHash, error) {
 			return sha256.Sum256([]byte(message.Headers["key"])), nil
@@ -191,22 +192,38 @@ func TestNewRequiresCompleteContracts(t *testing.T) {
 	}
 }
 
+func TestApplySnapshotRejectsCustomerAlgorithmMismatch(t *testing.T) {
+	shim, _, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
+	snapshot := control.MembershipSnapshot{
+		Version: control.SnapshotVersion, LibraryVersion: "library-v1", ScalingGroup: "orders", Revision: 1, Epoch: 1,
+		Phase: control.PhaseActive, HashContract: "orders-v1", Algorithm: "customer-other-score-v1",
+		CurrentMembership: control.Membership{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://a.example:5671"}},
+		CurrentResources: []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "orders.a", IngressTopic: "orders/>"}},
+		Queue: control.QueueInfo{Name: "orders", Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
+	}
+	if err := shim.ApplySnapshot(context.Background(), snapshot, func(string, uint64, control.DestinationInfo) (string, error) { return "orders.a", nil }); err == nil {
+		t.Fatal("customer algorithm mismatch was accepted")
+	}
+}
+
 func TestApplySnapshotLifecyclePreservesMembershipOrder(t *testing.T) {
 	shim, factory, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
 	resolve := func(broker string, epoch uint64, logical control.DestinationInfo) (string, error) {
 		return logical.Name + "/" + broker + "/e" + fmt.Sprint(epoch), nil
 	}
 	prepare := control.MembershipSnapshot{
-		Version:            control.SnapshotVersion,
-		LibraryVersion:     "library-v1",
-		ScalingGroup:       "orders",
-		Revision:           1,
-		Epoch:              1,
-		Phase:              control.PhasePrepare,
-		HashContract:       "orders-v1",
-		Algorithm:          control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership:  control.Membership{"old-b", "old-a"},
+		Version:           control.SnapshotVersion,
+		LibraryVersion:    "library-v1",
+		ScalingGroup:      "orders",
+		Revision:          1,
+		Epoch:             1,
+		Phase:             control.PhasePrepare,
+		HashContract:      "orders-v1",
+		Algorithm:         control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"old-b", "old-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "old-b", Endpoint: "amqps://old-b.example:5671"}, {ID: "old-a", Endpoint: "amqps://old-a.example:5671"}}, ProposedBrokers: []control.BrokerDescriptor{{ID: "new-b", Endpoint: "amqps://new-b.example:5671"}, {ID: "new-a", Endpoint: "amqps://new-a.example:5671"}},
 		ProposedMembership: control.Membership{"new-b", "new-a"},
+		CurrentResources:   []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "old-b", ConsumerSet: "workers", QueueName: "old-b.e1", IngressTopic: "orders/>"}, {Epoch: 1, BrokerID: "old-a", ConsumerSet: "workers", QueueName: "old-a.e1", IngressTopic: "orders/>"}},
+		ProposedResources:  []control.EpochResourceIdentity{{Epoch: 2, BrokerID: "new-b", ConsumerSet: "workers", QueueName: "new-b.e2", IngressTopic: "orders/>"}, {Epoch: 2, BrokerID: "new-a", ConsumerSet: "workers", QueueName: "new-a.e2", IngressTopic: "orders/>"}},
 		Transition:         &control.Transition{ID: "t-snapshot", FromEpoch: 1, ToEpoch: 2},
 		Queue:              control.QueueInfo{Name: "orders-queue", Durable: true},
 		Destination:        control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
@@ -237,6 +254,8 @@ func TestApplySnapshotLifecyclePreservesMembershipOrder(t *testing.T) {
 		HashContract:      prepare.HashContract,
 		Algorithm:         prepare.Algorithm,
 		CurrentMembership: prepare.ProposedMembership.Clone(),
+		CurrentBrokers:    append([]control.BrokerDescriptor(nil), prepare.ProposedBrokers...),
+		CurrentResources:  append([]control.EpochResourceIdentity(nil), prepare.ProposedResources...),
 		Queue:             prepare.Queue,
 		Destination:       prepare.Destination,
 	}
@@ -256,16 +275,18 @@ func TestApplySnapshotActiveSourceRollsBackPendingTransition(t *testing.T) {
 		return logical.Name + "/" + broker + "/e" + fmt.Sprint(epoch), nil
 	}
 	prepare := control.MembershipSnapshot{
-		Version:            control.SnapshotVersion,
-		LibraryVersion:     "library-v1",
-		ScalingGroup:       "orders",
-		Revision:           1,
-		Epoch:              1,
-		Phase:              control.PhasePrepare,
-		HashContract:       "orders-v1",
-		Algorithm:          control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership:  control.Membership{"old-b", "old-a"},
+		Version:           control.SnapshotVersion,
+		LibraryVersion:    "library-v1",
+		ScalingGroup:      "orders",
+		Revision:          1,
+		Epoch:             1,
+		Phase:             control.PhasePrepare,
+		HashContract:      "orders-v1",
+		Algorithm:         control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"old-b", "old-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "old-b", Endpoint: "amqps://old-b.example:5671"}, {ID: "old-a", Endpoint: "amqps://old-a.example:5671"}}, ProposedBrokers: []control.BrokerDescriptor{{ID: "new-b", Endpoint: "amqps://new-b.example:5671"}, {ID: "new-a", Endpoint: "amqps://new-a.example:5671"}},
 		ProposedMembership: control.Membership{"new-b", "new-a"},
+		CurrentResources:   []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "old-b", ConsumerSet: "workers", QueueName: "old-b.e1", IngressTopic: "orders/>"}, {Epoch: 1, BrokerID: "old-a", ConsumerSet: "workers", QueueName: "old-a.e1", IngressTopic: "orders/>"}},
+		ProposedResources:  []control.EpochResourceIdentity{{Epoch: 2, BrokerID: "new-b", ConsumerSet: "workers", QueueName: "new-b.e2", IngressTopic: "orders/>"}, {Epoch: 2, BrokerID: "new-a", ConsumerSet: "workers", QueueName: "new-a.e2", IngressTopic: "orders/>"}},
 		Transition:         &control.Transition{ID: "t-rollback", FromEpoch: 1, ToEpoch: 2},
 		Queue:              control.QueueInfo{Name: "orders-queue", Durable: true},
 		Destination:        control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
@@ -275,7 +296,7 @@ func TestApplySnapshotActiveSourceRollsBackPendingTransition(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := shim.AddActive(context.Background(), Binding{Group: prepare.ScalingGroup, BrokerID: broker, Epoch: prepare.Epoch, Destination: name}); err != nil {
+		if err := shim.AddActive(context.Background(), Binding{Group: prepare.ScalingGroup, BrokerID: broker, Endpoint: "amqps://broker.example:5671", Epoch: prepare.Epoch, Destination: name}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,6 +310,8 @@ func TestApplySnapshotActiveSourceRollsBackPendingTransition(t *testing.T) {
 	active.Revision++
 	active.Phase = control.PhaseActive
 	active.ProposedMembership = nil
+	active.ProposedBrokers = nil
+	active.ProposedResources = nil
 	active.Transition = nil
 	if err := shim.ApplySnapshot(context.Background(), active, resolve); err != nil {
 		t.Fatal(err)
@@ -395,7 +418,7 @@ func TestPoisonBlocksOnlySameGroupAndKeyUntilRetry(t *testing.T) {
 		return nil
 	})
 	shim, _, _ := newTestShim(t, handler)
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	poison := &fakeDelivery{message: testMessage("orders", "same", "poison")}
 	if err := shim.Handle(context.Background(), binding, poison); err == nil || !RetainedDelivery(err) {
 		t.Fatalf("poison delivery error = %v, want retained ownership", err)
@@ -419,7 +442,7 @@ func TestPoisonBlocksOnlySameGroupAndKeyUntilRetry(t *testing.T) {
 	if err := shim.Handle(context.Background(), binding, otherKey); err != nil {
 		t.Fatal(err)
 	}
-	otherGroupBinding := Binding{Group: "billing", BrokerID: "b2", Epoch: 1, Destination: "billing/e1"}
+	otherGroupBinding := Binding{Group: "billing", BrokerID: "b2", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "billing/e1"}
 	otherGroup := &fakeDelivery{message: testMessage("billing", "same", "other-group")}
 	if err := shim.Handle(context.Background(), otherGroupBinding, otherGroup); err != nil {
 		t.Fatal(err)
@@ -459,7 +482,7 @@ func TestCanceledFollowerPreservesSameKeyFIFO(t *testing.T) {
 		<-release
 		return nil
 	}))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	done := make(chan error, 3)
 	go func() {
 		done <- shim.Handle(context.Background(), binding, &fakeDelivery{message: testMessage("orders", "same", "first")})
@@ -506,7 +529,7 @@ func TestCanceledPoisonFollowerReturnsAndLaneStillUnblocks(t *testing.T) {
 		}
 		return nil
 	}))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	poison := &fakeDelivery{message: testMessage("orders", "same", "poison")}
 	if err := shim.Handle(context.Background(), binding, poison); !RetainedDelivery(err) {
 		t.Fatalf("poison error = %v", err)
@@ -537,7 +560,7 @@ func TestCanceledPoisonFollowerReturnsAndLaneStillUnblocks(t *testing.T) {
 
 func TestCompletedLanesAreReclaimed(t *testing.T) {
 	shim, _, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	for index := range 1000 {
 		key := fmt.Sprintf("key-%d", index)
 		if err := shim.Handle(context.Background(), binding, &fakeDelivery{message: testMessage("orders", key, key)}); err != nil {
@@ -554,7 +577,7 @@ func TestCompletedLanesAreReclaimed(t *testing.T) {
 
 func TestRoutedDeliveryMetadataMustMatchLibraryAndBinding(t *testing.T) {
 	shim, _, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 7, Destination: "orders/e7"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 7, Destination: "orders/e7"}
 	message := testMessage("orders", "one", "event")
 	message.Topic = "orders/events"
 	hash := sha256.Sum256([]byte("one"))
@@ -607,7 +630,7 @@ func TestRoutedDeliveryMetadataMustMatchLibraryAndBinding(t *testing.T) {
 
 func TestHandleRequiresAuthoritativeRoutingMetadata(t *testing.T) {
 	shim, _, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	delivery := &legacyDelivery{message: testMessage("orders", "one", "event")}
 	if err := shim.Handle(context.Background(), binding, delivery); !errors.Is(err, ErrRoutingMetadata) {
 		t.Fatalf("Handle() error = %v, want ErrRoutingMetadata", err)
@@ -624,8 +647,8 @@ func TestApplySnapshotRequiresConfiguredContract(t *testing.T) {
 	}
 	valid := control.MembershipSnapshot{
 		Version: control.SnapshotVersion, LibraryVersion: "library-v1", ScalingGroup: "orders", Revision: 1, Epoch: 1,
-		Phase: control.PhaseActive, HashContract: "orders-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership: control.Membership{"broker-a"}, Queue: control.QueueInfo{Name: "orders", Durable: true},
+		Phase: control.PhaseActive, HashContract: "orders-v1", Algorithm: control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://broker-a.example:5671"}}, CurrentResources: []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "broker-a.e1", IngressTopic: "orders/>"}}, Queue: control.QueueInfo{Name: "orders", Durable: true},
 		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
 	}
 	for name, mutate := range map[string]func(*control.MembershipSnapshot){
@@ -662,7 +685,7 @@ func TestSameKeySerializedAndAckAfterApplication(t *testing.T) {
 		return nil
 	})
 	shim, _, _ := newTestShim(t, handler)
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	first := &fakeDelivery{message: testMessage("orders", "one", "first")}
 	second := &fakeDelivery{message: testMessage("orders", "one", "second")}
 	done := make(chan error, 2)
@@ -704,7 +727,7 @@ func TestAckFailureRetryDoesNotRepeatApplication(t *testing.T) {
 		attempts.Add(1)
 		return nil
 	}))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	delivery := &fakeDelivery{message: testMessage("orders", "one", "event"), ackErr: errors.New("transport down")}
 	if err := shim.Handle(context.Background(), binding, delivery); err == nil || !RetainedDelivery(err) {
 		t.Fatalf("ACK failure error = %v, want retained ownership", err)
@@ -770,7 +793,7 @@ func TestRollbackCloseFailureKeepsTransitionRetryable(t *testing.T) {
 
 func TestCloseFailureRetainsConsumerForRetry(t *testing.T) {
 	shim, factory, _ := newTestShim(t, HandlerFunc(func(context.Context, customer.MessageView) error { return nil }))
-	binding := Binding{Group: "orders", BrokerID: "a", Epoch: 1, Destination: "orders-a-e1"}
+	binding := Binding{Group: "orders", BrokerID: "a", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders-a-e1"}
 	if err := shim.AddActive(context.Background(), binding); err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +821,7 @@ func TestConcurrentSnapshotAndTransitionOperationsAreSafe(t *testing.T) {
 	}
 	snapshot := control.MembershipSnapshot{
 		Version: control.SnapshotVersion, LibraryVersion: "library-v1", ScalingGroup: "orders", Revision: 1, Epoch: 1,
-		Phase: control.PhaseActive, HashContract: "orders-v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
+		Phase: control.PhaseActive, HashContract: "orders-v1", Algorithm: control.AlgorithmRendezvousV1,
 		CurrentMembership: control.Membership{"old"}, Queue: control.QueueInfo{Name: "orders", Durable: true},
 		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "orders"},
 	}
@@ -827,7 +850,7 @@ func TestCloseClosesActiveAndPreparedConsumersOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := Binding{Group: "orders", BrokerID: "a", Epoch: 1, Destination: "orders-a-e1"}
+	active := Binding{Group: "orders", BrokerID: "a", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders-a-e1"}
 	if err := shim.AddActive(context.Background(), active); err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +884,7 @@ func TestReleaseRejectsPoisonBeforeUnblocking(t *testing.T) {
 		}
 		return nil
 	}))
-	binding := Binding{Group: "orders", BrokerID: "b1", Epoch: 1, Destination: "orders/e1"}
+	binding := Binding{Group: "orders", BrokerID: "b1", Endpoint: "amqps://broker.example:5671", Epoch: 1, Destination: "orders/e1"}
 	delivery := &fakeDelivery{message: testMessage("orders", "one", "poison")}
 	if err := shim.Handle(context.Background(), binding, delivery); err == nil {
 		t.Fatal("poison delivery unexpectedly succeeded")

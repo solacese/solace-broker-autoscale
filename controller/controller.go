@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -16,10 +18,11 @@ import (
 // PersistentState is the JSON representation of all independent scaling-group
 // transitions.
 type PersistentState struct {
-	Version         int                           `json:"version"`
-	Groups          map[string]*GroupState        `json:"groups"`
-	History         map[string][]TransitionRecord `json:"history,omitempty"`
-	CleanupEvidence map[string][]CleanupEvidence  `json:"cleanup_evidence,omitempty"`
+	Version         int                                   `json:"version"`
+	Membership      map[string]control.MembershipSnapshot `json:"membership,omitempty"`
+	Groups          map[string]*GroupState                `json:"groups"`
+	History         map[string][]TransitionRecord         `json:"history,omitempty"`
+	CleanupEvidence map[string][]CleanupEvidence          `json:"cleanup_evidence,omitempty"`
 }
 
 // PhaseEvent is retained evidence of when a durable phase was entered and left.
@@ -127,6 +130,17 @@ func Open(store Store, fence BrokerFence, publisher ControlPublisher, options Op
 	state, err := store.Load()
 	if err != nil {
 		return nil, err
+	}
+	if state.Membership == nil {
+		state.Membership = make(map[string]control.MembershipSnapshot)
+	}
+	for group, snapshot := range state.Membership {
+		if err := snapshot.Validate(); err != nil {
+			return nil, fmt.Errorf("group %q has invalid persisted membership: %w", group, err)
+		}
+		if group != snapshot.ScalingGroup {
+			return nil, fmt.Errorf("persisted membership key %q contains group %q", group, snapshot.ScalingGroup)
+		}
 	}
 	if state.Groups == nil {
 		state.Groups = make(map[string]*GroupState)
@@ -507,7 +521,7 @@ func (c *Controller) Reconcile(ctx context.Context, group string) (bool, error) 
 		}
 	case PhasePause:
 		// Publishers first close their durable dispatch gates and resolve
-		// in-flight sends. Fencing before those acknowledgements could reject a
+		// in-progress sends. Fencing before those acknowledgements could reject a
 		// send that was valid when it began and make its outcome ambiguous.
 		if !state.PausePublished {
 			state, intentChanged, err := c.ensureCommandIntent(group, state, PhasePause)
@@ -667,6 +681,38 @@ func (c *Controller) ReconcileAll(ctx context.Context) map[string]error {
 		}
 	}
 	return errs
+}
+
+func (c *Controller) SaveMembership(snapshot control.MembershipSnapshot) error {
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	return c.updateState(func(state *PersistentState) error {
+		if state.Membership == nil {
+			state.Membership = make(map[string]control.MembershipSnapshot)
+		}
+		current, ok := state.Membership[snapshot.ScalingGroup]
+		if ok {
+			if snapshot.Revision < current.Revision || snapshot.Epoch < current.Epoch {
+				return fmt.Errorf("controller: membership revision or epoch regressed for %q", snapshot.ScalingGroup)
+			}
+			if snapshot.Revision == current.Revision {
+				if !membershipSnapshotsEqual(current, snapshot) {
+					return fmt.Errorf("controller: conflicting membership at revision %d for %q", snapshot.Revision, snapshot.ScalingGroup)
+				}
+				return errNoStateChange
+			}
+		}
+		state.Membership[snapshot.ScalingGroup] = snapshot.Clone()
+		return nil
+	})
+}
+
+func (c *Controller) SnapshotForGroup(group string) (control.MembershipSnapshot, bool) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	snapshot, ok := c.state.Membership[group]
+	return snapshot.Clone(), ok
 }
 
 func (c *Controller) Snapshot() PersistentState {
@@ -878,6 +924,12 @@ func telemetryEqual(left, right Telemetry) bool {
 	return left == right
 }
 
+func membershipSnapshotsEqual(left, right control.MembershipSnapshot) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
 func (c *Controller) publish(ctx context.Context, state *GroupState, phase Phase, rollback bool) error {
 	current, proposed := state.Spec.Current, state.Spec.Proposed
 	fromEpoch, toEpoch := state.Spec.FromEpoch, state.Spec.ToEpoch
@@ -897,6 +949,9 @@ func (c *Controller) publish(ctx context.Context, state *GroupState, phase Phase
 		Rollback:         rollback,
 		Snapshot:         controlSnapshot(state.Spec, phase, rollback),
 		IssuedCommandIDs: maps.Clone(state.IssuedCommandIDs[phase]),
+	}
+	if err := c.SaveMembership(update.Snapshot); err != nil {
+		return fmt.Errorf("persist %s membership before publication: %w", phase, err)
 	}
 	if err := c.publisher.Publish(ctx, update); err != nil {
 		return fmt.Errorf("publish %s control update: %w", phase, err)
@@ -920,6 +975,7 @@ func controlSnapshot(spec TransitionSpec, phase Phase, rollback bool) control.Me
 		snapshot.Epoch = spec.FromEpoch
 		snapshot.Phase = control.PhaseActive
 		snapshot.CurrentMembership = membership(spec.Current)
+		snapshot.CurrentBrokers = slices.Clone(spec.CurrentBrokers)
 		snapshot.CurrentResources = slices.Clone(spec.CurrentResources)
 		return snapshot
 	}
@@ -931,6 +987,8 @@ func controlSnapshot(spec TransitionSpec, phase Phase, rollback bool) control.Me
 		snapshot.Phase = control.PhasePrepare
 		snapshot.CurrentMembership = membership(spec.Current)
 		snapshot.ProposedMembership = membership(spec.Proposed)
+		snapshot.CurrentBrokers = slices.Clone(spec.CurrentBrokers)
+		snapshot.ProposedBrokers = slices.Clone(spec.ProposedBrokers)
 		snapshot.CurrentResources = slices.Clone(spec.CurrentResources)
 		snapshot.ProposedResources = slices.Clone(spec.ProposedResources)
 		snapshot.Transition = &control.Transition{ID: spec.ID, FromEpoch: spec.FromEpoch, ToEpoch: spec.ToEpoch}
@@ -945,6 +1003,8 @@ func controlSnapshot(spec TransitionSpec, phase Phase, rollback bool) control.Me
 		snapshot.Epoch = spec.FromEpoch
 		snapshot.CurrentMembership = membership(spec.Current)
 		snapshot.ProposedMembership = membership(spec.Proposed)
+		snapshot.CurrentBrokers = slices.Clone(spec.CurrentBrokers)
+		snapshot.ProposedBrokers = slices.Clone(spec.ProposedBrokers)
 		snapshot.CurrentResources = slices.Clone(spec.CurrentResources)
 		snapshot.ProposedResources = slices.Clone(spec.ProposedResources)
 		snapshot.Transition = &control.Transition{ID: spec.ID, FromEpoch: spec.FromEpoch, ToEpoch: spec.ToEpoch}
@@ -953,6 +1013,7 @@ func controlSnapshot(spec TransitionSpec, phase Phase, rollback bool) control.Me
 		snapshot.Epoch = spec.ToEpoch
 		snapshot.Phase = control.PhaseCommitted
 		snapshot.CurrentMembership = membership(spec.Proposed)
+		snapshot.CurrentBrokers = slices.Clone(spec.ProposedBrokers)
 		snapshot.CurrentResources = slices.Clone(spec.ProposedResources)
 		snapshot.Transition = &control.Transition{ID: spec.ID, FromEpoch: spec.FromEpoch, ToEpoch: spec.ToEpoch}
 	case PhaseActivate:
@@ -960,6 +1021,7 @@ func controlSnapshot(spec TransitionSpec, phase Phase, rollback bool) control.Me
 		snapshot.Epoch = spec.ToEpoch
 		snapshot.Phase = control.PhaseActive
 		snapshot.CurrentMembership = membership(spec.Proposed)
+		snapshot.CurrentBrokers = slices.Clone(spec.ProposedBrokers)
 		snapshot.CurrentResources = slices.Clone(spec.ProposedResources)
 	}
 	return snapshot
@@ -1165,9 +1227,13 @@ func canReplaceCompleted(existing *GroupState, next TransitionSpec) bool {
 func clonePersistent(state PersistentState) PersistentState {
 	clone := PersistentState{
 		Version:         state.Version,
+		Membership:      make(map[string]control.MembershipSnapshot, len(state.Membership)),
 		Groups:          make(map[string]*GroupState, len(state.Groups)),
 		History:         make(map[string][]TransitionRecord, len(state.History)),
 		CleanupEvidence: make(map[string][]CleanupEvidence, len(state.CleanupEvidence)),
+	}
+	for group, snapshot := range state.Membership {
+		clone.Membership[group] = snapshot.Clone()
 	}
 	for group, transition := range state.Groups {
 		copy := cloneGroup(transition)
@@ -1186,6 +1252,8 @@ func cloneGroup(state *GroupState) GroupState {
 	clone := *state
 	clone.Spec.Current = slices.Clone(state.Spec.Current)
 	clone.Spec.Proposed = slices.Clone(state.Spec.Proposed)
+	clone.Spec.CurrentBrokers = slices.Clone(state.Spec.CurrentBrokers)
+	clone.Spec.ProposedBrokers = slices.Clone(state.Spec.ProposedBrokers)
 	clone.Spec.CurrentResources = slices.Clone(state.Spec.CurrentResources)
 	clone.Spec.ProposedResources = slices.Clone(state.Spec.ProposedResources)
 	clone.Spec.RequiredParticipants = slices.Clone(state.Spec.RequiredParticipants)

@@ -88,20 +88,7 @@ type OperationStore interface {
 	Record(context.Context, string) error
 }
 
-// BrowsedMessage is an owned copy of one retained control publication.
-type BrowsedMessage struct {
-	Kind        Kind
-	OperationID string
-	Payload     []byte
-}
-
-// Browser performs a non-destructive read of retained membership snapshots. It
-// must not consume or acknowledge the shared retained record.
-type Browser interface {
-	Browse(context.Context, string) ([]BrowsedMessage, error)
-}
-
-// UpdateSubscription is established before Browser.Browse is called. Deliveries
+// UpdateSubscription is established before requesting controller state. Deliveries
 // are durable and client-acknowledged. Reconnects emits after connectivity has
 // been restored; it may be nil when the native adapter cannot signal reconnects.
 type UpdateSubscription struct {

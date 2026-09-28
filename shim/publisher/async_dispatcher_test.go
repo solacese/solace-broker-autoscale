@@ -118,7 +118,7 @@ func TestAcceptBatchIsAtomicAndOrdered(t *testing.T) {
 	}
 }
 
-func TestAsyncDispatcherMarksWholeBatchInFlightBeforeSubmission(t *testing.T) {
+func TestAsyncDispatcherMarksWholeBatchInEventsABeforeSubmission(t *testing.T) {
 	publisher, store, _ := newTestPublisher(t)
 	apply(t, publisher, activeSnapshot(1, 1, "broker-a"))
 	if _, err := publisher.AcceptBatch([]customer.MessageView{
@@ -131,7 +131,7 @@ func TestAsyncDispatcherMarksWholeBatchInFlightBeforeSubmission(t *testing.T) {
 		if checked.CompareAndSwap(false, true) {
 			for _, eventID := range []string{"event-1", "event-2", "event-3"} {
 				record, err := store.Get(eventID)
-				if err != nil || record.State != outbox.StateInFlight || record.Attempts != 1 {
+				if err != nil || record.State != outbox.StateInEventsA || record.Attempts != 1 {
 					t.Errorf("record %q at first submit = %#v, %v", eventID, record, err)
 				}
 			}
@@ -146,7 +146,7 @@ func TestAsyncDispatcherMarksWholeBatchInFlightBeforeSubmission(t *testing.T) {
 	waitForOutboxCount(t, store, 0)
 }
 
-func TestAsyncDispatcherOneInFlightPerLaneAndBounded(t *testing.T) {
+func TestAsyncDispatcherOneInEventsAPerLaneAndBounded(t *testing.T) {
 	publisher, store, _ := newTestPublisher(t)
 	apply(t, publisher, activeSnapshot(1, 1, "broker-a"))
 	if _, err := publisher.AcceptBatch([]customer.MessageView{
@@ -212,7 +212,7 @@ func TestAsyncDispatcherOneInFlightPerLaneAndBounded(t *testing.T) {
 			continue
 		}
 		record, getErr := store.Get(eventID)
-		if getErr == nil && record.State == outbox.StateInFlight {
+		if getErr == nil && record.State == outbox.StateInEventsA {
 			ch <- AsyncPublishResult{Attempt: PublishAttempt{EventID: eventID, Number: record.Attempts, Epoch: record.Epoch}, Outcome: OutcomeAcknowledged}
 		}
 	}
@@ -331,7 +331,7 @@ func TestAsyncDispatcherLimitsPendingPerBroker(t *testing.T) {
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: 8, MaxInFlightPerBroker: perBroker, AckTimeout: time.Second,
+		MaxInEventsA: 8, MaxInEventsAPerBroker: perBroker, AckTimeout: time.Second,
 		CompletionBatchSize: 8, CompletionFlushPeriod: time.Millisecond,
 	})
 	if err != nil {
@@ -432,7 +432,7 @@ func TestAsyncDispatcherConcurrentAdmissionPreservesSameKeyOrder(t *testing.T) {
 	const (
 		sameKeyRecords  = 32
 		independentKeys = 64
-		maxInFlight     = 16
+		maxInEventsA    = 16
 	)
 	publisher, store, _ := newTestPublisherWithLimits(t, outbox.Limits{
 		MaxMessages: sameKeyRecords + independentKeys,
@@ -473,10 +473,10 @@ func TestAsyncDispatcherConcurrentAdmissionPreservesSameKeyOrder(t *testing.T) {
 			return AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}, nil
 		}), nil
 	})
-	dispatcher := newTestDispatcher(t, publisher, broker, maxInFlight)
+	dispatcher := newTestDispatcher(t, publisher, broker, maxInEventsA)
 	deadline := time.Now().Add(5 * time.Second)
 	for store.Stats().Messages != 0 && time.Now().Before(deadline) {
-		if _, err := dispatcher.Dispatch(context.Background(), maxInFlight); err != nil {
+		if _, err := dispatcher.Dispatch(context.Background(), maxInEventsA); err != nil {
 			t.Fatal(err)
 		}
 		runtime.Gosched()
@@ -538,7 +538,7 @@ func TestAsyncDispatcherClassifiesImmediateAndAmbiguousFailures(t *testing.T) {
 		}
 		waitForState(t, store, receipt.EventID, outbox.StateAckUncertain)
 		status := dispatcher.Status("orders")
-		if status.Uncertain != 1 || status.InFlight != 0 || status.AckUncertain != 1 {
+		if status.Uncertain != 1 || status.InEventsA != 0 || status.AckUncertain != 1 {
 			t.Fatalf("status = %+v", status)
 		}
 	})
@@ -555,7 +555,7 @@ func TestAsyncDispatcherClassifiesImmediateAndAmbiguousFailures(t *testing.T) {
 			return channelPublishFuture{result: never}, nil
 		})
 		dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-			MaxInFlight: 1, AckTimeout: 10 * time.Millisecond,
+			MaxInEventsA: 1, AckTimeout: 10 * time.Millisecond,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -606,7 +606,7 @@ func TestAsyncDispatcherRetriesTerminalPersistenceWithoutRepublishing(t *testing
 			waitForCompletionCalls(t, faults, 2)
 			waitForPendingCount(t, dispatcher, 1)
 			record, err := store.Get("event-1")
-			if err != nil || record.State != outbox.StateInFlight || record.Attempts != 1 {
+			if err != nil || record.State != outbox.StateInEventsA || record.Attempts != 1 {
 				t.Fatalf("record while persistence fails = %#v, %v", record, err)
 			}
 			firstRetryCalls := faults.calls.Load()
@@ -701,7 +701,7 @@ func TestAsyncDispatcherPersistenceRetryIsAttemptScoped(t *testing.T) {
 	if err := store.MarkRejected("event-1", "operator resolved attempt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkInFlight("event-1"); err != nil {
+	if err := store.MarkInEventsA("event-1"); err != nil {
 		t.Fatal(err)
 	}
 	faults.failing.Store(false)
@@ -709,7 +709,7 @@ func TestAsyncDispatcherPersistenceRetryIsAttemptScoped(t *testing.T) {
 	waitForPendingCount(t, dispatcher, 0)
 
 	record, err := store.Get("event-1")
-	if err != nil || record.State != outbox.StateInFlight || record.Attempts != 2 || record.Epoch != 1 {
+	if err != nil || record.State != outbox.StateInEventsA || record.Attempts != 2 || record.Epoch != 1 {
 		t.Fatalf("newer durable attempt changed by stale retry = %#v, %v", record, err)
 	}
 	if got := submissions.Load(); got != 1 {
@@ -729,7 +729,7 @@ func TestAsyncDispatcherCloseTimesOutDuringPersistenceFailureThenRecovers(t *tes
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: 1, AckTimeout: time.Second, CompletionBatchSize: 1, CompletionFlushPeriod: time.Millisecond,
+		MaxInEventsA: 1, AckTimeout: time.Second, CompletionBatchSize: 1, CompletionFlushPeriod: time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -746,7 +746,7 @@ func TestAsyncDispatcherCloseTimesOutDuringPersistenceFailureThenRecovers(t *tes
 	if err := dispatcher.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Close during persistence failure = %v, want deadline", err)
 	}
-	if status := dispatcher.Status("orders"); status.NativeInFlight != 1 || status.DurableInFlight != 1 {
+	if status := dispatcher.Status("orders"); status.NativeInEventsA != 1 || status.DurableInEventsA != 1 {
 		t.Fatalf("status after timed-out close = %+v", status)
 	}
 	faults.failing.Store(false)
@@ -776,7 +776,7 @@ func TestAsyncDispatcherObserverReportsOnlyDurablyAppliedRedactedTerminals(t *te
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: 1, AckTimeout: time.Second, CompletionBatchSize: 1,
+		MaxInEventsA: 1, AckTimeout: time.Second, CompletionBatchSize: 1,
 		CompletionFlushPeriod: time.Millisecond,
 		AttemptObserver:       TerminalAttemptObserverFunc(func(observation TerminalAttemptObservation) { observed <- observation }),
 	})
@@ -810,7 +810,7 @@ func TestAsyncDispatcherObserverPanicDoesNotChangeCompletion(t *testing.T) {
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: 1, AckTimeout: time.Second, CompletionBatchSize: 1,
+		MaxInEventsA: 1, AckTimeout: time.Second, CompletionBatchSize: 1,
 		CompletionFlushPeriod: time.Millisecond,
 		AttemptObserver:       TerminalAttemptObserverFunc(func(TerminalAttemptObservation) { panic("observer") }),
 	})
@@ -888,7 +888,7 @@ func TestAsyncDispatcherPauseAndQuiesceStatus(t *testing.T) {
 	attempt := <-attempts
 	apply(t, publisher, pausedSnapshot(2, 1))
 	status := dispatcher.Status("orders")
-	if !status.Paused || status.Quiescent || status.InFlight != 1 || status.TransitionID != "transition-1" {
+	if !status.Paused || status.Quiescent || status.InEventsA != 1 || status.TransitionID != "transition-1" {
 		t.Fatalf("paused status = %+v", status)
 	}
 
@@ -901,7 +901,7 @@ func TestAsyncDispatcherPauseAndQuiesceStatus(t *testing.T) {
 	}()
 	result <- AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}
 	status = <-quiesced
-	if !status.Quiescent || status.InFlight != 0 || status.Acknowledged != 1 {
+	if !status.Quiescent || status.InEventsA != 0 || status.Acknowledged != 1 {
 		t.Fatalf("quiescent status = %+v", status)
 	}
 	if stats := store.Stats(); stats.Messages != 0 {
@@ -969,13 +969,13 @@ func TestAsyncDispatcherRestartRetainsAttemptAndDoesNotReassignUncertain(t *test
 		t.Fatal(err)
 	}
 	// Simulate a process crash in the exact durable window after the dispatcher
-	// commits in-flight state and before a native receipt is observed.
-	if err := store.MarkInFlightBatch([]string{receipt.EventID}); err != nil {
+	// commits in-progress state and before a native receipt is observed.
+	if err := store.MarkInEventsABatch([]string{receipt.EventID}); err != nil {
 		t.Fatal(err)
 	}
-	inFlight, err := store.Get(receipt.EventID)
-	if err != nil || inFlight.State != outbox.StateInFlight || inFlight.Attempts != 1 {
-		t.Fatalf("before restart = %#v, %v", inFlight, err)
+	inEventsA, err := store.Get(receipt.EventID)
+	if err != nil || inEventsA.State != outbox.StateInEventsA || inEventsA.Attempts != 1 {
+		t.Fatalf("before restart = %#v, %v", inEventsA, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -1023,7 +1023,7 @@ func TestAsyncDispatcherImmediateReceiptsAcrossDistinctLanes(t *testing.T) {
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: messageCount, AckTimeout: time.Second,
+		MaxInEventsA: messageCount, AckTimeout: time.Second,
 		CompletionBatchSize: 256, CompletionFlushPeriod: time.Millisecond,
 	})
 	if err != nil {
@@ -1041,7 +1041,7 @@ func TestAsyncDispatcherImmediateReceiptsAcrossDistinctLanes(t *testing.T) {
 	if got := submissions.Load(); got != messageCount {
 		t.Fatalf("submissions = %d, want %d", got, messageCount)
 	}
-	if status.Acknowledged != messageCount || status.Rejected != 0 || status.Uncertain != 0 || status.InFlight != 0 {
+	if status.Acknowledged != messageCount || status.Rejected != 0 || status.Uncertain != 0 || status.InEventsA != 0 {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -1094,7 +1094,7 @@ func benchmarkAsyncDispatcherReceipts(b *testing.B, batchSize int, flushPeriod, 
 		return resolvedFuture(AsyncPublishResult{Attempt: attempt, Outcome: OutcomeAcknowledged}), nil
 	})
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: batchSize, AckTimeout: time.Second,
+		MaxInEventsA: batchSize, AckTimeout: time.Second,
 		CompletionBatchSize: min(batchSize, 256), CompletionFlushPeriod: flushPeriod,
 	})
 	if err != nil {
@@ -1156,11 +1156,11 @@ func benchmarkPublisher(tb testing.TB, maxMessages int) (*Publisher, error) {
 	return publisher, nil
 }
 
-func newTestDispatcher(t *testing.T, publisher *Publisher, broker AsyncBrokerPublisher, maxInFlight int) *AsyncDispatcher {
+func newTestDispatcher(t *testing.T, publisher *Publisher, broker AsyncBrokerPublisher, maxInEventsA int) *AsyncDispatcher {
 	t.Helper()
 	dispatcher, err := NewAsyncDispatcher(publisher, broker, AsyncDispatcherConfig{
-		MaxInFlight: maxInFlight, AckTimeout: time.Second,
-		CompletionBatchSize: maxInFlight, CompletionFlushPeriod: time.Millisecond,
+		MaxInEventsA: maxInEventsA, AckTimeout: time.Second,
+		CompletionBatchSize: maxInEventsA, CompletionFlushPeriod: time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1248,7 +1248,7 @@ func keyForBroker(t *testing.T, target string, membership []string, skip int) st
 	for i := 0; ; i++ {
 		key := fmt.Sprintf("key-%s-%d", target, i)
 		digest := customer.BusinessHash(sha256.Sum256([]byte(key)))
-		broker, err := routing.BrokerForHash(digest, membership)
+		broker, err := routing.RendezvousBroker(customer.RoutingHashPolicy(fixedLibrary{}), "orders", digest, membership)
 		if err != nil {
 			t.Fatal(err)
 		}

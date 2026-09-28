@@ -93,18 +93,17 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{"namespace empty label", "lowercase DNS labels", func(c *Config) { c.Namespace = "swlb..prod" }},
 		{"namespace long label", "lowercase DNS labels", func(c *Config) { c.Namespace = strings.Repeat("a", 64) }},
 		{"control ID invalid", "control broker id", func(c *Config) { c.Control.BrokerID = "broker/0" }},
-		{"control SMF insecure", "secure transport", func(c *Config) { c.Control.SMFEndpoint = "tcp://broker-0.example:55555" }},
-		{"control SMF credentials inline", "without embedded credentials", func(c *Config) { c.Control.SMFEndpoint = "tcps://user:secret@broker-0.example:55443" }},
+		{"control SMF insecure", "secure transport", func(c *Config) { c.Control.AMQPEndpoint = "amqp://broker-0.example:5672" }},
+		{"control SMF credentials inline", "without embedded credentials", func(c *Config) { c.Control.AMQPEndpoint = "amqps://user:secret@broker-0.example:5671" }},
 		{"control SEMP missing", "semp_endpoint", func(c *Config) { c.Control.SEMPEndpoint = "" }},
 		{"control SEMP insecure", "secure transport", func(c *Config) { c.Control.SEMPEndpoint = "http://broker-0.example:943" }},
 		{"control SEMP username invalid", "semp_username_env", func(c *Config) { c.Control.SEMPUsernameEnv = "literal-user" }},
 		{"control password missing", "password_env", func(c *Config) { c.Control.PasswordEnv = "" }},
-		{"membership prefix wildcard", "membership_lvq_prefix", func(c *Config) { c.Control.MembershipLVQPrefix = "swlb.*" }},
 		{"control prefix outside namespace", "inside namespace", func(c *Config) { c.Control.ControlTopicPrefix = "other/control" }},
 		{"Broker 0 resource missing", "registration_queue", func(c *Config) { c.Control.Resources.RegistrationQueue = "" }},
 		{"Broker 0 resource outside namespace", "inside namespace", func(c *Config) { c.Control.Resources.TelemetryQueue = "other.telemetry" }},
 		{"data ID invalid", "data_brokers[0].id", func(c *Config) { c.DataBrokers[0].ID = "bad id" }},
-		{"data SMF insecure", "secure transport", func(c *Config) { c.DataBrokers[0].SMFEndpoint = "ws://broker-a.example" }},
+		{"data SMF insecure", "secure transport", func(c *Config) { c.DataBrokers[0].AMQPEndpoint = "amqp://broker-a.example:5672" }},
 		{"data username missing", "username_env", func(c *Config) { c.DataBrokers[0].UsernameEnv = "" }},
 		{"data password invalid", "password_env", func(c *Config) { c.DataBrokers[0].PasswordEnv = "plain-text-password" }},
 		{"data SEMP password missing", "semp_password_env", func(c *Config) { c.DataBrokers[0].SEMPPasswordEnv = "" }},
@@ -129,8 +128,8 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{"queue prefix outside namespace", "inside namespace", func(c *Config) { c.Groups[0].Queue.NamePrefix = "other.orders" }},
 		{"exclusive access mismatch", "requires exclusive access", func(c *Config) { c.Groups[0].Queue.Access = QueueAccessNonExclusive }},
 		{"exclusive partitions", "cannot set partitions", func(c *Config) { c.Groups[0].Queue.Partitions = 2 }},
-		{"partitioned access mismatch", "requires non-exclusive access", func(c *Config) { c.Groups[0].Queue.Type = QueueTypePartitioned; c.Groups[0].Queue.Partitions = 4 }},
-		{"partitioned count missing", "requires positive partitions", func(c *Config) {
+		{"partitioned access mismatch", "partitioned queues are not supported", func(c *Config) { c.Groups[0].Queue.Type = QueueTypePartitioned; c.Groups[0].Queue.Partitions = 4 }},
+		{"partitioned count missing", "partitioned queues are not supported", func(c *Config) {
 			c.Groups[0].Queue.Type = QueueTypePartitioned
 			c.Groups[0].Queue.Access = QueueAccessNonExclusive
 		}},
@@ -152,7 +151,7 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{"telemetry age zero", "handover timings", func(c *Config) { c.Groups[0].Handover.TelemetryMaxAge = duration(0) }},
 		{"drain grace zero", "handover timings", func(c *Config) { c.Groups[0].Handover.DrainGrace = duration(0) }},
 		{"transition timeout zero", "handover timings", func(c *Config) { c.Groups[0].Handover.TransitionTimeout = duration(0) }},
-		{"empty participants", "requires at least one participant", func(c *Config) { c.Groups[0].RequiredPublishers = nil; c.Groups[0].RequiredSubscribers = nil }},
+		{"empty participants", "requires at least one consumer set", func(c *Config) { c.Groups[0].RequiredPublishers = nil; c.Groups[0].RequiredSubscribers = nil }},
 		{"publisher duplicate", "duplicated", func(c *Config) { c.Groups[0].RequiredPublishers = []string{"publisher-1", "publisher-1"} }},
 		{"cross-role participant duplicate", "duplicated", func(c *Config) { c.Groups[0].RequiredSubscribers[0] = c.Groups[0].RequiredPublishers[0] }},
 		{"publisher undeclared", "undeclared runtime publisher", func(c *Config) { c.Groups[0].RequiredPublishers[0] = "publisher-2" }},
@@ -179,7 +178,7 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 func TestValidateAllowsExplicitlyEmptyPlacementForWarmBroker(t *testing.T) {
 	cfg := validConfig()
 	cfg.DataBrokers = append(cfg.DataBrokers, DataBroker{
-		ID: "broker-warm", SMFEndpoint: "tcps://broker-warm.example:55443", SEMPEndpoint: "https://broker-warm.example:943",
+		ID: "broker-warm", AMQPEndpoint: "amqps://broker-warm.example:5671", SEMPEndpoint: "https://broker-warm.example:943",
 		MessageVPN: "data", UsernameEnv: "DATA_USERNAME", PasswordEnv: "DATA_PASSWORD",
 		SEMPUsernameEnv: "DATA_SEMP_USERNAME", SEMPPasswordEnv: "DATA_SEMP_PASSWORD",
 		ServiceClass: "class-a", BrokerVersion: "10.4.1", EligibleGroups: []string{},
@@ -325,7 +324,7 @@ func validConfig() Config {
 		Namespace: "swlb",
 		Control: ControlBroker{
 			BrokerID:        "broker-0",
-			SMFEndpoint:     "tcps://broker-0.example:55443",
+			AMQPEndpoint:    "amqps://broker-0.example:5671",
 			SEMPEndpoint:    "https://broker-0.example:943",
 			MessageVPN:      "control",
 			Principal:       "controller-1",
@@ -338,8 +337,8 @@ func validConfig() Config {
 				{Participant: "subscriber-1", Principal: "subscriber-1", UsernameEnv: "SUBSCRIBER_CONTROL_USERNAME", PasswordEnv: "SUBSCRIBER_CONTROL_PASSWORD"},
 				{Participant: "observer-1", Principal: "observer-1", UsernameEnv: "OBSERVER_CONTROL_USERNAME", PasswordEnv: "OBSERVER_CONTROL_PASSWORD"},
 			},
-			MembershipLVQPrefix: "swlb.membership",
-			ControlTopicPrefix:  "swlb/control/v1",
+
+			ControlTopicPrefix: "swlb/control/v1",
 			Resources: Broker0Resources{
 				MembershipTopicPrefix: "swlb/control/v1/membership",
 				MembershipQueuePrefix: "swlb.membership",
@@ -355,7 +354,7 @@ func validConfig() Config {
 		},
 		DataBrokers: []DataBroker{{
 			ID:              "broker-a",
-			SMFEndpoint:     "tcps://broker-a.example:55443",
+			AMQPEndpoint:    "amqps://broker-a.example:5671",
 			SEMPEndpoint:    "https://broker-a.example:943",
 			MessageVPN:      "data",
 			UsernameEnv:     "DATA_USERNAME",

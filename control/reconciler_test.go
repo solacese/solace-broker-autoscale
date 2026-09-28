@@ -9,19 +9,29 @@ import (
 func revision(snapshot MembershipSnapshot, revision, epoch uint64) MembershipSnapshot {
 	snapshot.Revision = revision
 	snapshot.Epoch = epoch
+	for index := range snapshot.CurrentResources {
+		snapshot.CurrentResources[index].Epoch = epoch
+	}
+	if snapshot.Transition != nil {
+		snapshot.Transition.FromEpoch = epoch
+		snapshot.Transition.ToEpoch = epoch + 1
+		for index := range snapshot.ProposedResources {
+			snapshot.ProposedResources[index].Epoch = epoch + 1
+		}
+	}
 	return snapshot
 }
 
 func TestReconcilerRequiresSubscribeFirst(t *testing.T) {
 	reconciler := NewReconciler()
-	if err := reconciler.ApplyBrowse(validActiveSnapshot()); !errors.Is(err, ErrNotSubscribed) {
-		t.Fatalf("ApplyBrowse() error = %v", err)
+	if err := reconciler.ApplyBaseline(validActiveSnapshot()); !errors.Is(err, ErrNotSubscribed) {
+		t.Fatalf("ApplyBaseline() error = %v", err)
 	}
 	if _, err := reconciler.ApplyUpdate(validActiveSnapshot()); !errors.Is(err, ErrNotSubscribed) {
 		t.Fatalf("ApplyUpdate() error = %v", err)
 	}
-	if _, err := reconciler.FinishBrowse(); !errors.Is(err, ErrNotSubscribed) {
-		t.Fatalf("FinishBrowse() error = %v", err)
+	if _, err := reconciler.FinishBootstrap(); !errors.Is(err, ErrNotSubscribed) {
+		t.Fatalf("FinishBootstrap() error = %v", err)
 	}
 	if err := reconciler.BeginSubscribe(); err != nil {
 		t.Fatal(err)
@@ -29,8 +39,8 @@ func TestReconcilerRequiresSubscribeFirst(t *testing.T) {
 	if err := reconciler.BeginSubscribe(); !errors.Is(err, ErrAlreadyStarted) {
 		t.Fatalf("second BeginSubscribe() error = %v", err)
 	}
-	if _, err := reconciler.FinishBrowse(); !errors.Is(err, ErrBrowseRequired) {
-		t.Fatalf("FinishBrowse() without browse error = %v", err)
+	if _, err := reconciler.FinishBootstrap(); !errors.Is(err, ErrSnapshotRequired) {
+		t.Fatalf("FinishBootstrap() without baseline error = %v", err)
 	}
 }
 
@@ -42,9 +52,11 @@ func TestReconcilerSubscribeBrowseBufferedUpdates(t *testing.T) {
 
 	base := revision(validActiveSnapshot(), 10, 3)
 	stale := revision(validActiveSnapshot(), 9, 3)
-	newer := revision(validActiveSnapshot(), 12, 4)
-	newer.CurrentMembership = Membership{"broker-z", "broker-a", "broker-m"}
 	middle := revision(validTransitionSnapshot(PhasePrepare), 11, 3)
+	newer := revision(validActiveSnapshot(), 12, 4)
+	newer.CurrentMembership = middle.ProposedMembership.Clone()
+	newer.CurrentBrokers = descriptors(newer.CurrentMembership)
+	newer.CurrentResources = append([]EpochResourceIdentity(nil), middle.ProposedResources...)
 
 	// Deliveries can race with browse and can arrive out of order.
 	for _, update := range []MembershipSnapshot{newer, stale, middle} {
@@ -57,17 +69,17 @@ func TestReconcilerSubscribeBrowseBufferedUpdates(t *testing.T) {
 		}
 	}
 	if _, ok := reconciler.Snapshot(); ok {
-		t.Fatal("snapshot became visible before browse reconciliation")
+		t.Fatal("snapshot became visible before bootstrap reconciliation")
 	}
-	if err := reconciler.ApplyBrowse(base); err != nil {
+	if err := reconciler.ApplyBaseline(base); err != nil {
 		t.Fatal(err)
 	}
-	got, err := reconciler.FinishBrowse()
+	got, err := reconciler.FinishBootstrap()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Revision != 12 || got.Epoch != 4 || !got.CurrentMembership.Equal(newer.CurrentMembership) {
-		t.Fatalf("FinishBrowse() = %+v", got)
+		t.Fatalf("FinishBootstrap() = %+v", got)
 	}
 }
 
@@ -107,6 +119,9 @@ func TestReconcilerReplaysAndConflicts(t *testing.T) {
 
 	conflict = base.Clone()
 	conflict.Epoch++
+	for index := range conflict.CurrentResources {
+		conflict.CurrentResources[index].Epoch++
+	}
 	changed, err = reconciler.ApplyUpdate(conflict)
 	if changed || !errors.Is(err, ErrConflictingUpdate) {
 		t.Fatalf("same revision/different epoch = %v, %v", changed, err)
@@ -117,7 +132,7 @@ func TestReconcilerRejectsSameRevisionContractConflict(t *testing.T) {
 	base := revision(validActiveSnapshot(), 10, 3)
 	reconciler := readyReconciler(t, base)
 	conflict := base.Clone()
-	conflict.HashContract = "flight-operations-v2"
+	conflict.HashContract = "eventsA-v2"
 	if _, err := reconciler.ApplyUpdate(conflict); !errors.Is(err, ErrConflictingUpdate) {
 		t.Fatalf("ApplyUpdate() error = %v, want conflict", err)
 	}
@@ -137,14 +152,15 @@ func TestReconcilerRejectsUncoordinatedRoutingIdentityChanges(t *testing.T) {
 	base := revision(validActiveSnapshot(), 10, 3)
 	base.Namespace = "acme"
 	base.LibraryVersion = "v1.2.3"
-	base.CurrentResources = []EpochResourceIdentity{{
-		Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>",
-	}}
+	base.CurrentResources = []EpochResourceIdentity{
+		{Epoch: 3, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+		{Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-a.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+	}
 
 	tests := map[string]func(*MembershipSnapshot){
 		"namespace":       func(s *MembershipSnapshot) { s.Namespace = "other" },
 		"library version": func(s *MembershipSnapshot) { s.LibraryVersion = "v2.0.0" },
-		"hash contract":   func(s *MembershipSnapshot) { s.HashContract = "flight-operations-v2" },
+		"hash contract":   func(s *MembershipSnapshot) { s.HashContract = "eventsA-v2" },
 		"queue":           func(s *MembershipSnapshot) { s.Queue.Name = "different.queue" },
 		"destination":     func(s *MembershipSnapshot) { s.Destination.Name = "different/>" },
 		"resource queue":  func(s *MembershipSnapshot) { s.CurrentResources[0].QueueName = "different.queue" },
@@ -171,19 +187,22 @@ func TestReconcilerRejectsRoutingIdentityChangeDuringTransition(t *testing.T) {
 	prepare := revision(validTransitionSnapshot(PhasePrepare), 10, 3)
 	prepare.Namespace = "acme"
 	prepare.LibraryVersion = "v1.2.3"
-	prepare.CurrentResources = []EpochResourceIdentity{{
-		Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>",
-	}}
-	prepare.ProposedResources = []EpochResourceIdentity{{
-		Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>",
-	}}
+	prepare.CurrentResources = []EpochResourceIdentity{
+		{Epoch: 3, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+		{Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-a.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+	}
+	prepare.ProposedResources = []EpochResourceIdentity{
+		{Epoch: 4, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+		{Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-a.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+		{Epoch: 4, BrokerID: "broker-m", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-m.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+	}
 
 	tests := map[string]func(*MembershipSnapshot){
 		"queue":               func(s *MembershipSnapshot) { s.Queue.Name = "different.queue" },
 		"destination":         func(s *MembershipSnapshot) { s.Destination.Name = "different/>" },
 		"current resource":    func(s *MembershipSnapshot) { s.CurrentResources[0].QueueName = "different.e3" },
 		"proposed resource":   func(s *MembershipSnapshot) { s.ProposedResources[0].QueueName = "different.e4" },
-		"proposed membership": func(s *MembershipSnapshot) { s.ProposedMembership = Membership{"broker-z", "broker-m"} },
+		"proposed membership": func(s *MembershipSnapshot) { s.ProposedMembership = Membership{"broker-a", "broker-z", "broker-m"} },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -203,16 +222,19 @@ func TestReconcilerPreservesResourceTransitionRollbackAndCatchUp(t *testing.T) {
 	active := revision(validActiveSnapshot(), 10, 3)
 	active.Namespace = "acme"
 	active.LibraryVersion = "v1.2.3"
-	active.CurrentResources = []EpochResourceIdentity{{
-		Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>",
-	}}
+	active.CurrentResources = []EpochResourceIdentity{
+		{Epoch: 3, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+		{Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-a.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"},
+	}
 	prepare := revision(validTransitionSnapshot(PhasePrepare), 11, 3)
 	prepare.Namespace = active.Namespace
 	prepare.LibraryVersion = active.LibraryVersion
 	prepare.CurrentResources = append([]EpochResourceIdentity(nil), active.CurrentResources...)
-	prepare.ProposedResources = []EpochResourceIdentity{{
-		Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>",
-	}}
+	prepare.ProposedResources = []EpochResourceIdentity{
+		{Epoch: 4, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+		{Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-a.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+		{Epoch: 4, BrokerID: "broker-m", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-m.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"},
+	}
 
 	t.Run("coordinated activation", func(t *testing.T) {
 		reconciler := readyReconciler(t, active)
@@ -220,11 +242,15 @@ func TestReconcilerPreservesResourceTransitionRollbackAndCatchUp(t *testing.T) {
 			prepare,
 			func() MembershipSnapshot { s := revision(prepare.Clone(), 12, 3); s.Phase = PhaseDrain; return s }(),
 			func() MembershipSnapshot {
-				s := revision(prepare.Clone(), 13, 4)
+				s := prepare.Clone()
+				s.Revision = 13
+				s.Epoch = 4
 				s.Phase = PhaseCommitted
 				s.CurrentMembership = s.ProposedMembership.Clone()
+				s.CurrentBrokers = descriptors(s.CurrentMembership)
 				s.CurrentResources = append([]EpochResourceIdentity(nil), s.ProposedResources...)
 				s.ProposedMembership = nil
+				s.ProposedBrokers = nil
 				s.ProposedResources = nil
 				return s
 			}(),
@@ -233,6 +259,7 @@ func TestReconcilerPreservesResourceTransitionRollbackAndCatchUp(t *testing.T) {
 				s.Namespace = active.Namespace
 				s.LibraryVersion = active.LibraryVersion
 				s.CurrentMembership = prepare.ProposedMembership.Clone()
+				s.CurrentBrokers = descriptors(s.CurrentMembership)
 				s.CurrentResources = append([]EpochResourceIdentity(nil), prepare.ProposedResources...)
 				return s
 			}(),
@@ -264,9 +291,11 @@ func TestReconcilerPreservesResourceTransitionRollbackAndCatchUp(t *testing.T) {
 		catchUp.Revision = 20
 		catchUp.Epoch = 5
 		catchUp.CurrentMembership = Membership{"broker-m", "broker-z"}
-		catchUp.CurrentResources = []EpochResourceIdentity{{
-			Epoch: 5, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e5", IngressTopic: "acme/data/orders/epoch/5/>",
-		}}
+		catchUp.CurrentBrokers = descriptors(catchUp.CurrentMembership)
+		catchUp.CurrentResources = []EpochResourceIdentity{
+			{Epoch: 5, BrokerID: "broker-m", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-m.workers.e5", IngressTopic: "acme/data/orders/epoch/5/>"},
+			{Epoch: 5, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.broker-z.workers.e5", IngressTopic: "acme/data/orders/epoch/5/>"},
+		}
 		changed, err := reconciler.ApplyUpdate(catchUp)
 		if err != nil || !changed {
 			t.Fatalf("ApplyUpdate() = %v, %v", changed, err)
@@ -285,7 +314,7 @@ func TestReconcilerRejectsCrossedRevisionAndEpoch(t *testing.T) {
 func TestReconcilerRejectsCrossGroupUpdate(t *testing.T) {
 	reconciler := readyReconciler(t, validActiveSnapshot())
 	other := revision(validActiveSnapshot(), 8, 3)
-	other.ScalingGroup = "baggage"
+	other.ScalingGroup = "events-b"
 	if _, err := reconciler.ApplyUpdate(other); err == nil {
 		t.Fatal("cross-group update accepted")
 	}
@@ -313,7 +342,7 @@ func TestReconcilerConcurrentBufferedUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := revision(validActiveSnapshot(), 10, 3)
-	if err := reconciler.ApplyBrowse(base); err != nil {
+	if err := reconciler.ApplyBaseline(base); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,7 +358,7 @@ func TestReconcilerConcurrentBufferedUpdates(t *testing.T) {
 		}()
 	}
 	wait.Wait()
-	got, err := reconciler.FinishBrowse()
+	got, err := reconciler.FinishBootstrap()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,10 +386,10 @@ func readyReconciler(t *testing.T, snapshot MembershipSnapshot) *Reconciler {
 	if err := reconciler.BeginSubscribe(); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.ApplyBrowse(snapshot); err != nil {
+	if err := reconciler.ApplyBaseline(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reconciler.FinishBrowse(); err != nil {
+	if _, err := reconciler.FinishBootstrap(); err != nil {
 		t.Fatal(err)
 	}
 	return reconciler

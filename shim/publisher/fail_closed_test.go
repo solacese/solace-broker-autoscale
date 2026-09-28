@@ -7,7 +7,6 @@ import (
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/customer"
 	"github.com/solacese/solace-workload-balancer/outbox"
-	"github.com/solacese/solace-workload-balancer/routing"
 )
 
 func TestFailClosedRevokesOnlyRequestedGroup(t *testing.T) {
@@ -17,26 +16,27 @@ func TestFailClosedRevokesOnlyRequestedGroup(t *testing.T) {
 	}
 	defer store.Close()
 	library := customer.CustomerLibraryFuncs{
+		Algorithm:    customer.RendezvousSHA256Contract,
 		ScalingGroup: func(message customer.MessageView) (string, error) { return message.Headers["scaling-group"], nil },
-		BusinessHash: func(customer.MessageView) (customer.BusinessHash, error) { return routing.SHA256("key") },
+		BusinessHash: func(customer.MessageView) (customer.BusinessHash, error) { return customer.EntityHash("test", "key") },
 	}
-	shim, err := New(Config{Outbox: store, CustomerLibrary: library, Broker: failClosedBroker{}, Contracts: map[string]Contract{"flight": {HashContract: "contract", LibraryVersion: "v1"}}})
+	shim, err := New(Config{Outbox: store, CustomerLibrary: library, Broker: failClosedBroker{}, Contracts: map[string]Contract{"events-a": {HashContract: "contract", LibraryVersion: "v1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot := control.MembershipSnapshot{
-		Version: control.SnapshotVersion, ScalingGroup: "flight", Revision: 1, Epoch: 1, Phase: control.PhaseActive,
-		HashContract: "contract", LibraryVersion: "v1", Algorithm: control.AlgorithmSHA256BigEndianModulo,
-		CurrentMembership: control.Membership{"broker-a"}, Queue: control.QueueInfo{Name: "queue", Durable: true},
+		Version: control.SnapshotVersion, ScalingGroup: "events-a", Revision: 1, Epoch: 1, Phase: control.PhaseActive,
+		HashContract: "contract", LibraryVersion: "v1", Algorithm: control.AlgorithmRendezvousV1,
+		CurrentMembership: control.Membership{"broker-a"}, CurrentBrokers: []control.BrokerDescriptor{{ID: "broker-a", Endpoint: "amqps://a.example:5671"}}, CurrentResources: []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "broker-a", ConsumerSet: "default", QueueName: "queue.a", IngressTopic: "topic/>"}}, Queue: control.QueueInfo{Name: "queue", Durable: true},
 		Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "topic"},
 	}
 	if err := shim.ApplyMembership(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := shim.FailClosed("flight"); err != nil {
+	if err := shim.FailClosed("events-a"); err != nil {
 		t.Fatal(err)
 	}
-	_, err = shim.Accept(customer.MessageView{EventID: "event-1", Topic: "topic", Headers: map[string]string{"scaling-group": "flight"}, Payload: []byte("body")})
+	_, err = shim.Accept(customer.MessageView{EventID: "event-1", Topic: "topic", Headers: map[string]string{"scaling-group": "events-a"}, Payload: []byte("body")})
 	if err == nil {
 		t.Fatal("accept succeeded after fail closed")
 	}

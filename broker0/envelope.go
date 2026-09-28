@@ -17,6 +17,7 @@ type Kind string
 
 const (
 	KindMembershipSnapshot Kind = "membership_snapshot"
+	KindSnapshotRequest    Kind = "snapshot_request"
 	KindRegistration       Kind = "registration"
 	KindCommand            Kind = "command"
 	KindAcknowledgement    Kind = "acknowledgement"

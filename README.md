@@ -1,342 +1,171 @@
 # Solace Workload Balancer
 
-`solace-workload-balancer` routes related application messages to one Solace PubSub+ data service while a separate Solace service, **Broker 0**, distributes versioned membership and coordinates membership changes.
+A Go implementation that routes related application messages directly to one of several Solace PubSub+ data brokers. A separate Solace service, **Broker 0**, carries control traffic between the controller and publisher/subscriber shims.
 
-The customer defines the business ordering key. The publisher shim hashes that key, selects one broker from an ordered membership, writes the message to a bounded local outbox, and publishes directly to that broker. The controller is not in the application data path.
+> **Status:** AMQP 1.0 is the implemented v1 data and control transport. Local unit, race, adapter, vet, and build checks are provided. The system is not production-qualified, exactly-once, or an uninterrupted-handover solution. A live three-service separate-process run remains required.
 
-> **Status:** this repository contains production-mode controller, publisher, and subscriber processes; native SMF messaging; JCSMP-based non-destructive Broker 0 browsing; SEMP queue management, monitoring, and fencing; and an opt-in Solace Cloud qualification runner. It is **not yet qualified as production-ready**. See [Evidence and remaining limits](#evidence-and-remaining-limits).
-
-## What it solves
-
-The project adds broker-level placement above Solace-native queues without creating a Kafka-style log or an application-managed partition layer:
+## Architecture
 
 ```text
-publisher application
-  -> publisher shim
-  -> selected data broker
-  -> subscriber shim
-  -> subscriber application
-
-controller <-> Broker 0 <-> publisher/subscriber participants
-controller -> SEMP on data brokers
+application -> publisher shim -> selected data broker -> subscriber shim -> application
+                         controller <-> Broker 0
+                         controller -> data-broker SEMP
 ```
 
-- Application payloads go directly to data brokers, never through Broker 0 or the controller.
-- Broker 0 carries retained membership, live update hints, transition commands, registrations, and acknowledgements.
-- The controller samples broker and group queue pressure through SEMP, applies measured-capacity headroom, sustained-pressure, cooldown, and transition limits, manages epoch-specific data queues, and runs a group-scoped `PREPARE -> PAUSE/FENCE -> DRAIN -> COMMIT -> ACTIVE` transition. Telemetry failures fail closed and are retried with bounded backoff rather than authorizing a scaling decision.
-- Scaling groups have independent membership, epoch, queue policy, participants, and transition state. A Flight transition does not pause Baggage.
-- This is not DMR: DMR joins broker fabrics; this project deliberately selects one broker for each business key and coordinates changes to that affinity.
-
-## Customer routing API
-
-Application code implements:
+Business payloads never pass through the controller. The customer library remains infrastructure-independent:
 
 ```go
 type CustomerLibrary interface {
     GetScalingGroup(MessageView) (string, error)
-    GetBusinessHash(MessageView) ([32]byte, error)
+    GetBusinessHash(MessageView) (BusinessHash, error)
 }
 
-type MessageView struct {
-    Topic   string
-    Headers map[string]string
-    Payload any
-    EventID string
+type RoutingHashPolicy interface {
+    RoutingAlgorithm() string
+    GetRendezvousScore(ScoreInput) (RoutingScore, error)
 }
 ```
 
-`MessageView` is borrowed. `Headers`, `Payload`, and objects reachable through `Payload` must not be mutated or retained after either callback returns. The implementation must be deterministic, local, broker-independent, and versioned consistently across publishers and subscribers. An error rejects publication before durable acceptance.
+The customer library owns both hash choices and their algorithm identifier. `BusinessHash` and `RoutingScore` are neutral 32-byte wire containers: a custom implementation may canonically expand or pad MurmurHash, xxHash, or another deterministic value into that container. The generic router only requests and compares scores. Changing a hash implementation or identifier is a coordinated migration after old durable records are drained, never a live hot-swap.
 
-The current commands wire the repository's `AirlineCustomerLibrary`; replacing it requires embedding a different Go implementation and rebuilding. It is not a dynamic plugin interface.
+## Routing contract
 
-### Included contracts
-
-The supplied library requires a `scaling-group` header and supports:
-
-| Group | Hash contract | Required headers |
-|---|---|---|
-| `flight-operations` | `flight-operations-v1` | `carrier`, `flight-number`, `departure-date`, `leg-id` |
-| `baggage-tracking` | `baggage-journey-v1` | `carrier`, `bag-journey-id` |
-
-Each non-empty, NUL-free component—including the contract name—is encoded as a 4-byte unsigned big-endian UTF-8 byte length followed by the original UTF-8 bytes. The implementation does not trim, case-fold, normalize Unicode, parse dates, or otherwise canonicalize values; the customer schema must supply canonical values. The encoded components are hashed with SHA-256.
-
-The publisher interprets the complete digest as an unsigned big-endian integer:
+The v1 algorithm identifier is `swlb-rendezvous-v1`. For every immutable logical broker ID in the current membership:
 
 ```text
-index = business_hash mod len(ordered_broker_ids)
-destination = ordered_broker_ids[index]
+score = SHA256(
+  u32be(len("swlb-rendezvous-v1")) || "swlb-rendezvous-v1" ||
+  u32be(len(group_utf8))            || group_utf8            ||
+  u32be(32)                         || raw_business_hash      ||
+  u32be(len(broker_id_utf8))        || broker_id_utf8
+)
 ```
 
-Membership order is authoritative. Clients do not sort, trim, deduplicate, or shuffle it. Because this is modulo routing rather than consistent hashing, a membership-size change can remap many keys; the coordinated pause-and-drain transition prevents old- and new-epoch traffic from overlapping.
+The broker with the highest full unsigned 256-bit score wins; equal scores use the lexicographically smaller broker ID. Endpoint, membership order, and epoch are not score inputs. Broker IDs must therefore be stable across endpoint changes.
 
-## Ordering and delivery contract
+Snapshots carry algorithm, customer hash contract, library version, revision, epoch, phase, ordered membership, credential-free broker ID/AMQP endpoint descriptors, and exact managed resources. Endpoints select connections but are not score inputs; endpoint updates preserve broker placement and create a new connection generation while existing in-events-a leases finish. Credentials stay local and are resolved by stable broker ID. Unsupported or changed contracts fail closed. Durable outbox records persist the algorithm and exact endpoint/epoch/broker/destination. An ACK-uncertain record is never silently rerouted; an operator retry is allowed only while that exact route remains current.
 
-The implementation provides a bounded ordering guarantee, not a global sequencer:
+### Migration from modulo routing
 
-- Within one publisher participant and one scaling group/business hash, the bbolt outbox exposes only the earliest accepted record for publication. A pending, in-flight, or ACK-uncertain head blocks later records for that key while unrelated keys continue.
-- The chosen broker and epoch are persisted with the accepted record; routing is not recomputed under a later library version.
-- The subscriber serializes handler invocation and acknowledgement by scaling group/business hash. A handler or acknowledgement failure blocks that key until explicit retry or release.
-- Membership changes pause the affected group's publishers, fence old-epoch ingress, drain old queues, commit the new membership, enable target ingress, and then resume. Publication is not uninterrupted during a transition.
+Snapshot schema v3 requires a non-empty, bounded routing-algorithm identifier and complete broker descriptors. The default library uses `swlb-rendezvous-v1`; custom identifiers remain opaque to the controller and must match the publisher/subscriber library handshake. Existing modulo snapshots and legacy outbox records without a matching algorithm are rejected rather than reinterpreted. Upgrade requires pausing publishers, resolving all ACK-uncertain sends, draining and fencing the old epoch, deploying the controller and shims together, then activating a newly persisted snapshot. This is a coordinated migration, not an in-place algorithm flag change.
 
-Limits of that contract:
+## Startup and reconnect
 
-- Independent publisher processes using the same hash do not acquire a global publication order.
-- An uncertain broker acknowledgement is retained for operator-directed retry; retry can duplicate a message and block a transition until resolved.
-- There is no durable subscriber deduplication or exactly-once processing. Applications must make `event_id` handling idempotent.
-- Correct order still depends on the application publishing events in the intended order.
+Each shim:
 
-### Flight partitioned vs. Baggage exclusive
+1. attaches its durable update receiver and participant-exclusive reply receiver;
+2. sends a durable, uniquely correlated snapshot request on Broker 0;
+3. validates transport and JSON correlation, namespace, group, role, participant, algorithm, revision, and resource scope;
+4. reconciles complete updates buffered during request/reply;
+5. enables routing only after authoritative state is installed.
 
-The example config intentionally demonstrates both supported queue modes:
+The controller's atomic local state is authoritative and is persisted before control publication. Request topics, request queues, and reply queues are participant/group/role scoped; arbitrary reply-to addresses are rejected. Timeouts use bounded exponential backoff. Late responses from timed-out attempts are accepted and discarded from the participant-exclusive reply queue rather than endlessly released. Reconnect revokes local authority until a fresh response succeeds.
 
-- **Flight Operations:** a non-exclusive native partitioned queue with 12 partitions. The publisher sets Solace `JMSXGroupID`/`QueuePartitionKey` to the full lowercase business-hash hex value, and the subscriber opens 12 consumers per broker/epoch binding. This permits different flight keys to progress concurrently while one key remains assigned to a queue partition.
-- **Baggage Tracking:** an exclusive queue with one consumer per broker/epoch binding and no partition key. Broker-level modulo routing still spreads different bag journeys across the ordered broker membership.
+## Membership changes
 
-Epoch-specific ingress topics and queues provide the broker-side fence. The original application topic is carried in message metadata and restored for the subscriber application.
-
-## Prerequisites
-
-- Go **1.26.4** as declared by `go.mod`.
-- Maven and Java 8 or newer to build the JCSMP LVQ browser.
-- One Broker 0 service and the configured data brokers. The example uses three data brokers.
-- Trusted TLS connectivity to each SMF and SEMP endpoint.
-- Broker 0 resources and ACLs provisioned before any process starts.
-- Writable paths for controller state and per-publisher bbolt outboxes.
-
-The implementation uses Solace Go messaging API `v1.10.1` for persistent SMF publish/receive and JCSMP `10.30.2` only for non-destructive LVQ browse. Set these optional overrides when needed:
+Rendezvous reduces key movement but does not remove the safety protocol. v1 pauses the whole affected group:
 
 ```text
-SWLB_JCSMP_BROWSER_JAR   alternate shaded helper JAR
-SWLB_JAVA_EXECUTABLE    alternate Java executable
-SWLB_JAVA_TRUST_STORE   readable Java trust-store file
-SSL_CERT_DIR            native Go trust-store directory used by qualification
+PREPARE -> PAUSE -> FENCE -> DRAIN -> COMMIT -> ACTIVATE
 ```
 
-## Configure
+The controller prepares target exclusive queues, waits for subscriber readiness, pauses and quiesces publishers, fences all source-epoch ingress (including brokers retained in the target membership), and requires continuously zero queued plus unacknowledged/in-progress work for the configured grace period. Missing metrics are unknown, never zero. Pre-commit recovery may roll back; after commit recovery only moves forward. Other groups remain independent.
 
-Start from [`config.example.yaml`](config.example.yaml). Replace all example endpoints and illustrative capacity numbers. Capacity profiles must describe measurements for the exact service class, broker build, and workload; the values in the example are not Solace-published limits.
+## AMQP v1 limits
 
-Each scaling group must set `policy.max_concurrent_changes: 1`, matching the controller's one-active-transition-per-group state model. This does not serialize unrelated groups: independent groups may transition concurrently, with runtime-wide concurrency bounded by the number of configured groups.
+- Data and Broker 0 control use AMQP 1.0 with durable messages and explicit settlement.
+- Data queues are durable **exclusive** queues with one serialized consumer per broker/group/consumer-set/epoch binding.
+- Native Solace partitioned queues are not supported by this AMQP v1 runtime and are rejected by configuration validation.
+- Publisher connections are opened lazily through a bounded pool. Connection generations and sender links are reused while valid; active leases prevent idle eviction.
+- Publisher outboxes are bbolt-backed and bounded by message count and bytes. Full outboxes apply backpressure.
+- SEMP monitoring and retry loops are bounded by configured intervals, freshness, transition deadlines, and exponential retry caps.
+- Native SMF and MQTT adapters are future work. MQTT acknowledgement and recovery semantics must be designed and qualified separately rather than mapped to AMQP settlement.
 
-The example references these exact environment variables:
+## Configure and run
 
-```text
-# Controller -> Broker 0 SMF and SEMP
-SOLACE_CONTROL_USERNAME
-SOLACE_CONTROL_PASSWORD
-SOLACE_CONTROL_SEMP_USERNAME
-SOLACE_CONTROL_SEMP_PASSWORD
+Requirements: Go `1.26.4`, three existing broker services with logical Broker 0 cohosted on data broker A, AMQPS connectivity, SEMP access for the controller, and pre-provisioned queues/topics/ACLs. No Java helper is required.
 
-# Publisher/subscriber -> data-broker SMF; shared by the example
-SOLACE_DATA_USERNAME
-SOLACE_DATA_PASSWORD
-
-# Controller -> data-broker SEMP; shared by the example
-SOLACE_DATA_SEMP_USERNAME
-SOLACE_DATA_SEMP_PASSWORD
-
-# Participant-specific Broker 0 SMF credentials
-SOLACE_FLIGHT_PUBLISHER_CONTROL_USERNAME
-SOLACE_FLIGHT_PUBLISHER_CONTROL_PASSWORD
-SOLACE_BAGGAGE_PUBLISHER_CONTROL_USERNAME
-SOLACE_BAGGAGE_PUBLISHER_CONTROL_PASSWORD
-SOLACE_FLIGHT_SUBSCRIBER_CONTROL_USERNAME
-SOLACE_FLIGHT_SUBSCRIBER_CONTROL_PASSWORD
-SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_USERNAME
-SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_PASSWORD
-SOLACE_WORKLOAD_OBSERVER_CONTROL_USERNAME
-SOLACE_WORKLOAD_OBSERVER_CONTROL_PASSWORD
-
-# Named by the disabled production-cloud section
-SOLACE_CLOUD_TOKEN
-```
-
-The production controller currently requires `cloud.enabled: false`; it manages existing data services but does not provision or delete services. The separate qualification CLI uses `SOLACE_CLOUD_JWT`, described below, rather than `SOLACE_CLOUD_TOKEN`.
-
-Validate without resolving credentials or opening network connections:
+Start from [`config.example.yaml`](config.example.yaml). It uses exclusive queues only and environment-variable names rather than secrets.
 
 ```bash
 make validate
-
-go run ./cmd/publisher -config config.example.yaml \
-  -participant flight-publisher-1 -validate-only
-
-go run ./cmd/subscriber -config config.example.yaml \
-  -participant flight-subscriber-1 -validate-only
-```
-
-## Broker provisioning and ACLs
-
-### Broker 0 must be pre-provisioned
-
-The runtime binds existing Broker 0 resources and uses `DoNotCreateMissingResources`; it does not create queues, subscriptions, users, passwords, or ACL exceptions there. Names are derived from `namespace` (`swlb` below), not provisioned by the descriptive `control.resources` fields.
-
-For every group and applicable participant, provision durable resources with these deterministic names:
-
-| Purpose | Topic | Queue |
-|---|---|---|
-| Retained membership | `swlb/control/<group>/snapshot` | `swlb.ctl.<group>.membership` |
-| Live update hint | `swlb/control/<group>/updates` | `swlb.ctl.<group>.updates.<participant>` |
-| Command | `swlb/control/<group>/commands/<role>/<participant>` | `swlb.ctl.<group>.cmd.<role>.<participant>` |
-| Registration | `swlb/control/<group>/registrations/<role>/<participant>` | `swlb.ctl.<group>.reg.<role>.<participant>` |
-| Acknowledgement | `swlb/control/<group>/acknowledgements/<role>/<participant>` | `swlb.ctl.<group>.ack.<role>.<participant>` |
-| Telemetry | `swlb/control/<group>/telemetry/<role>/<participant>` | `swlb.ctl.<group>.tel.<role>.<participant>` |
-
-Use roles `publisher`, `subscriber`, `broker`, and `observer` as applicable. Subscribe each queue to its exact topic. Configure the membership queue as the group LVQ used for non-destructive browse and retain only the latest complete snapshot. Participants subscribe first, browse second, reconcile buffered updates by revision/epoch, and periodically rebrowse.
-
-ACLs are part of the safety boundary:
-
-- The **controller principal** publishes snapshots, update hints, and exact participant command topics; consumes the exact registration, acknowledgement, and telemetry queues; and browses membership LVQs.
-- Each **publisher or subscriber principal** browses membership for only its assigned groups, consumes only its own update and command queues, and publishes only its own exact registration and acknowledgement topics.
-- Each **broker/observer principal** publishes only its exact telemetry topic.
-- Production validation requires each Broker 0 participant username to equal its configured principal and requires distinct participant credential-variable pairs. Do not authorize by trusting a message `SenderID` field.
-
-### Data brokers
-
-The controller's SEMP principal must be allowed to create, compare, monitor, fence/unfence, subscribe, and delete only the namespace-scoped epoch queues it manages. On startup it creates or verifies the retained current epoch, replays durable source/target ingress intent after an interrupted transition, prepares proposed-epoch queues with ingress disabled, and deletes only exact old-epoch queues backed by completed-transition fence and drain evidence and no remaining reference. Existing queues are adopted only when their complete managed configuration matches. Publisher data credentials need publish access to epoch ingress topics; subscriber data credentials need consume access to the corresponding queues.
-
-The configured dead-message queues are referenced but are not created by runtime assembly; provision them separately. Do not point the controller at arbitrary existing customer queues.
-
-## Build and run
-
-```bash
 make build
-```
 
-This writes `bin/controller`, `bin/publisher`, and `bin/subscriber`.
-
-After Broker 0 provisioning and environment setup, start the controller and participants in separate processes:
-
-```bash
 ./bin/controller -config config.example.yaml
-
-./bin/subscriber -config config.example.yaml \
-  -participant flight-subscriber-1
-
-./bin/publisher -config config.example.yaml \
-  -participant flight-publisher-1
+./bin/subscriber -config config.example.yaml -participant events-a-subscriber-1
+./bin/publisher -config config.example.yaml -participant events-a-publisher-1
 ```
 
-Use `baggage-subscriber-1` and `baggage-publisher-1` for the Baggage group. Logs go to stderr; the publisher/subscriber application protocol uses stdin/stdout.
-
-## Publisher NDJSON protocol
-
-The publisher reads one JSON object per line from stdin. Records are limited to 1 MiB, unknown fields and trailing JSON are rejected, and `payload_base64` uses strict standard Base64. `event_id` and `topic` are required. Application headers beginning with `swlb.` and `JMSXGroupID` are reserved.
-
-Flight input:
+The publisher and subscriber command protocols are newline-delimited JSON. Example input:
 
 ```json
-{"event_id":"flight-event-1","topic":"airline/flight/status","headers":{"scaling-group":"flight-operations","carrier":"UA","flight-number":"123","departure-date":"2026-09-25","leg-id":"ORD-LAX"},"payload_base64":"eyJzdGF0dXMiOiJib2FyZGluZyJ9"}
+{"event_id":"events-a-event-1","topic":"synthetic/events","headers":{"scaling-group":"events-a","entity_id":"UA","event_type":"123","timestamp":"2026-09-25","sequence":"ORD-LAX"},"payload_base64":"e30="}
 ```
 
-Baggage input:
+A publisher receipt confirms only local durable outbox acceptance, not broker acknowledgement. Subscriber `ack` means application processing completed and AMQP acceptance succeeded; retry/reject paths do not provide exactly-once processing.
 
-```json
-{"event_id":"bag-event-1","topic":"airline/baggage/status","headers":{"scaling-group":"baggage-tracking","carrier":"UA","bag-journey-id":"BAG-0001"},"payload_base64":"eyJzdGF0dXMiOiJsb2FkZWQifQ=="}
-```
-
-For each durable local acceptance, stdout receives a receipt. Assuming the example's active epoch 1 membership `[broker-a, broker-b, broker-c]`, the Flight example hashes to index 2:
-
-```json
-{"event_id":"flight-event-1","durably_accepted":true,"state":"ready","group":"flight-operations","hash":"4a91f3ee485b3a4687e0badf310d2964217732ba358a84f2a6a689e0872f9dc0","epoch":1,"broker":"broker-c"}
-```
-
-`durably_accepted` means committed to the local bbolt outbox, not acknowledged by a broker. During a pause or before valid membership, an accepted message may be returned as `state:"unassigned"` without `epoch` or `broker`; it remains durable and blocked until safe assignment. Duplicate event IDs and a full outbox are rejected.
-
-## Subscriber NDJSON protocol
-
-The subscriber writes each delivery to stdout, then waits for an application outcome on stdin:
-
-```json
-{"delivery_id":"delivery-1","event_id":"flight-event-1","topic":"airline/flight/status","headers":{"carrier":"UA"},"payload_base64":"eyJzdGF0dXMiOiJib2FyZGluZyJ9"}
-```
-
-Reply with one exact, case-sensitive outcome:
-
-```json
-{"delivery_id":"delivery-1","outcome":"ack"}
-```
-
-- `ack` confirms durable application processing and acknowledges the native message.
-- `retry` retains the native message, keeps that business key blocked, and presents the same message again with a new `delivery_id`.
-- `reject` or `release` terminally settles the native message as rejected and unblocks the key.
-
-Unknown fields, duplicate fields, trailing JSON, unknown delivery IDs, unsupported outcomes, and records over 1 MiB are rejected without affecting another pending delivery. Later messages for a poisoned business key cannot overtake it.
-
-## Local verification
-
-No local target contacts Solace Cloud or creates broker resources.
+## Verification
 
 ```bash
-make test          # Go unit tests
-make test-race     # Go tests with race detector
-make vet           # static analysis
-make integration   # Java helper + local native-adapter capability checks
-make check         # test + vet + integration
-make ci            # race + vet + integration
+make test
+make test-race
+make vet
+make build
+make integration
+# or all local checks:
+make ci
 ```
 
-`make integration` is intentionally local: it builds/tests the JCSMP helper and tests adapter wiring with fakes. It does not claim real-broker qualification and is not designed to fail as a placeholder.
+The local tests cover fixed rendezvous vectors, order/endpoint invariance, add/remove movement, distribution, a 100,000-key 200→201 simulation, request/reply bootstrap races, correlation/scope rejection, reconnect fail-closed behavior, controller persistence ordering, transition safety, AMQP settlement mapping, durable outbox behavior, and bounded pool concurrency.
 
-## Opt-in Solace Cloud qualification
+## Live smoke harness and qualification gap
 
-Cloud qualification is separate from normal runtime and never runs from `make check` or `make ci`.
+`integration/separate_process_test.go` is an opt-in repository-owned smoke harness that launches one controller plus Events A and Events B publisher/subscriber processes. It requires already-provisioned resources and does not create or delete infrastructure. The opt-in repository-owned smoke harness needs exactly:
 
-Create `.env` with a raw JWT (without a `Bearer ` prefix):
+- three AMQP broker services (`A`, `B`, `C`), with logical Broker 0 cohosted on service `A` under separate namespaced control resources;
+- SEMP access to those three data brokers;
+- participant-scoped durable request, reply, update, command, registration, acknowledgement, and telemetry queues/topics;
+- exclusive epoch data queues for Events A and Events B;
+- distinct controller, publisher, subscriber, and observer credentials/ACLs.
 
-```dotenv
-SOLACE_CLOUD_JWT=<raw-jwt>
-```
+The smoke scenario requires an authorized policy stimulus to drive Events A `A -> A+B -> A+B+C -> A+B`. It validates exact ACTIVE memberships, stable Events B membership plus completion of the initial 20 Events B deliveries, durable publisher receipts, submitted event-ID completeness, per-group ordering, application ACK commands written to subscriber stdin, and separately reports at-least-once duplicates. It has **not** been run in this change. Traffic is submitted only once before transition observation, not continuously throughout every phase, and an ACK command written to subscriber stdin is not independent broker-observed settlement proof. It does not force process restarts or prove stale-publisher rejection, fence NACKs, readiness timing, or continuous-zero drain evidence; those remain full live qualification gates. No paid infrastructure was provisioned and no prior spending authorization was reused.
 
-The token must include a non-empty `sub` claim and permit the required list operations; `--run` and `--cleanup` also require exact service create/read/delete and operation-polling access.
+## Non-goals and limitations
+
+No global ordering across publisher processes, exactly-once delivery, automatic weight adjustment, selective per-key draining, infinite scaling, uninterrupted publication during handover, automatic cloud provisioning, or production-readiness claim is made.
+
+## Running live demo
+
+Public read-only dashboard: **https://workload.sol-se-emea.com**
+
+The demo uses three Solace Cloud Enterprise 1K Standalone services. Logical Broker 0 control resources are cohosted on data broker A. The generator runs generic synthetic `events-a` and `events-b` records at a combined target of 100 messages/second; the broker-depth circuit breaker pauses submissions at 1,000 current queued/unacknowledged messages.
+
+Private operational files are ignored under `.local/live-neutral-20260928/`. The dashboard admin password remains only in `.local/live-20260928-121042/admin-token`.
 
 ```bash
-make qualify-preflight  # read-only: credentials, catalog, release, and quota
-make qualify-cloud      # creates, exercises, then deletes exactly four services
-make cleanup-cloud      # retry exact-ID cleanup from the private journal
+# AWS host status
+ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
+  'systemctl status swlb caddy --no-pager'
+
+# Stop or start the complete workload
+ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
+  'sudo systemctl stop swlb'
+ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
+  'sudo systemctl start swlb'
 ```
 
-Defaults are:
+Rate controls are available on the same HTTPS page after login and are bounded to 0–500 messages/second total. Current queue depth comes from SEMP queue-message collection `meta.count`; lifetime `spooledMsgCount` is not used as backlog. AWS baseline is $24/month for the Lightsail instance, excluding Solace Cloud contract costs. This remains a live plumbing demo, not production qualification; no real membership transition has been exercised.
 
-- API: `https://api.solace.cloud`
-- credential file: `.env`
-- JWT variable: `SOLACE_CLOUD_JWT`
-- private journal: `.qualify-cloud/journal.json`
-- preflight/run timeout: 30 minutes
-- cleanup timeout: 10 minutes
+### Optional SDKPerf test path
 
-Override them with `--base-url`, `--env`, `--jwt-var`, `--journal`, `--timeout`, and `--cleanup-timeout` on `go run ./cmd/qualify-cloud ...`.
+SDKPerf is **test-environment tooling only**. The normal controller, publisher, subscriber, and customer library remain native Go and have no JVM, SDKPerf, adapter, or extra-ingress dependency. The official SDKPerf Java 10.30.2 package is JCSMP/SMF, not AMQP. The optional test path is therefore:
 
-Preflight resolves the fixed qualification plan without creating services: Broker release `10.26.0.8894-14` in `gke-gcp-us-east4-a`, one `ENTERPRISE_250_HIGHAVAILABILITY` Broker 0, and three `ENTERPRISE_5K_STANDALONE` data brokers. The run journals exact service IDs before lifecycle operations and always attempts independent-timeout cleanup. If cleanup is incomplete, the private journal is retained for `make cleanup-cloud`.
+```text
+SDKPerf producer (SMF) -> dedicated Broker A test queue -> Go test adapter
+  -> already-running native publisher shim -> AMQP data brokers -> already-running native subscriber shim
+  -> Go test adapter -> dedicated durable result queue -> SDKPerf consumer (SMF)
+```
 
-The strict run checks partitioned-queue configuration, definitive fence NACKs, three-broker data flow, drain telemetry, two independent non-destructive Broker 0 browses, durable command/ack routing, and Flight transitions `A -> A+B -> A+B+C -> A+B` with restarts, stale-publisher rejection, final retained state, and Baggage isolation. No scenario may be skipped, and queue plus service cleanup must complete for an overall pass.
+`tools/sdkperf_harness.py` bounds message count, rate, and duration; verifies the real SDKPerf producer exit status, native shim counts, and unique run-correlated messages printed by the real SDKPerf consumer; redacts credentials; and terminates complete child process groups. `tools/sdkperf-adapter` preserves source payload bytes and is intentionally absent from default builds and startup. Its generated test IDs and in-memory sequence do not provide exactly-once or restart-stable ordering guarantees.
 
-## Evidence and remaining limits
-
-### Latest completed Cloud evidence
-
-The latest completed historical run reported:
-
-- **133,120 messages expected, accepted, delivered, unique, and positively acknowledged**;
-- **0 missing, duplicate, out-of-order, or wrong-broker deliveries**;
-- **1,572.53 messages/second**, reported as a diagnostic achieved rate rather than a qualification threshold or capacity claim;
-- **PASS** for independent non-destructive Broker 0 browse;
-- **PASS** for Broker 0 command/ack routing; and
-- **FAIL** for drain telemetry and the dependent transition scenario because that older run used the then-known wrong SEMP queue-counter shape.
-
-The raw result is not committed to this repository, and the historical run predates the current qualification settings. The messaging, browse, and command/ack results are useful evidence, but the overall run did not pass: it did not prove drain or a completed membership transition. Throughput is now report-only—there is no throughput pass threshold—and the measured rate is not a supported throughput ceiling. The code now reads the Cloud-available `collections.msgs.count` queue count and uses message count plus unacknowledged/in-progress acknowledgements as the authoritative drain predicate, with spool bytes diagnostic only. That fix passes local SEMP/runtime/qualification tests but still requires a fresh strict Cloud rerun before production-readiness can be considered.
-
-### Still unqualified or intentionally limited
-
-- No completed strict Cloud run currently proves all seven scenarios together. The latest command/ack probe passed, but the corrected drain path and dependent full transition remain pending a Cloud rerun. The qualification transition driver uses real Broker 0 publication/browse, native data traffic, and SEMP queue operations, but its controller, publisher shim, subscriber shim, and participant acknowledgements are coordinated in-process; it does not prove a transition among separately deployed `cmd/controller`, `cmd/publisher`, and `cmd/subscriber` processes.
-- No exactly-once delivery, durable subscriber deduplication, or global ordering across publisher processes is provided.
-- No uninterrupted publishing during membership changes is claimed.
-- Production controller Cloud provisioning is disabled. Operators provide an existing broker inventory; only the explicit qualification CLI creates and deletes Cloud services.
-- Production SEMP capacity policy is wired for eligible existing brokers and fail-closes on missing, stale, partial, or failed telemetry. Automatic scale-in is not wired because no proof-bearing scale-in choice is populated; policy-driven scale-out is implemented but remains covered only by local tests until a complete Cloud transition passes.
-- Sustained-pressure policy state is restored across controller restart from a private atomic sidecar derived from `controller_state`; persistence failure stops policy actions before a recommendation is applied. Configuration requires one active transition per group; independent groups may transition concurrently.
-- SEMP collection failures reset pressure evidence and retry with bounded backoff. Errors while evaluating or applying an otherwise valid snapshot still stop the controller.
-- ACK-uncertain publications require operator action and may duplicate on retry.
-- The JCSMP browser helper is a separate long-running Java process; cancellation or malformed helper output fails it, and runtime does not automatically restart it.
-- Broker 0 resources, identities, passwords, subscriptions, and ACL exceptions are not provisioned by production runtime. The qualification run reuses a service credential for managed test queues and does not prove production identity isolation.
-- Dead-message queues are not auto-provisioned.
-- Capacity values in the example and qualification safety caps are not broker limits. The recorded evidence does not qualify other regions, releases, service classes, topologies, payload distributions, longer durations, sustained maximum load, or HA/failure-domain capacity.
+The dashboard exposes only fixed authenticated start/stop actions and accepts no command text. Its primary button runs the complete managed end-to-end test without a terminal. Expandable CLI examples use shell-safe environment references and distinguish a direct-broker SDKPerf smoke test—which bypasses the shims—from the managed ingress/result commands that require the Go adapter. Test credentials remain in the private service environment and never appear in public status, HTML, or evidence. Official download: <https://products.solace.com/download/SDKPERF_JAVA>.

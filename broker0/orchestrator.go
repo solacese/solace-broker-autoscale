@@ -2,31 +2,47 @@ package broker0
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
 	"github.com/solacese/solace-workload-balancer/control"
 )
 
-// OrchestratorOptions defines one scaling group's Broker 0 bootstrap and
-// freshness policy.
+// OrchestratorOptions defines one group's request/reply bootstrap and freshness
+// policy. Refresh and retry are bounded; no cached state becomes routable before
+// a valid controller response has been reconciled with buffered updates.
 type OrchestratorOptions struct {
-	Group            string
-	Participant      string
-	RebrowseInterval time.Duration
-	MaxStaleness     time.Duration
-	Now              func() time.Time
+	Namespace       string
+	Group           string
+	Participant     string
+	Role            control.ParticipantRole
+	RefreshInterval time.Duration
+	MaxStaleness    time.Duration
+	RequestTimeout  time.Duration
+	RetryInitial    time.Duration
+	RetryMaximum    time.Duration
+	Now             func() time.Time
 }
 
 func (options OrchestratorOptions) withDefaults() OrchestratorOptions {
-	if options.RebrowseInterval <= 0 {
-		options.RebrowseInterval = time.Minute
+	if options.RefreshInterval <= 0 {
+		options.RefreshInterval = time.Minute
 	}
 	if options.MaxStaleness <= 0 {
 		options.MaxStaleness = 5 * time.Minute
+	}
+	if options.RequestTimeout <= 0 {
+		options.RequestTimeout = 10 * time.Second
+	}
+	if options.RetryInitial <= 0 {
+		options.RetryInitial = 250 * time.Millisecond
+	}
+	if options.RetryMaximum <= 0 {
+		options.RetryMaximum = 5 * time.Second
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -34,69 +50,65 @@ func (options OrchestratorOptions) withDefaults() OrchestratorOptions {
 	return options
 }
 
-// GroupOrchestrator bootstraps and maintains one group's authoritative
-// membership. It intentionally owns no native Broker 0 types.
 type pendingDelivery struct {
 	delivery  Delivery
 	message   Message
 	completed bool
 }
 
+// GroupOrchestrator subscribes to updates first, requests an authoritative full
+// snapshot second, and reconciles revisions before exposing state.
 type GroupOrchestrator struct {
 	subscriber UpdateSubscriber
-	browser    Browser
+	requester  SnapshotRequester
 	applier    SnapshotApplier
 	operations OperationStore
 	options    OrchestratorOptions
 
-	mu         sync.RWMutex
-	ready      bool
-	failed     bool
-	lastBrowse time.Time
-	current    control.MembershipSnapshot
+	mu      sync.RWMutex
+	ready   bool
+	failed  bool
+	current control.MembershipSnapshot
 }
 
-func NewGroupOrchestrator(subscriber UpdateSubscriber, browser Browser, applier SnapshotApplier, operations OperationStore, options OrchestratorOptions) (*GroupOrchestrator, error) {
+func NewGroupOrchestrator(subscriber UpdateSubscriber, requester SnapshotRequester, applier SnapshotApplier, operations OperationStore, options OrchestratorOptions) (*GroupOrchestrator, error) {
 	options = options.withDefaults()
-	if subscriber == nil || browser == nil || applier == nil || operations == nil {
-		return nil, errors.New("broker0: subscriber, browser, applier, and operation store are required")
+	if subscriber == nil || requester == nil || applier == nil || operations == nil {
+		return nil, errors.New("broker0: subscriber, snapshot requester, applier, and operation store are required")
 	}
-	if err := validateTransportIdentifier("group", options.Group); err != nil {
+	for field, value := range map[string]string{"namespace": options.Namespace, "group": options.Group, "participant": options.Participant} {
+		if err := validateTransportIdentifier(field, value); err != nil {
+			return nil, err
+		}
+	}
+	if err := options.Role.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateTransportIdentifier("participant", options.Participant); err != nil {
-		return nil, err
+	if options.MaxStaleness <= options.RefreshInterval || options.RetryMaximum < options.RetryInitial {
+		return nil, errors.New("broker0: invalid refresh, staleness, or retry bounds")
 	}
-	if options.MaxStaleness <= options.RebrowseInterval {
-		return nil, errors.New("broker0: max staleness must exceed the rebrowse interval")
-	}
-	return &GroupOrchestrator{subscriber: subscriber, browser: browser, applier: applier, operations: operations, options: options}, nil
+	return &GroupOrchestrator{subscriber: subscriber, requester: requester, applier: applier, operations: operations, options: options}, nil
 }
 
-// Snapshot returns the last successfully applied snapshot and whether it is
-// currently usable. A fail-closed orchestrator never reports usable state.
-func (orchestrator *GroupOrchestrator) Snapshot() (control.MembershipSnapshot, bool) {
-	orchestrator.mu.RLock()
-	defer orchestrator.mu.RUnlock()
-	if !orchestrator.ready || orchestrator.failed {
+func (o *GroupOrchestrator) Snapshot() (control.MembershipSnapshot, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if !o.ready || o.failed {
 		return control.MembershipSnapshot{}, false
 	}
-	return orchestrator.current.Clone(), true
+	return o.current.Clone(), true
 }
 
-// Run subscribes before browsing, buffers live deliveries during the browse,
-// applies the reconciled state, then acknowledges buffered deliveries. It
-// periodically and after every reconnect repeats a non-destructive browse.
-func (orchestrator *GroupOrchestrator) Run(ctx context.Context) error {
-	if err := orchestrator.applier.FailClosed(ctx, orchestrator.options.Group, ErrNoAuthoritativeState); err != nil {
+func (o *GroupOrchestrator) Run(ctx context.Context) error {
+	if err := o.applier.FailClosed(ctx, o.options.Group, ErrNoAuthoritativeState); err != nil {
 		return fmt.Errorf("broker0: establish initial fail-closed state: %w", err)
 	}
-	subscription, err := orchestrator.subscriber.Subscribe(ctx, orchestrator.options.Group, orchestrator.options.Participant)
+	subscription, err := o.subscriber.Subscribe(ctx, o.options.Group, o.options.Participant)
 	if err != nil {
-		return fmt.Errorf("broker0: subscribe to group %q updates: %w", orchestrator.options.Group, err)
+		return fmt.Errorf("broker0: subscribe to group %q updates: %w", o.options.Group, err)
 	}
 	if subscription.Deliveries == nil {
-		return orchestrator.fail(ctx, errors.New("broker0: update subscription has no delivery channel"))
+		return o.fail(ctx, errors.New("broker0: update subscription has no delivery channel"))
 	}
 	if subscription.Close != nil {
 		defer subscription.Close()
@@ -104,308 +116,235 @@ func (orchestrator *GroupOrchestrator) Run(ctx context.Context) error {
 
 	reconciler := control.NewReconciler()
 	if err := reconciler.BeginSubscribe(); err != nil {
-		return orchestrator.fail(ctx, err)
+		return o.fail(ctx, err)
 	}
-
-	type browseResult struct {
-		messages []Message
+	type requestResult struct {
+		request  control.SnapshotRequest
+		response control.SnapshotResponse
 		err      error
 	}
-	browseResults := make(chan browseResult, 1)
-	browsing := false
-	browseAgain := false
-	startBrowse := func() {
-		if browsing {
-			browseAgain = true
+	results := make(chan requestResult, 1)
+	requesting := false
+	requestAgain := false
+	startRequest := func() {
+		if requesting {
+			requestAgain = true
 			return
 		}
-		browsing = true
+		requesting = true
+		request := control.SnapshotRequest{
+			Version: control.BootstrapProtocolVersion, CorrelationID: newCorrelationID(),
+			Namespace: o.options.Namespace, Group: o.options.Group,
+			Participant: o.options.Participant, Role: o.options.Role,
+			RequestedAt: o.options.Now().UTC(),
+		}
 		go func() {
-			payloads, browseErr := orchestrator.browser.Browse(ctx, orchestrator.options.Group)
-			result := browseResult{err: browseErr}
-			if browseErr == nil {
-				result.messages, result.err = parseBrowsed(orchestrator.options.Group, payloads)
-			}
+			requestCtx, cancel := context.WithTimeout(ctx, o.options.RequestTimeout)
+			defer cancel()
+			response, requestErr := o.requester.RequestSnapshot(requestCtx, request)
 			select {
-			case browseResults <- result:
+			case results <- requestResult{request: request, response: response, err: requestErr}:
 			case <-ctx.Done():
 			}
 		}()
 	}
-	startBrowse()
+	startRequest()
 
-	ticker := time.NewTicker(orchestrator.options.RebrowseInterval)
-	defer ticker.Stop()
-	staleTimer := time.NewTimer(orchestrator.options.MaxStaleness)
-	defer staleTimer.Stop()
-	resetStaleTimer := func() {
-		if !staleTimer.Stop() {
+	refresh := time.NewTicker(o.options.RefreshInterval)
+	defer refresh.Stop()
+	stale := time.NewTimer(o.options.MaxStaleness)
+	defer stale.Stop()
+	var retry <-chan time.Time
+	retryDelay := o.options.RetryInitial
+	resetStale := func() {
+		if !stale.Stop() {
 			select {
-			case <-staleTimer.C:
+			case <-stale.C:
 			default:
 			}
 		}
-		staleTimer.Reset(orchestrator.options.MaxStaleness)
+		stale.Reset(o.options.MaxStaleness)
 	}
 
 	var pending []pendingDelivery
 	ready := false
-	deliveries := subscription.Deliveries
-	reconnects := subscription.Reconnects
-	subscriptionErrors := subscription.Errors
-
+	deliveries, reconnects, subscriptionErrors := subscription.Deliveries, subscription.Reconnects, subscription.Errors
 	for {
 		select {
 		case <-ctx.Done():
-			return orchestrator.fail(context.WithoutCancel(ctx), ctx.Err())
-		case <-ticker.C:
-			startBrowse()
-		case <-staleTimer.C:
-			return orchestrator.fail(ctx, ErrMembershipStale)
+			return o.fail(context.WithoutCancel(ctx), ctx.Err())
+		case <-refresh.C:
+			startRequest()
+		case <-retry:
+			retry = nil
+			startRequest()
+		case <-stale.C:
+			return o.fail(ctx, ErrMembershipStale)
 		case _, ok := <-reconnects:
 			if !ok {
 				reconnects = nil
 				continue
 			}
-			startBrowse()
+			// A reconnect creates a gap in update authority. Revoke routing before
+			// requesting a fresh full snapshot; live updates buffer until it arrives.
+			o.mu.Lock()
+			o.failed = true
+			o.mu.Unlock()
+			ready = false
+			reconciler = control.NewReconciler()
+			if err := reconciler.BeginSubscribe(); err != nil {
+				return o.fail(ctx, err)
+			}
+			if err := o.applier.FailClosed(ctx, o.options.Group, ErrNoAuthoritativeState); err != nil {
+				return o.fail(ctx, err)
+			}
+			startRequest()
 		case receiveErr, ok := <-subscriptionErrors:
 			if !ok {
 				subscriptionErrors = nil
 				continue
 			}
 			if receiveErr != nil {
-				return orchestrator.fail(ctx, fmt.Errorf("broker0: update subscription: %w", receiveErr))
+				return o.fail(ctx, fmt.Errorf("broker0: update subscription: %w", receiveErr))
 			}
 		case delivery, ok := <-deliveries:
 			if !ok {
-				return orchestrator.fail(ctx, errors.New("broker0: update delivery channel closed"))
+				return o.fail(ctx, errors.New("broker0: update delivery channel closed"))
 			}
 			if delivery == nil {
-				return orchestrator.fail(ctx, errors.New("broker0: update subscription returned nil delivery"))
+				return o.fail(ctx, errors.New("broker0: update subscription returned nil delivery"))
 			}
 			message, parseErr := parseMessage(delivery.Kind(), delivery.OperationID(), delivery.Payload())
-			if parseErr != nil {
-				return orchestrator.fail(ctx, fmt.Errorf("broker0: parse membership update: %w", parseErr))
+			if parseErr != nil || message.Kind != KindMembershipSnapshot || message.Group != o.options.Group {
+				return o.fail(ctx, errors.Join(parseErr, errors.New("broker0: invalid membership update scope")))
 			}
-			if message.Kind != KindMembershipSnapshot || message.Group != orchestrator.options.Group {
-				return orchestrator.fail(ctx, fmt.Errorf("broker0: unexpected %q update for group %q", message.Kind, message.Group))
-			}
-			completed, operationErr := orchestrator.operations.Contains(ctx, message.OperationID)
+			completed, operationErr := o.operations.Contains(ctx, message.OperationID)
 			if operationErr != nil {
-				return orchestrator.fail(ctx, fmt.Errorf("broker0: check update operation %q: %w", message.OperationID, operationErr))
+				return o.fail(ctx, operationErr)
 			}
-			// Before the initial browse is reconciled, even an operation completed
-			// before a crash is a live observation. Include it in bootstrap ordering
-			// before acknowledging its redelivery.
 			if !ready {
 				if _, applyErr := reconciler.ApplyUpdate(*message.Snapshot); applyErr != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: buffer update %q: %w", message.OperationID, applyErr))
+					return o.fail(ctx, applyErr)
 				}
 				pending = append(pending, pendingDelivery{delivery: delivery, message: message, completed: completed})
 				continue
 			}
 			if completed {
-				if ackErr := delivery.Ack(ctx); ackErr != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: acknowledge replayed update %q: %w", message.OperationID, ackErr))
+				if err := delivery.Ack(ctx); err != nil {
+					return o.fail(ctx, err)
 				}
 				continue
 			}
-
 			changed, applyErr := reconciler.ApplyUpdate(*message.Snapshot)
-			if applyErr != nil {
-				if isSuperseded(reconciler, *message.Snapshot, applyErr) {
-					if err := orchestrator.complete(ctx, message.OperationID, delivery); err != nil {
-						return orchestrator.fail(ctx, err)
-					}
-					continue
-				}
-				return orchestrator.fail(ctx, fmt.Errorf("broker0: reconcile update %q: %w", message.OperationID, applyErr))
+			if applyErr != nil && !isSuperseded(reconciler, *message.Snapshot, applyErr) {
+				return o.fail(ctx, applyErr)
 			}
-			if changed {
-				if err := orchestrator.apply(ctx, message); err != nil {
-					return orchestrator.fail(ctx, err)
+			if changed && applyErr == nil {
+				if err := o.apply(ctx, message); err != nil {
+					return o.fail(ctx, err)
 				}
 			}
-			if err := orchestrator.complete(ctx, message.OperationID, delivery); err != nil {
-				return orchestrator.fail(ctx, err)
+			if err := o.complete(ctx, message.OperationID, delivery); err != nil {
+				return o.fail(ctx, err)
 			}
-
-		case result := <-browseResults:
-			browsing = false
+		case result := <-results:
+			requesting = false
 			if result.err != nil {
-				if !ready {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: initial authoritative browse: %w", result.err))
+				if retry == nil {
+					retry = time.After(retryDelay)
+					retryDelay = min(retryDelay*2, o.options.RetryMaximum)
 				}
-				if browseAgain {
-					browseAgain = false
-					startBrowse()
+				if requestAgain {
+					requestAgain = false
+					startRequest()
 				}
 				continue
 			}
-
+			if err := result.response.ValidateFor(result.request); err != nil {
+				return o.fail(ctx, err)
+			}
+			retryDelay = o.options.RetryInitial
 			if !ready {
-				for _, message := range result.messages {
-					if err := reconciler.ApplyBrowse(*message.Snapshot); err != nil {
-						return orchestrator.fail(ctx, fmt.Errorf("broker0: reconcile initial browse: %w", err))
-					}
+				if err := reconciler.ApplyBaseline(result.response.Snapshot); err != nil {
+					return o.fail(ctx, err)
 				}
-				final, finishErr := reconciler.FinishBrowse()
+				final, finishErr := reconciler.FinishBootstrap()
 				if finishErr != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: finish initial browse: %w", finishErr))
+					return o.fail(ctx, finishErr)
 				}
-				message, findErr := messageForSnapshot(final, result.messages, pending)
-				if findErr != nil {
-					return orchestrator.fail(ctx, findErr)
-				}
-				if err := orchestrator.apply(ctx, message); err != nil {
-					return orchestrator.fail(ctx, err)
-				}
-				if err := orchestrator.operations.Record(ctx, message.OperationID); err != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: record browsed operation %q: %w", message.OperationID, err))
+				message := Message{Kind: KindMembershipSnapshot, OperationID: result.request.CorrelationID, Group: final.ScalingGroup, Snapshot: pointerToSnapshot(final)}
+				if err := o.apply(ctx, message); err != nil {
+					return o.fail(ctx, err)
 				}
 				for _, buffered := range pending {
 					if buffered.completed {
-						if err := buffered.delivery.Ack(ctx); err != nil {
-							return orchestrator.fail(ctx, fmt.Errorf("broker0: acknowledge replayed update %q: %w", buffered.message.OperationID, err))
-						}
-						continue
+						err = buffered.delivery.Ack(ctx)
+					} else {
+						err = o.complete(ctx, buffered.message.OperationID, buffered.delivery)
 					}
-					if err := orchestrator.complete(ctx, buffered.message.OperationID, buffered.delivery); err != nil {
-						return orchestrator.fail(ctx, err)
+					if err != nil {
+						return o.fail(ctx, err)
 					}
 				}
 				pending = nil
 				ready = true
 			} else {
-				candidate, selectErr := selectBrowsed(result.messages)
-				if selectErr != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: reconcile authoritative browse: %w", selectErr))
+				changed, applyErr := reconciler.ApplyUpdate(result.response.Snapshot)
+				if applyErr != nil && !isSuperseded(reconciler, result.response.Snapshot, applyErr) {
+					return o.fail(ctx, applyErr)
 				}
-				changed, applyErr := reconciler.ApplyUpdate(*candidate.Snapshot)
-				if applyErr != nil {
-					// A periodic browse can complete after a newer live delivery. That
-					// older retained value is a normal race, not loss of authority.
-					if !isSuperseded(reconciler, *candidate.Snapshot, applyErr) {
-						return orchestrator.fail(ctx, fmt.Errorf("broker0: authoritative browse regressed or conflicted: %w", applyErr))
+				if changed && applyErr == nil {
+					message := Message{Kind: KindMembershipSnapshot, OperationID: result.request.CorrelationID, Group: result.response.Group, Snapshot: pointerToSnapshot(result.response.Snapshot)}
+					if err := o.apply(ctx, message); err != nil {
+						return o.fail(ctx, err)
 					}
-					changed = false
-				}
-				if changed {
-					if err := orchestrator.apply(ctx, candidate); err != nil {
-						return orchestrator.fail(ctx, err)
-					}
-				}
-				if err := orchestrator.operations.Record(ctx, candidate.OperationID); err != nil {
-					return orchestrator.fail(ctx, fmt.Errorf("broker0: record browsed operation %q: %w", candidate.OperationID, err))
 				}
 			}
-			orchestrator.markBrowse(orchestrator.options.Now())
-			resetStaleTimer()
-			if browseAgain {
-				browseAgain = false
-				startBrowse()
+			resetStale()
+			if requestAgain {
+				requestAgain = false
+				startRequest()
 			}
 		}
 	}
 }
 
-func (orchestrator *GroupOrchestrator) apply(ctx context.Context, message Message) error {
+func newCorrelationID() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		panic(fmt.Sprintf("broker0: generate correlation ID: %v", err))
+	}
+	return hex.EncodeToString(value[:])
+}
+
+func (o *GroupOrchestrator) apply(ctx context.Context, message Message) error {
 	if message.Snapshot == nil {
 		return errors.New("broker0: cannot apply empty membership snapshot")
 	}
-	if err := orchestrator.applier.Apply(ctx, message); err != nil {
-		return fmt.Errorf("broker0: apply group %q revision %d: %w", orchestrator.options.Group, message.Snapshot.Revision, err)
+	if err := o.applier.Apply(ctx, message); err != nil {
+		return err
 	}
-	orchestrator.mu.Lock()
-	orchestrator.current = message.Snapshot.Clone()
-	orchestrator.ready = true
-	orchestrator.failed = false
-	orchestrator.mu.Unlock()
+	o.mu.Lock()
+	o.current, o.ready, o.failed = message.Snapshot.Clone(), true, false
+	o.mu.Unlock()
 	return nil
 }
 
-func (orchestrator *GroupOrchestrator) complete(ctx context.Context, operationID string, delivery Delivery) error {
-	if err := orchestrator.operations.Record(ctx, operationID); err != nil {
-		return fmt.Errorf("broker0: record applied operation %q: %w", operationID, err)
+func (o *GroupOrchestrator) complete(ctx context.Context, operationID string, delivery Delivery) error {
+	if err := o.operations.Record(ctx, operationID); err != nil {
+		return err
 	}
-	if err := delivery.Ack(ctx); err != nil {
-		return fmt.Errorf("broker0: acknowledge applied operation %q: %w", operationID, err)
-	}
-	return nil
+	return delivery.Ack(ctx)
 }
 
-func (orchestrator *GroupOrchestrator) fail(ctx context.Context, cause error) error {
-	orchestrator.mu.Lock()
-	orchestrator.failed = true
-	orchestrator.mu.Unlock()
-	if err := orchestrator.applier.FailClosed(ctx, orchestrator.options.Group, cause); err != nil {
-		return errors.Join(cause, fmt.Errorf("broker0: fail closed group %q: %w", orchestrator.options.Group, err))
+func (o *GroupOrchestrator) fail(ctx context.Context, cause error) error {
+	o.mu.Lock()
+	o.failed = true
+	o.mu.Unlock()
+	if err := o.applier.FailClosed(ctx, o.options.Group, cause); err != nil {
+		return errors.Join(cause, err)
 	}
 	return cause
-}
-
-func (orchestrator *GroupOrchestrator) markBrowse(at time.Time) {
-	orchestrator.mu.Lock()
-	orchestrator.lastBrowse = at
-	orchestrator.mu.Unlock()
-}
-
-func parseBrowsed(group string, payloads []BrowsedMessage) ([]Message, error) {
-	if len(payloads) == 0 {
-		return nil, ErrNoAuthoritativeState
-	}
-	messages := make([]Message, 0, len(payloads))
-	for index, payload := range payloads {
-		message, err := parseMessage(payload.Kind, payload.OperationID, payload.Payload)
-		if err != nil {
-			return nil, fmt.Errorf("browse result %d: %w", index, err)
-		}
-		if message.Kind != KindMembershipSnapshot || message.Group != group {
-			return nil, fmt.Errorf("browse result %d is %q for group %q", index, message.Kind, message.Group)
-		}
-		messages = append(messages, message)
-	}
-	return messages, nil
-}
-
-func selectBrowsed(messages []Message) (Message, error) {
-	reconciler := control.NewReconciler()
-	if err := reconciler.BeginSubscribe(); err != nil {
-		return Message{}, err
-	}
-	for _, message := range messages {
-		if err := reconciler.ApplyBrowse(*message.Snapshot); err != nil {
-			return Message{}, err
-		}
-	}
-	selected, err := reconciler.FinishBrowse()
-	if err != nil {
-		return Message{}, err
-	}
-	for _, message := range messages {
-		if reflect.DeepEqual(*message.Snapshot, selected) {
-			message.Snapshot = pointerToSnapshot(selected)
-			return message, nil
-		}
-	}
-	return Message{}, errors.New("broker0: selected browse snapshot has no source envelope")
-}
-
-func messageForSnapshot(snapshot control.MembershipSnapshot, browsed []Message, pending []pendingDelivery) (Message, error) {
-	for _, message := range browsed {
-		if reflect.DeepEqual(*message.Snapshot, snapshot) {
-			message.Snapshot = pointerToSnapshot(snapshot)
-			return message, nil
-		}
-	}
-	for _, item := range pending {
-		if reflect.DeepEqual(*item.message.Snapshot, snapshot) {
-			message := item.message
-			message.Snapshot = pointerToSnapshot(snapshot)
-			return message, nil
-		}
-	}
-	return Message{}, errors.New("broker0: reconciled snapshot has no source envelope")
 }
 
 func pointerToSnapshot(snapshot control.MembershipSnapshot) *control.MembershipSnapshot {

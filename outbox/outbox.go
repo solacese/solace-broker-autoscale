@@ -56,8 +56,8 @@ const (
 	StateUnassigned State = "unassigned"
 	// StateReady is assigned and may be selected for a publish attempt.
 	StateReady State = "ready"
-	// StateInFlight is durably marked before invoking the broker client.
-	StateInFlight State = "in_flight"
+	// StateInEventsA is durably marked before invoking the broker client.
+	StateInEventsA State = "in_events-a"
 	// StateAckUncertain means the broker may have accepted the message, but a
 	// positive ACK was not observed. It is retained and blocks later records
 	// with the same ordering key. Retrying it can produce a duplicate; consumers
@@ -67,32 +67,35 @@ const (
 
 // Record is the durable representation of an accepted publish request.
 type Record struct {
-	EventID        string            `json:"event_id"`
-	Payload        []byte            `json:"payload,omitempty"`
-	Topic          string            `json:"topic"`
-	Properties     map[string]string `json:"properties,omitempty"`
-	OrderingKey    string            `json:"ordering_key"`
-	Group          string            `json:"group"`
-	Hash           string            `json:"hash"`
-	HashContract   string            `json:"hash_contract"`
-	LibraryVersion string            `json:"library_version"`
-	Epoch          uint64            `json:"epoch,omitempty"`
-	Broker         string            `json:"broker,omitempty"`
-	Destination    string            `json:"destination,omitempty"`
-	State          State             `json:"state"`
-	Attempts       uint64            `json:"attempts,omitempty"`
-	LastError      string            `json:"last_error,omitempty"`
-	Sequence       uint64            `json:"sequence"`
-	AcceptedAt     time.Time         `json:"accepted_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	SizeBytes      int64             `json:"size_bytes"`
+	EventID          string            `json:"event_id"`
+	Payload          []byte            `json:"payload,omitempty"`
+	Topic            string            `json:"topic"`
+	Properties       map[string]string `json:"properties,omitempty"`
+	OrderingKey      string            `json:"ordering_key"`
+	Group            string            `json:"group"`
+	Hash             string            `json:"hash"`
+	HashContract     string            `json:"hash_contract"`
+	LibraryVersion   string            `json:"library_version"`
+	RoutingAlgorithm string            `json:"routing_algorithm"`
+	BrokerEndpoint   string            `json:"broker_endpoint,omitempty"`
+	Epoch            uint64            `json:"epoch,omitempty"`
+	Broker           string            `json:"broker,omitempty"`
+	Destination      string            `json:"destination,omitempty"`
+	State            State             `json:"state"`
+	Attempts         uint64            `json:"attempts,omitempty"`
+	LastError        string            `json:"last_error,omitempty"`
+	Sequence         uint64            `json:"sequence"`
+	AcceptedAt       time.Time         `json:"accepted_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	SizeBytes        int64             `json:"size_bytes"`
 }
 
 // Assignment identifies the broker route chosen for a durable record.
 type Assignment struct {
-	Epoch       uint64
-	Broker      string
-	Destination string
+	Epoch          uint64
+	Broker         string
+	BrokerEndpoint string
+	Destination    string
 }
 
 // AssignmentUpdate is one item in an atomic AssignBatch operation.
@@ -108,7 +111,7 @@ type StateUpdate struct {
 	Reason  string
 }
 
-// CompletionOutcome identifies the durable terminal transition for an in-flight
+// CompletionOutcome identifies the durable terminal transition for an in-progress
 // publish attempt.
 type CompletionOutcome uint8
 
@@ -120,7 +123,7 @@ const (
 
 // Completion identifies one terminal broker result. Attempts and Epoch make a
 // late result harmless: CompleteBatch applies it only while the matching durable
-// attempt is still in flight.
+// attempt is still in eventsA.
 type Completion struct {
 	EventID  string
 	Attempts uint64
@@ -245,7 +248,7 @@ func (h *readyLaneCandidateHeap) Pop() any {
 	return candidate
 }
 
-// Open loads or initializes an outbox at path. Any StateInFlight record found
+// Open loads or initializes an outbox at path. Any StateInEventsA record found
 // during recovery becomes StateAckUncertain: the process cannot know whether
 // the broker accepted it before the crash, so automatic deletion or retry
 // would be unsafe.
@@ -433,7 +436,7 @@ func (s *Store) acceptMany(operation string, input []Record) ([]Record, error) {
 // Assign durably attaches a route to an unassigned record. Reapplying the same
 // assignment is idempotent. A ready record may be reassigned because it has
 // either never been attempted or was definitively rejected by its old broker.
-// In-flight and ACK-uncertain records cannot be reassigned.
+// In-eventsA and ACK-uncertain records cannot be reassigned.
 func (s *Store) Assign(eventID string, assignment Assignment) error {
 	return s.assignMany("assign", []AssignmentUpdate{{EventID: eventID, Assignment: assignment}})
 }
@@ -452,10 +455,10 @@ func (s *Store) assignMany(operation string, updates []AssignmentUpdate) error {
 	}
 	return s.updateMany(operation, ids, func(eventID string, r *Record) error {
 		assignment := assignments[eventID]
-		if assignment.Epoch == 0 || assignment.Broker == "" || assignment.Destination == "" {
+		if assignment.Epoch == 0 || assignment.Broker == "" || assignment.BrokerEndpoint == "" || assignment.Destination == "" {
 			return fmt.Errorf("%w: incomplete assignment", ErrInvalidRecord)
 		}
-		if r.State == StateReady && r.Epoch == assignment.Epoch && r.Broker == assignment.Broker && r.Destination == assignment.Destination {
+		if r.State == StateReady && r.Epoch == assignment.Epoch && r.Broker == assignment.Broker && r.BrokerEndpoint == assignment.BrokerEndpoint && r.Destination == assignment.Destination {
 			return nil
 		}
 		if r.State != StateUnassigned && r.State != StateReady {
@@ -463,6 +466,7 @@ func (s *Store) assignMany(operation string, updates []AssignmentUpdate) error {
 		}
 		r.Epoch = assignment.Epoch
 		r.Broker = assignment.Broker
+		r.BrokerEndpoint = assignment.BrokerEndpoint
 		r.Destination = assignment.Destination
 		r.State = StateReady
 		r.LastError = ""
@@ -470,22 +474,22 @@ func (s *Store) assignMany(operation string, updates []AssignmentUpdate) error {
 	})
 }
 
-// MarkInFlight durably records that the broker call is about to begin.
-func (s *Store) MarkInFlight(eventID string) error {
-	return s.markInFlightMany("mark in flight", []string{eventID})
+// MarkInEventsA durably records that the broker call is about to begin.
+func (s *Store) MarkInEventsA(eventID string) error {
+	return s.markInEventsAMany("mark in eventsA", []string{eventID})
 }
 
-// MarkInFlightBatch atomically marks ready records in flight.
-func (s *Store) MarkInFlightBatch(eventIDs []string) error {
-	return s.markInFlightMany("mark in flight batch", eventIDs)
+// MarkInEventsABatch atomically marks ready records in eventsA.
+func (s *Store) MarkInEventsABatch(eventIDs []string) error {
+	return s.markInEventsAMany("mark in eventsA batch", eventIDs)
 }
 
-func (s *Store) markInFlightMany(operation string, eventIDs []string) error {
+func (s *Store) markInEventsAMany(operation string, eventIDs []string) error {
 	return s.updateMany(operation, eventIDs, func(_ string, r *Record) error {
 		if r.State != StateReady {
 			return fmt.Errorf("%w: cannot publish record in state %q", ErrInvalidState, r.State)
 		}
-		r.State = StateInFlight
+		r.State = StateInEventsA
 		r.Attempts++
 		r.LastError = ""
 		return nil
@@ -498,7 +502,7 @@ func (s *Store) MarkRejected(eventID, reason string) error {
 	return s.markRejectedMany("mark rejected", []StateUpdate{{EventID: eventID, Reason: reason}})
 }
 
-// MarkRejectedBatch atomically returns in-flight records to the ready state.
+// MarkRejectedBatch atomically returns in-progress records to the ready state.
 func (s *Store) MarkRejectedBatch(updates []StateUpdate) error {
 	return s.markRejectedMany("mark rejected batch", updates)
 }
@@ -506,7 +510,7 @@ func (s *Store) MarkRejectedBatch(updates []StateUpdate) error {
 func (s *Store) markRejectedMany(operation string, updates []StateUpdate) error {
 	ids, reasons := splitStateUpdates(updates)
 	return s.updateMany(operation, ids, func(eventID string, r *Record) error {
-		if r.State != StateInFlight {
+		if r.State != StateInEventsA {
 			return fmt.Errorf("%w: cannot reject record in state %q", ErrInvalidState, r.State)
 		}
 		r.State = StateReady
@@ -530,7 +534,7 @@ func (s *Store) MarkAckUncertainBatch(updates []StateUpdate) error {
 func (s *Store) markAckUncertainMany(operation string, updates []StateUpdate) error {
 	ids, reasons := splitStateUpdates(updates)
 	return s.updateMany(operation, ids, func(eventID string, r *Record) error {
-		if r.State != StateInFlight {
+		if r.State != StateInEventsA {
 			return fmt.Errorf("%w: cannot mark uncertain record in state %q", ErrInvalidState, r.State)
 		}
 		r.State = StateAckUncertain
@@ -562,7 +566,7 @@ func (s *Store) retryAckUncertainMany(operation string, eventIDs []string) error
 }
 
 // Ack removes a record only when event ID, attempt number, and epoch all match
-// the current durable in-flight or ACK-uncertain state. Requiring the complete
+// the current durable in-progress or ACK-uncertain state. Requiring the complete
 // attempt identity prevents a delayed ACK from deleting a newer retry.
 func (s *Store) Ack(eventID string, attempts, epoch uint64) error {
 	applied, err := s.CompleteBatch([]Completion{{EventID: eventID, Attempts: attempts, Epoch: epoch, Outcome: CompletionAcknowledged}})
@@ -583,7 +587,7 @@ func (s *Store) AckAttempt(eventID string, attempts, epoch uint64) error {
 // Batched acknowledgements use CompleteBatch so every item carries its attempt
 // number and epoch; an event-ID-only batch ACK cannot be made safe.
 
-// CompleteBatch atomically applies mixed broker outcomes for matching in-flight
+// CompleteBatch atomically applies mixed broker outcomes for matching in-progress
 // attempts. Stale completions and records already resolved by an operator are
 // ignored. The returned slice contains exactly the completions committed, in
 // input order. Acknowledged records are deleted; rejected records become ready;
@@ -619,13 +623,13 @@ func (s *Store) CompleteBatch(completions []Completion) ([]Completion, error) {
 		}
 		switch completion.Outcome {
 		case CompletionAcknowledged:
-			if record.State != StateInFlight && record.State != StateAckUncertain {
+			if record.State != StateInEventsA && record.State != StateAckUncertain {
 				continue
 			}
 			deleted = append(deleted, record)
 			removedBytes += record.SizeBytes
 		case CompletionRejected, CompletionAckUncertain:
-			if record.State != StateInFlight {
+			if record.State != StateInEventsA {
 				continue
 			}
 			record = cloneRecord(record)
@@ -711,7 +715,7 @@ func (s *Store) ackMany(operation string, eventIDs []string) error {
 		if !ok {
 			return fmt.Errorf("%s %q: %w", operation, eventID, ErrNotFound)
 		}
-		if record.State != StateInFlight && record.State != StateAckUncertain {
+		if record.State != StateInEventsA && record.State != StateAckUncertain {
 			return fmt.Errorf("%s %q: %w: cannot ack record in state %q", operation, eventID, ErrInvalidState, record.State)
 		}
 		removed[i] = record
@@ -748,7 +752,7 @@ func (s *Store) ackMany(operation string, eventIDs []string) error {
 }
 
 // Eligible returns, in global acceptance order, at most one ready record per
-// ordering key. An earlier unassigned, in-flight, or ACK-uncertain record blocks
+// ordering key. An earlier unassigned, in-progress, or ACK-uncertain record blocks
 // only its own key; unrelated keys can continue.
 func (s *Store) Eligible(limit int) []Record {
 	return s.EligibleFor(limit, nil, nil)
@@ -1006,7 +1010,7 @@ func (s *Store) load(newDatabase bool) error {
 			loaded[record.EventID] = record
 			order = append(order, record.EventID)
 			maxSequence = sequence
-			if record.State == StateInFlight {
+			if record.State == StateInEventsA {
 				record.State = StateAckUncertain
 				record.LastError = "publish outcome unknown after outbox recovery; retry may duplicate"
 				record.UpdatedAt = now
@@ -1263,7 +1267,7 @@ func validateStoredRecord(r Record) error {
 		if r.Epoch != 0 || r.Broker != "" || r.Destination != "" {
 			return ErrInvalidRecord
 		}
-	case StateReady, StateInFlight, StateAckUncertain:
+	case StateReady, StateInEventsA, StateAckUncertain:
 		if r.Epoch == 0 || r.Broker == "" || r.Destination == "" {
 			return ErrInvalidRecord
 		}

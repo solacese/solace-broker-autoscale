@@ -57,12 +57,13 @@ const (
 // BrokerMessage is the immutable message passed directly to the selected
 // broker. Properties includes the shim routing metadata constants above.
 type BrokerMessage struct {
-	EventID     string
-	Payload     []byte
-	Topic       string
-	Properties  map[string]string
-	Destination string
-	Epoch       uint64
+	EventID        string
+	Payload        []byte
+	Topic          string
+	Properties     map[string]string
+	Destination    string
+	BrokerEndpoint string
+	Epoch          uint64
 }
 
 // BrokerPublisher publishes directly to the broker named by brokerID. It must
@@ -122,13 +123,22 @@ type DispatchReport struct {
 // after restart the shim fails closed until the control plane supplies and
 // validates a fresh snapshot. Accepted records remain durable in the outbox.
 type Publisher struct {
-	mu         sync.RWMutex
-	outbox     *outbox.Store
-	customer   customer.CustomerLibrary
-	broker     BrokerPublisher
-	contracts  map[string]Contract
-	encode     PayloadEncoder
-	membership map[string]control.MembershipSnapshot
+	mu             sync.RWMutex
+	outbox         *outbox.Store
+	customer       customer.CustomerLibrary
+	broker         BrokerPublisher
+	contracts      map[string]Contract
+	encode         PayloadEncoder
+	membership     map[string]control.MembershipSnapshot
+	placementCache map[placementCacheKey]outbox.Assignment
+	placementOrder []placementCacheKey
+	placementLimit int
+}
+
+type placementCacheKey struct {
+	group    string
+	hash     string
+	revision uint64
 }
 
 // New constructs a publisher shim.
@@ -150,6 +160,20 @@ func New(config Config) (*Publisher, error) {
 	if len(contracts) == 0 {
 		return nil, fmt.Errorf("%w: at least one group contract is required", ErrInvalidConfig)
 	}
+	policy, err := customer.RoutingPolicy(config.CustomerLibrary)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	algorithm := policy.RoutingAlgorithm()
+	for _, record := range config.Outbox.Records() {
+		if record.RoutingAlgorithm != algorithm {
+			return nil, fmt.Errorf("%w: durable outbox event %q uses routing algorithm %q, customer library requires %q", ErrInvalidConfig, record.EventID, record.RoutingAlgorithm, algorithm)
+		}
+		contract, configured := contracts[record.Group]
+		if !configured || record.HashContract != contract.HashContract || record.LibraryVersion != contract.LibraryVersion {
+			return nil, fmt.Errorf("%w: durable outbox event %q uses an incompatible customer contract", ErrInvalidConfig, record.EventID)
+		}
+	}
 	for group, contract := range contracts {
 		if group == "" || contract.HashContract == "" || contract.LibraryVersion == "" {
 			return nil, fmt.Errorf("%w: contract map cannot contain an empty group, hash contract, or library version", ErrInvalidConfig)
@@ -159,12 +183,13 @@ func New(config Config) (*Publisher, error) {
 		config.EncodePayload = defaultEncodePayload
 	}
 	return &Publisher{
-		outbox:     config.Outbox,
-		customer:   config.CustomerLibrary,
-		broker:     config.Broker,
-		contracts:  contracts,
-		encode:     config.EncodePayload,
-		membership: make(map[string]control.MembershipSnapshot),
+		outbox:         config.Outbox,
+		customer:       config.CustomerLibrary,
+		broker:         config.Broker,
+		contracts:      contracts,
+		encode:         config.EncodePayload,
+		membership:     make(map[string]control.MembershipSnapshot),
+		placementCache: make(map[placementCacheKey]outbox.Assignment), placementLimit: 4096,
 	}, nil
 }
 
@@ -181,6 +206,13 @@ func (p *Publisher) ApplyMembership(snapshot control.MembershipSnapshot) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	contract, configured := p.contracts[snapshot.ScalingGroup]
+	policy, err := customer.RoutingPolicy(p.customer)
+	if err != nil {
+		return fmt.Errorf("apply membership: %w", err)
+	}
+	if snapshot.Algorithm != policy.RoutingAlgorithm() {
+		return fmt.Errorf("apply membership: routing algorithm %q does not match customer library algorithm %q", snapshot.Algorithm, policy.RoutingAlgorithm())
+	}
 	if !configured || snapshot.HashContract != contract.HashContract {
 		return fmt.Errorf("apply membership: hash contract %q for group %q does not match configured contract %q", snapshot.HashContract, snapshot.ScalingGroup, contract.HashContract)
 	}
@@ -206,11 +238,11 @@ func (p *Publisher) ApplyMembership(snapshot control.MembershipSnapshot) error {
 		if record.Group != snapshot.ScalingGroup || (record.State != outbox.StateUnassigned && record.State != outbox.StateReady) {
 			continue
 		}
-		if record.HashContract != contract.HashContract || record.LibraryVersion != contract.LibraryVersion {
+		if record.HashContract != contract.HashContract || record.LibraryVersion != contract.LibraryVersion || record.RoutingAlgorithm != snapshot.Algorithm {
 			assignmentErrors = append(assignmentErrors, fmt.Errorf("assign buffered event %q: routing metadata mismatch", record.EventID))
 			continue
 		}
-		assignment, err := assignmentFor(record.Hash, snapshot)
+		assignment, err := p.assignmentFor(record.Hash, snapshot)
 		if err != nil {
 			assignmentErrors = append(assignmentErrors, fmt.Errorf("assign buffered event %q: %w", record.EventID, err))
 			continue
@@ -306,25 +338,27 @@ func (p *Publisher) recordFor(message customer.MessageView) (outbox.Record, erro
 	}
 	hashString := hex.EncodeToString(hash[:])
 	record := outbox.Record{
-		EventID:        message.EventID,
-		Payload:        payload,
-		Topic:          message.Topic,
-		Properties:     cloneProperties(message.Headers),
-		OrderingKey:    group + "\x00" + hashString,
-		Group:          group,
-		Hash:           hashString,
-		HashContract:   contract.HashContract,
-		LibraryVersion: contract.LibraryVersion,
-		State:          outbox.StateUnassigned,
+		EventID:          message.EventID,
+		Payload:          payload,
+		Topic:            message.Topic,
+		Properties:       cloneProperties(message.Headers),
+		OrderingKey:      group + "\x00" + hashString,
+		Group:            group,
+		Hash:             hashString,
+		HashContract:     contract.HashContract,
+		LibraryVersion:   contract.LibraryVersion,
+		RoutingAlgorithm: snapshot.Algorithm,
+		State:            outbox.StateUnassigned,
 	}
 	if snapshot.Phase == control.PhaseActive || snapshot.Phase == control.PhasePrepare {
-		assignment, err := assignmentFor(hashString, snapshot)
+		assignment, err := p.assignmentFor(hashString, snapshot)
 		if err != nil {
 			return outbox.Record{}, fmt.Errorf("accept %q: assign route: %w", message.EventID, err)
 		}
 		record.State = outbox.StateReady
 		record.Epoch = assignment.Epoch
 		record.Broker = assignment.Broker
+		record.BrokerEndpoint = assignment.BrokerEndpoint
 		record.Destination = assignment.Destination
 	}
 	return record, nil
@@ -370,7 +404,7 @@ func (p *Publisher) Dispatch(ctx context.Context, limit int) (DispatchReport, er
 			p.mu.RUnlock()
 			continue
 		}
-		if err := p.outbox.MarkInFlight(record.EventID); err != nil {
+		if err := p.outbox.MarkInEventsA(record.EventID); err != nil {
 			p.mu.RUnlock()
 			dispatchErrors = append(dispatchErrors, err)
 			continue
@@ -383,7 +417,7 @@ func (p *Publisher) Dispatch(ctx context.Context, limit int) (DispatchReport, er
 		case outcome == OutcomeAcknowledged && publishErr == nil:
 			if err := p.outbox.Ack(record.EventID, record.Attempts+1, record.Epoch); err != nil {
 				// The broker ACK happened but durable deletion failed. The record
-				// remains in-flight and recovery will conservatively make it
+				// remains in-progress and recovery will conservatively make it
 				// uncertain rather than risking a silent drop.
 				dispatchErrors = append(dispatchErrors, fmt.Errorf("persist ACK for %q: %w", record.EventID, err))
 				continue
@@ -423,14 +457,17 @@ func (p *Publisher) RetryAckUncertain(eventID string) error {
 	if !ok || snapshot.Phase != control.PhaseActive {
 		return fmt.Errorf("retry %q: %w %q", eventID, ErrNoValidMembership, record.Group)
 	}
-	if err := p.outbox.RetryAckUncertain(eventID); err != nil {
-		return err
+	if record.RoutingAlgorithm != snapshot.Algorithm {
+		return fmt.Errorf("retry %q: routing algorithm changed from %q to %q; uncertain publication cannot be rerouted", eventID, record.RoutingAlgorithm, snapshot.Algorithm)
 	}
-	assignment, err := assignmentFor(record.Hash, snapshot)
+	assignment, err := p.assignmentFor(record.Hash, snapshot)
 	if err != nil {
 		return err
 	}
-	return p.outbox.Assign(eventID, assignment)
+	if assignment.Epoch != record.Epoch || assignment.Broker != record.Broker || assignment.BrokerEndpoint != record.BrokerEndpoint || assignment.Destination != record.Destination {
+		return fmt.Errorf("retry %q: current route %d/%s/%s differs from uncertain route %d/%s/%s", eventID, assignment.Epoch, assignment.Broker, assignment.Destination, record.Epoch, record.Broker, record.Destination)
+	}
+	return p.outbox.RetryAckUncertain(eventID)
 }
 
 // Ack resolves an exact retained uncertain attempt after an authoritative late
@@ -448,14 +485,38 @@ func (p *Publisher) Lookup(eventID string) (Receipt, error) {
 	return receiptFor(record), nil
 }
 
-func assignmentFor(hashString string, snapshot control.MembershipSnapshot) (outbox.Assignment, error) {
-	digest, err := routing.ParseSHA256(hashString)
+func (p *Publisher) assignmentFor(hashString string, snapshot control.MembershipSnapshot) (outbox.Assignment, error) {
+	key := placementCacheKey{group: snapshot.ScalingGroup, hash: hashString, revision: snapshot.Revision}
+	if assignment, ok := p.placementCache[key]; ok {
+		return assignment, nil
+	}
+	assignment, err := assignmentFor(p.customer, hashString, snapshot)
 	if err != nil {
 		return outbox.Assignment{}, err
 	}
-	// Broker selection is deliberately delegated only to routing. Membership
-	// order is passed through exactly as supplied by the control snapshot.
-	broker, err := routing.BrokerForHash(digest, snapshot.CurrentMembership)
+	if len(p.placementOrder) >= p.placementLimit {
+		oldest := p.placementOrder[0]
+		delete(p.placementCache, oldest)
+		copy(p.placementOrder, p.placementOrder[1:])
+		p.placementOrder = p.placementOrder[:len(p.placementOrder)-1]
+	}
+	p.placementCache[key] = assignment
+	p.placementOrder = append(p.placementOrder, key)
+	return assignment, nil
+}
+
+func assignmentFor(library customer.CustomerLibrary, hashString string, snapshot control.MembershipSnapshot) (outbox.Assignment, error) {
+	digest, err := customer.ParseBusinessHash(hashString)
+	if err != nil {
+		return outbox.Assignment{}, err
+	}
+	// Routing iterates the authoritative candidates; the customer library owns
+	// score construction and its versioned hash choice.
+	policy, err := customer.RoutingPolicy(library)
+	if err != nil {
+		return outbox.Assignment{}, err
+	}
+	broker, err := routing.RendezvousBroker(policy, snapshot.ScalingGroup, digest, snapshot.CurrentMembership)
 	if err != nil {
 		return outbox.Assignment{}, err
 	}
@@ -463,7 +524,7 @@ func assignmentFor(hashString string, snapshot control.MembershipSnapshot) (outb
 	if len(snapshot.CurrentResources) != 0 {
 		matched := false
 		for _, identity := range snapshot.CurrentResources {
-			if identity.ConsumerSet != broker {
+			if identity.BrokerID != broker {
 				continue
 			}
 			if matched {
@@ -476,7 +537,11 @@ func assignmentFor(hashString string, snapshot control.MembershipSnapshot) (outb
 			return outbox.Assignment{}, fmt.Errorf("routing resources do not contain selected broker %q", broker)
 		}
 	}
-	return outbox.Assignment{Epoch: snapshot.Epoch, Broker: broker, Destination: destination}, nil
+	endpoint, ok := snapshot.BrokerEndpoint(broker, false)
+	if !ok {
+		return outbox.Assignment{}, fmt.Errorf("routing snapshot has no endpoint for broker %q", broker)
+	}
+	return outbox.Assignment{Epoch: snapshot.Epoch, Broker: broker, BrokerEndpoint: endpoint, Destination: destination}, nil
 }
 
 func brokerMessage(record outbox.Record) BrokerMessage {
@@ -492,7 +557,7 @@ func brokerMessage(record outbox.Record) BrokerMessage {
 	properties[PropertyEpoch] = strconv.FormatUint(record.Epoch, 10)
 	return BrokerMessage{
 		EventID: record.EventID, Payload: append([]byte(nil), record.Payload...), Topic: record.Topic,
-		Properties: properties, Destination: record.Destination, Epoch: record.Epoch,
+		Properties: properties, Destination: record.Destination, BrokerEndpoint: record.BrokerEndpoint, Epoch: record.Epoch,
 	}
 }
 

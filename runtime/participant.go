@@ -13,11 +13,8 @@ import (
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/customer"
-	"github.com/solacese/solace-workload-balancer/integration"
-	"github.com/solacese/solace-workload-balancer/routing"
 	shimPublisher "github.com/solacese/solace-workload-balancer/shim/publisher"
 	shimSubscriber "github.com/solacese/solace-workload-balancer/shim/subscriber"
-	"solace.dev/go/messaging/pkg/solace"
 )
 
 const participantReceivePoll = 500 * time.Millisecond
@@ -60,37 +57,9 @@ func ParticipantOperationDirectory(cfg config.Config, participant string) string
 	return filepath.Join(cfg.Persistence.PublisherOutbox, "participants", participant)
 }
 
-// AirlineCustomerLibrary is the explicit application boundary supported by the
-// two repository contracts. Unknown groups fail rather than guessing a hash.
-type AirlineCustomerLibrary struct{}
-
-func (AirlineCustomerLibrary) GetScalingGroup(message customer.MessageView) (string, error) {
-	group := message.Headers["scaling-group"]
-	if group == "" {
-		return "", errors.New("runtime: scaling-group header is required")
-	}
-	return group, nil
-}
-
-func (AirlineCustomerLibrary) GetBusinessHash(message customer.MessageView) (customer.BusinessHash, error) {
-	switch message.Headers["scaling-group"] {
-	case "flight-operations":
-		return flightHash(message)
-	case "baggage-tracking":
-		return baggageHash(message)
-	default:
-		return customer.BusinessHash{}, fmt.Errorf("runtime: unsupported scaling group %q", message.Headers["scaling-group"])
-	}
-}
-
-// Kept behind narrow functions so executable tests can exercise the library
-// without coupling their protocol to routing internals.
-var flightHash = func(message customer.MessageView) (customer.BusinessHash, error) {
-	return routing.FlightOperationsHash(message.Headers["carrier"], message.Headers["flight-number"], message.Headers["departure-date"], message.Headers["leg-id"])
-}
-var baggageHash = func(message customer.MessageView) (customer.BusinessHash, error) {
-	return routing.BaggageHash(message.Headers["carrier"], message.Headers["bag-journey-id"])
-}
+// EntityCustomerLibrary remains an alias for source compatibility. The default
+// hash implementation and contract live entirely in package customer.
+type EntityCustomerLibrary = customer.EntityCustomerLibrary
 
 // PublisherParticipant owns the publisher shim, durable outbox, native data
 // publishers, Broker 0 membership/command processes, and bounded dispatch loop.
@@ -517,16 +486,6 @@ func participantResourceDestination(snapshot *control.MembershipSnapshot, consum
 	}
 }
 
-func closeServices(services map[string]solace.MessagingService) error {
-	var result error
-	for _, service := range services {
-		if service != nil && service.IsConnected() {
-			result = errors.Join(result, service.Disconnect())
-		}
-	}
-	return result
-}
-
 func participantContracts(groups []config.ScalingGroup) (map[string]shimPublisher.Contract, map[string]shimSubscriber.Contract) {
 	publisherContracts := make(map[string]shimPublisher.Contract, len(groups))
 	subscriberContracts := make(map[string]shimSubscriber.Contract, len(groups))
@@ -537,14 +496,6 @@ func participantContracts(groups []config.ScalingGroup) (map[string]shimPublishe
 	return publisherContracts, subscriberContracts
 }
 
-func participantPartitionPolicy(groups []config.ScalingGroup) integration.PartitionPolicy {
-	policy := make(integration.PartitionPolicy, len(groups))
-	for _, group := range groups {
-		policy[group.ID] = group.Queue.Type == "partitioned"
-	}
-	return policy
-}
-
 // Use an interface assertion here so accidental command assembly regressions
 // are caught at compile time.
 var _ broker0.SnapshotApplier = (*PublisherSnapshotApplier)(nil)
@@ -552,3 +503,9 @@ var _ broker0.SnapshotApplier = (*SubscriberSnapshotApplier)(nil)
 var _ broker0.CommandExecutor = PublisherCommandExecutor{}
 var _ broker0.CommandExecutor = SubscriberCommandExecutor{}
 var _ shimSubscriber.ReadinessReporter = (*SubscriberReadiness)(nil)
+
+type unavailableSyncPublisher struct{}
+
+func (unavailableSyncPublisher) Publish(context.Context, string, shimPublisher.BrokerMessage) (shimPublisher.PublishOutcome, error) {
+	return shimPublisher.OutcomeRejected, errors.New("runtime: synchronous publisher path is disabled; use AsyncDispatcher")
+}

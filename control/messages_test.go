@@ -205,8 +205,8 @@ func TestSnapshotResourceIdentityValidationAndClone(t *testing.T) {
 	snapshot := validTransitionSnapshot(PhasePrepare)
 	snapshot.Namespace = "acme"
 	snapshot.LibraryVersion = "v1.2.3"
-	snapshot.CurrentResources = []EpochResourceIdentity{{Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"}}
-	snapshot.ProposedResources = []EpochResourceIdentity{{Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"}}
+	snapshot.CurrentResources = []EpochResourceIdentity{{Epoch: 3, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.z.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"}, {Epoch: 3, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.a.workers.e3", IngressTopic: "acme/data/orders/epoch/3/>"}}
+	snapshot.ProposedResources = []EpochResourceIdentity{{Epoch: 4, BrokerID: "broker-z", ConsumerSet: "workers", QueueName: "acme.data.orders.z.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"}, {Epoch: 4, BrokerID: "broker-a", ConsumerSet: "workers", QueueName: "acme.data.orders.a.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"}, {Epoch: 4, BrokerID: "broker-m", ConsumerSet: "workers", QueueName: "acme.data.orders.m.workers.e4", IngressTopic: "acme/data/orders/epoch/4/>"}}
 	if err := snapshot.Validate(); err != nil {
 		t.Fatal(err)
 	}

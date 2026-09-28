@@ -16,11 +16,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: maven
-          cache-dependency-path: tools/lvq-browser/pom.xml
       - name: Run CI checks
         run: make ci

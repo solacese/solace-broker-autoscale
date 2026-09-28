@@ -1,49 +1,49 @@
 package routing
 
-import "errors"
+import (
+	"bytes"
+	"errors"
+	"fmt"
 
-// BrokerIndex maps the entire unsigned 256-bit, big-endian digest to an index
-// in the supplied ordered membership. It is equivalent to
-// int(bigEndianUnsigned(digest) % len(membership)) without truncation.
-func BrokerIndex(digest BusinessHash, membership []string) (int, error) {
-	if len(membership) == 0 {
-		return 0, errors.New("routing: broker membership is empty")
+	"github.com/solacese/solace-workload-balancer/customer"
+)
+
+// RendezvousBroker orchestrates equal-weight candidate scoring and selects the
+// highest full unsigned score. Hash construction belongs entirely to policy;
+// routing only validates membership, asks for each score, compares opaque bytes,
+// and applies the lexicographically smaller broker-ID collision tie break.
+func RendezvousBroker(policy customer.RoutingHashPolicy, group string, businessHash customer.BusinessHash, membership []string) (string, error) {
+	if policy == nil {
+		return "", errors.New("routing: customer hash policy is required")
 	}
-
-	// Streaming modular reduction avoids allocating a big integer and, unlike
-	// taking only the first eight bytes, preserves all 256 hash bits.
-	modulus := uint64(len(membership))
-	var remainder uint64
-	for _, octet := range digest {
-		// remainder < modulus and len(slice) <= max int, so remainder*256 can
-		// overflow uint64 on 64-bit hosts. The identity below consumes one byte
-		// through eight doubling steps without overflow.
-		for bit := 7; bit >= 0; bit-- {
-			remainder = addModulo(remainder, remainder, modulus)
-			if octet&(1<<uint(bit)) != 0 {
-				remainder = addModulo(remainder, 1, modulus)
-			}
+	if len(membership) == 0 {
+		return "", errors.New("routing: broker membership is empty")
+	}
+	algorithm := policy.RoutingAlgorithm()
+	if algorithm == "" {
+		return "", errors.New("routing: customer library returned an empty routing algorithm")
+	}
+	seen := make(map[string]struct{}, len(membership))
+	var selected string
+	var highest customer.RoutingScore
+	for _, brokerID := range membership {
+		if brokerID == "" {
+			return "", errors.New("routing: broker ID is empty")
+		}
+		if _, duplicate := seen[brokerID]; duplicate {
+			return "", fmt.Errorf("routing: duplicate broker ID %q", brokerID)
+		}
+		seen[brokerID] = struct{}{}
+		score, err := policy.GetRendezvousScore(customer.ScoreInput{
+			Algorithm: algorithm, ScalingGroup: group, BusinessHash: businessHash, BrokerID: brokerID,
+		})
+		if err != nil {
+			return "", fmt.Errorf("routing: score broker %q: %w", brokerID, err)
+		}
+		comparison := bytes.Compare(score[:], highest[:])
+		if selected == "" || comparison > 0 || comparison == 0 && brokerID < selected {
+			selected, highest = brokerID, score
 		}
 	}
-	return int(remainder), nil
-}
-
-// BrokerForHash returns the member selected by BrokerIndex. The order and
-// spelling of membership are authoritative; this function never sorts,
-// deduplicates, trims, or case-folds them.
-func BrokerForHash(digest BusinessHash, membership []string) (string, error) {
-	index, err := BrokerIndex(digest, membership)
-	if err != nil {
-		return "", err
-	}
-	return membership[index], nil
-}
-
-func addModulo(left, right, modulus uint64) uint64 {
-	// left and right are already less than modulus. This computes their sum
-	// modulo modulus without overflowing.
-	if left >= modulus-right {
-		return left - (modulus - right)
-	}
-	return left + right
+	return selected, nil
 }

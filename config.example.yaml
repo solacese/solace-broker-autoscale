@@ -3,7 +3,7 @@ namespace: swlb
 
 control:
   broker_id: broker-0
-  smf_endpoint: tcps://broker-0.example:55443
+  amqp_endpoint: amqps://broker-0.example:5671
   semp_endpoint: https://broker-0.example:943
   message_vpn: workload-control
   principal: workload-controller-1
@@ -14,27 +14,26 @@ control:
   # Each principal is provisioned with publish ACLs for only its exact
   # participant-scoped registration/ack/telemetry topics.
   participant_credentials:
-    - participant: flight-publisher-1
-      principal: flight-publisher-1
-      username_env: SOLACE_FLIGHT_PUBLISHER_CONTROL_USERNAME
-      password_env: SOLACE_FLIGHT_PUBLISHER_CONTROL_PASSWORD
-    - participant: baggage-publisher-1
-      principal: baggage-publisher-1
-      username_env: SOLACE_BAGGAGE_PUBLISHER_CONTROL_USERNAME
-      password_env: SOLACE_BAGGAGE_PUBLISHER_CONTROL_PASSWORD
-    - participant: flight-subscriber-1
-      principal: flight-subscriber-1
-      username_env: SOLACE_FLIGHT_SUBSCRIBER_CONTROL_USERNAME
-      password_env: SOLACE_FLIGHT_SUBSCRIBER_CONTROL_PASSWORD
-    - participant: baggage-subscriber-1
-      principal: baggage-subscriber-1
-      username_env: SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_USERNAME
-      password_env: SOLACE_BAGGAGE_SUBSCRIBER_CONTROL_PASSWORD
+    - participant: events-a-publisher-1
+      principal: events-a-publisher-1
+      username_env: SOLACE_EVENTS_A_PUBLISHER_CONTROL_USERNAME
+      password_env: SOLACE_EVENTS_A_PUBLISHER_CONTROL_PASSWORD
+    - participant: events-b-publisher-1
+      principal: events-b-publisher-1
+      username_env: SOLACE_EVENTS_B_PUBLISHER_CONTROL_USERNAME
+      password_env: SOLACE_EVENTS_B_PUBLISHER_CONTROL_PASSWORD
+    - participant: events-a-subscriber-1
+      principal: events-a-subscriber-1
+      username_env: SOLACE_EVENTS_A_SUBSCRIBER_CONTROL_USERNAME
+      password_env: SOLACE_EVENTS_A_SUBSCRIBER_CONTROL_PASSWORD
+    - participant: events-b-subscriber-1
+      principal: events-b-subscriber-1
+      username_env: SOLACE_EVENTS_B_SUBSCRIBER_CONTROL_USERNAME
+      password_env: SOLACE_EVENTS_B_SUBSCRIBER_CONTROL_PASSWORD
     - participant: workload-observer-1
       principal: workload-observer-1
       username_env: SOLACE_WORKLOAD_OBSERVER_CONTROL_USERNAME
       password_env: SOLACE_WORKLOAD_OBSERVER_CONTROL_PASSWORD
-  membership_lvq_prefix: swlb.membership
   control_topic_prefix: swlb/control/v1
   resources:
     membership_topic_prefix: swlb/control/v1/membership
@@ -50,40 +49,40 @@ control:
 
 data_brokers:
   - id: broker-a
-    smf_endpoint: tcps://broker-a.example:55443
+    amqp_endpoint: amqps://broker-a.example:5671
     semp_endpoint: https://broker-a.example:943
-    message_vpn: airline-events
+    message_vpn: generic-events
     username_env: SOLACE_DATA_USERNAME
     password_env: SOLACE_DATA_PASSWORD
     semp_username_env: SOLACE_DATA_SEMP_USERNAME
     semp_password_env: SOLACE_DATA_SEMP_PASSWORD
     service_class: enterprise-5k-standalone
     broker_version: "10.25.0"
-    eligible_groups: [flight-operations, baggage-tracking]
+    eligible_groups: [events-a, events-b]
     labels: {region: us-central}
   - id: broker-b
-    smf_endpoint: tcps://broker-b.example:55443
+    amqp_endpoint: amqps://broker-b.example:5671
     semp_endpoint: https://broker-b.example:943
-    message_vpn: airline-events
+    message_vpn: generic-events
     username_env: SOLACE_DATA_USERNAME
     password_env: SOLACE_DATA_PASSWORD
     semp_username_env: SOLACE_DATA_SEMP_USERNAME
     semp_password_env: SOLACE_DATA_SEMP_PASSWORD
     service_class: enterprise-5k-standalone
     broker_version: "10.25.0"
-    eligible_groups: [flight-operations, baggage-tracking]
+    eligible_groups: [events-a, events-b]
     labels: {region: us-central}
   - id: broker-c
-    smf_endpoint: tcps://broker-c.example:55443
+    amqp_endpoint: amqps://broker-c.example:5671
     semp_endpoint: https://broker-c.example:943
-    message_vpn: airline-events
+    message_vpn: generic-events
     username_env: SOLACE_DATA_USERNAME
     password_env: SOLACE_DATA_PASSWORD
     semp_username_env: SOLACE_DATA_SEMP_USERNAME
     semp_password_env: SOLACE_DATA_SEMP_PASSWORD
     service_class: enterprise-5k-standalone
     broker_version: "10.25.0"
-    eligible_groups: [flight-operations, baggage-tracking]
+    eligible_groups: [events-a, events-b]
     labels: {region: us-central}
 
 # Operator-supplied measurements for the exact service class and broker build
@@ -102,8 +101,8 @@ capacity_profiles:
 runtime:
   mode: production
   controller: workload-controller-1
-  publishers: [flight-publisher-1, baggage-publisher-1]
-  subscribers: [flight-subscriber-1, baggage-subscriber-1]
+  publishers: [events-a-publisher-1, events-b-publisher-1]
+  subscribers: [events-a-subscriber-1, events-b-subscriber-1]
   observers: [workload-observer-1]
 
 publisher:
@@ -119,17 +118,18 @@ staleness:
   telemetry_max_age: 15s
 
 scaling_groups:
-  - id: flight-operations
-    hash_contract: flight-operations-v1
-    customer_library_version: airline-routing-v1
+  - id: events-a
+    hash_contract: events-a-v1
+    routing_algorithm: swlb-rendezvous-v1
+    customer_library_version: entity-routing-v1
     ordered_broker_ids: [broker-a, broker-b, broker-c]
     queue:
-      name_prefix: swlb.flight-operations
-      type: partitioned
-      access: non-exclusive
-      partitions: 12
+      name_prefix: swlb.events-a
+      # AMQP v1 uses one serialized consumer on a durable exclusive queue.
+      type: exclusive
+      access: exclusive
       max_redeliveries: 5
-      dead_message_queue: swlb.flight-operations.dmq
+      dead_message_queue: swlb.events-a.dmq
     policy:
       minimum_brokers: 2
       maximum_brokers: 3
@@ -145,23 +145,24 @@ scaling_groups:
       telemetry_max_age: 15s
       drain_grace: 30s
       transition_timeout: 15m
-    required_publishers: [flight-publisher-1]
+    required_publishers: [events-a-publisher-1]
     consumer_sets:
       # Workers listed in one set compete on its queue. Add another set to fan
       # out an independent copy through separate broker/epoch queues.
       - id: operations
-        subscribers: [flight-subscriber-1]
+        subscribers: [events-a-subscriber-1]
 
-  - id: baggage-tracking
-    hash_contract: baggage-journey-v1
-    customer_library_version: airline-routing-v1
+  - id: events-b
+    hash_contract: entity-affinity-v1
+    routing_algorithm: swlb-rendezvous-v1
+    customer_library_version: entity-routing-v1
     ordered_broker_ids: [broker-a, broker-b, broker-c]
     queue:
-      name_prefix: swlb.baggage-tracking
+      name_prefix: swlb.events-b
       type: exclusive
       access: exclusive
       max_redeliveries: 5
-      dead_message_queue: swlb.baggage-tracking.dmq
+      dead_message_queue: swlb.events-b.dmq
     policy:
       minimum_brokers: 2
       maximum_brokers: 3
@@ -177,10 +178,10 @@ scaling_groups:
       telemetry_max_age: 15s
       drain_grace: 30s
       transition_timeout: 15m
-    required_publishers: [baggage-publisher-1]
+    required_publishers: [events-b-publisher-1]
     consumer_sets:
       - id: tracking
-        subscribers: [baggage-subscriber-1]
+        subscribers: [events-b-subscriber-1]
 
 persistence:
   controller_state: ./var/controller-state.json

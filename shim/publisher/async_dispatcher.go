@@ -21,7 +21,7 @@ const (
 // PublishAttempt uniquely identifies one durable submission attempt. Adapters
 // must carry it through their native correlation object and return it unchanged
 // in the terminal result. Number is the outbox attempt count after the durable
-// in-flight transition.
+// in-progress transition.
 type PublishAttempt struct {
 	EventID string
 	Number  uint64
@@ -85,11 +85,11 @@ func (f TerminalAttemptObserverFunc) ObserveTerminalAttempt(observation Terminal
 // terminal results are coalesced into bbolt transactions. AttemptObserver is
 // optional and adds no per-attempt clock reads when absent.
 type AsyncDispatcherConfig struct {
-	// MaxInFlight bounds unresolved submissions across all brokers. When
-	// MaxInFlightPerBroker is set, it additionally prevents a single broker from
+	// MaxInEventsA bounds unresolved submissions across all brokers. When
+	// MaxInEventsAPerBroker is set, it additionally prevents a single broker from
 	// consuming capacity provisioned on independent native publishers.
-	MaxInFlight           int
-	MaxInFlightPerBroker  int
+	MaxInEventsA          int
+	MaxInEventsAPerBroker int
 	AckTimeout            time.Duration
 	CompletionBatchSize   int
 	CompletionFlushPeriod time.Duration
@@ -98,22 +98,22 @@ type AsyncDispatcherConfig struct {
 
 // DispatcherStatus is safe to use as publisher transition-ACK evidence.
 // Quiescent becomes true only after PAUSED is installed and no native attempt,
-// durable in-flight record, or ACK-uncertain durable record remains.
+// durable in-progress record, or ACK-uncertain durable record remains.
 type DispatcherStatus struct {
-	Group           string
-	Phase           control.Phase
-	Epoch           uint64
-	TransitionID    string
-	Paused          bool
-	Quiescent       bool
-	InFlight        int
-	NativeInFlight  int
-	DurableInFlight int
-	AckUncertain    int
-	Acknowledged    uint64
-	Rejected        uint64
-	Uncertain       uint64
-	LastError       error
+	Group            string
+	Phase            control.Phase
+	Epoch            uint64
+	TransitionID     string
+	Paused           bool
+	Quiescent        bool
+	InEventsA        int
+	NativeInEventsA  int
+	DurableInEventsA int
+	AckUncertain     int
+	Acknowledged     uint64
+	Rejected         uint64
+	Uncertain        uint64
+	LastError        error
 }
 
 type dispatcherCounters struct {
@@ -169,11 +169,11 @@ type AsyncDispatcher struct {
 // remain available, but callers must not mix synchronous and asynchronous
 // Dispatch calls for the same outbox.
 func NewAsyncDispatcher(publisher *Publisher, broker AsyncBrokerPublisher, config AsyncDispatcherConfig) (*AsyncDispatcher, error) {
-	if publisher == nil || broker == nil || config.MaxInFlight <= 0 || config.AckTimeout <= 0 {
-		return nil, fmt.Errorf("%w: publisher, async broker, positive max in-flight, and ACK timeout are required", ErrInvalidConfig)
+	if publisher == nil || broker == nil || config.MaxInEventsA <= 0 || config.AckTimeout <= 0 {
+		return nil, fmt.Errorf("%w: publisher, async broker, positive max in-progress, and ACK timeout are required", ErrInvalidConfig)
 	}
-	if config.MaxInFlightPerBroker < 0 || config.MaxInFlightPerBroker > config.MaxInFlight {
-		return nil, fmt.Errorf("%w: per-broker max in-flight must be between zero and the global maximum", ErrInvalidConfig)
+	if config.MaxInEventsAPerBroker < 0 || config.MaxInEventsAPerBroker > config.MaxInEventsA {
+		return nil, fmt.Errorf("%w: per-broker max in-progress must be between zero and the global maximum", ErrInvalidConfig)
 	}
 	if config.CompletionBatchSize < 0 || config.CompletionFlushPeriod < 0 {
 		return nil, fmt.Errorf("%w: completion batch settings must not be negative", ErrInvalidConfig)
@@ -189,11 +189,11 @@ func NewAsyncDispatcher(publisher *Publisher, broker AsyncBrokerPublisher, confi
 		broker:           broker,
 		completionStore:  publisher.outbox,
 		config:           config,
-		pending:          make(map[string]pendingAttempt, config.MaxInFlight),
+		pending:          make(map[string]pendingAttempt, config.MaxInEventsA),
 		counters:         make(map[string]*dispatcherCounters),
 		changed:          make(chan struct{}),
-		completions:      make(chan completedAttempt, config.MaxInFlight),
-		persistenceRetry: make(chan completedAttempt, config.MaxInFlight),
+		completions:      make(chan completedAttempt, config.MaxInEventsA),
+		persistenceRetry: make(chan completedAttempt, config.MaxInEventsA),
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
 	}
@@ -201,7 +201,7 @@ func NewAsyncDispatcher(publisher *Publisher, broker AsyncBrokerPublisher, confi
 	return d, nil
 }
 
-// Dispatch durably marks a batch in flight before making any native submission.
+// Dispatch durably marks a batch in eventsA before making any native submission.
 // Each admitted record is the sole pending head of its ordering lane, so native
 // admission may proceed concurrently even when several lanes target one broker.
 // The report covers admission and immediate known rejections; asynchronous
@@ -223,9 +223,9 @@ func (d *AsyncDispatcher) Dispatch(ctx context.Context, limit int) (DispatchRepo
 		d.mu.Unlock()
 		return report, ErrDispatcherClosed
 	}
-	available := d.config.MaxInFlight - len(d.pending)
+	available := d.config.MaxInEventsA - len(d.pending)
 	pendingByBroker := make(map[string]int)
-	if d.config.MaxInFlightPerBroker > 0 {
+	if d.config.MaxInEventsAPerBroker > 0 {
 		for _, pending := range d.pending {
 			pendingByBroker[pending.broker]++
 		}
@@ -246,7 +246,7 @@ func (d *AsyncDispatcher) Dispatch(ctx context.Context, limit int) (DispatchRepo
 
 	activeEpochs := make(map[string]uint64, len(d.publisher.membership))
 	var brokerSlots map[string]int
-	if d.config.MaxInFlightPerBroker > 0 {
+	if d.config.MaxInEventsAPerBroker > 0 {
 		brokerSlots = make(map[string]int)
 	}
 	for group, snapshot := range d.publisher.membership {
@@ -256,7 +256,7 @@ func (d *AsyncDispatcher) Dispatch(ctx context.Context, limit int) (DispatchRepo
 		activeEpochs[group] = snapshot.Epoch
 		if brokerSlots != nil {
 			for _, broker := range snapshot.CurrentMembership {
-				brokerSlots[broker] = max(0, d.config.MaxInFlightPerBroker-pendingByBroker[broker])
+				brokerSlots[broker] = max(0, d.config.MaxInEventsAPerBroker-pendingByBroker[broker])
 			}
 		}
 	}
@@ -269,7 +269,7 @@ func (d *AsyncDispatcher) Dispatch(ctx context.Context, limit int) (DispatchRepo
 	for i := range records {
 		ids[i] = records[i].EventID
 	}
-	if err := d.publisher.outbox.MarkInFlightBatch(ids); err != nil {
+	if err := d.publisher.outbox.MarkInEventsABatch(ids); err != nil {
 		return report, err
 	}
 
@@ -547,7 +547,7 @@ func (d *AsyncDispatcher) applyCompletions(batch []completedAttempt) []completed
 			}
 		}
 		// A non-applied result is stale or was already resolved by an operator.
-		// In either case it no longer represents a native in-flight attempt.
+		// In either case it no longer represents a native in-progress attempt.
 		delete(d.pending, completion.attempt.EventID)
 		changed = true
 	}
@@ -615,8 +615,8 @@ func (d *AsyncDispatcher) Status(group string) DispatcherStatus {
 			continue
 		}
 		switch record.State {
-		case outbox.StateInFlight:
-			status.DurableInFlight++
+		case outbox.StateInEventsA:
+			status.DurableInEventsA++
 		case outbox.StateAckUncertain:
 			status.AckUncertain++
 		}
@@ -624,7 +624,7 @@ func (d *AsyncDispatcher) Status(group string) DispatcherStatus {
 	d.mu.Lock()
 	for _, pending := range d.pending {
 		if pending.group == group {
-			status.NativeInFlight++
+			status.NativeInEventsA++
 		}
 	}
 	if counter := d.counters[group]; counter != nil {
@@ -634,8 +634,8 @@ func (d *AsyncDispatcher) Status(group string) DispatcherStatus {
 		status.LastError = counter.lastError
 	}
 	d.mu.Unlock()
-	status.InFlight = max(status.NativeInFlight, status.DurableInFlight)
-	status.Quiescent = status.Paused && status.NativeInFlight == 0 && status.DurableInFlight == 0 && status.AckUncertain == 0
+	status.InEventsA = max(status.NativeInEventsA, status.DurableInEventsA)
+	status.Quiescent = status.Paused && status.NativeInEventsA == 0 && status.DurableInEventsA == 0 && status.AckUncertain == 0
 	return status
 }
 
@@ -661,7 +661,7 @@ func (d *AsyncDispatcher) WaitQuiescent(ctx context.Context, group string) (Disp
 		case <-changed:
 		case <-poll.C:
 			// Membership changes occur on Publisher, so poll to observe PAUSED even
-			// when there was no in-flight completion to signal this dispatcher.
+			// when there was no in-progress completion to signal this dispatcher.
 		}
 	}
 }

@@ -88,7 +88,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if assemble == nil {
 		return errors.New("publisher: production assembler is required")
 	}
-	process, err := assemble(ctx, cfg, credentials, *participant, swlbruntime.AirlineCustomerLibrary{})
+	process, err := assemble(ctx, cfg, credentials, *participant, swlbruntime.EntityCustomerLibrary{})
 	if err != nil {
 		return fmt.Errorf("assemble publisher participant: %w", err)
 	}

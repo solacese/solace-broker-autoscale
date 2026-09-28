@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -14,47 +13,43 @@ import (
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/controller"
+	"github.com/solacese/solace-workload-balancer/integration"
 	"github.com/solacese/solace-workload-balancer/policy"
 	"github.com/solacese/solace-workload-balancer/semp"
 )
 
-const (
-	DefaultJCSMPBrowserJar = "tools/lvq-browser/target/lvq-browser-1.0.0-SNAPSHOT-all.jar"
-	JCSMPBrowserJarEnv     = "SWLB_JCSMP_BROWSER_JAR"
-	JCSMPJavaEnv           = "SWLB_JAVA_EXECUTABLE"
-	JCSMPTrustStoreEnv     = "SWLB_JAVA_TRUST_STORE"
-)
-
 // ControllerAssembler exposes construction seams for focused tests. Production
-// uses native Solace connections, the JCSMP queue browser, and SEMP clients.
+// uses AMQP 1.0 for Broker 0 control and SEMP for managed data resources.
 type NativeControlPublisher interface {
 	broker0.NativePersistentPublisher
 	Close() error
 }
 
 type ControllerAssembler struct {
-	Connect       func(context.Context, config.Config, Credentials) (*SMFConnection, error)
-	NewPublisher  func(*SMFConnection, time.Duration) (NativeControlPublisher, error)
-	NewBrowser    func(config.Config, Credentials, broker0.MembershipQueueResolver) (broker0.Browser, error)
-	NewSEMPClient func(config.DataBroker, BrokerCredentials) (SEMPQueueClient, error)
-	BindInbox     func(*SMFConnection, broker0.ParticipantQueue, time.Duration) (broker0.DurableReceiver, error)
-	NewPolicy     func(config.Config, *controller.Controller, *MembershipCatalog, map[string]SEMPQueueClient, *CommandPublisher) (PolicyCycle, error)
+	Connect              func(context.Context, config.Config, Credentials) (*AMQPControlConnection, error)
+	NewPublisher         func(*AMQPControlConnection, time.Duration) (NativeControlPublisher, error)
+	NewSEMPClient        func(config.DataBroker, BrokerCredentials) (SEMPQueueClient, error)
+	BindInbox            func(*AMQPControlConnection, broker0.ParticipantQueue, time.Duration) (broker0.DurableReceiver, error)
+	BindSnapshotRequests func(context.Context, *AMQPControlConnection, broker0.ParticipantQueue) (broker0.SnapshotRequestReceiver, error)
+	NewPolicy            func(config.Config, *controller.Controller, *MembershipCatalog, map[string]SEMPQueueClient, *CommandPublisher) (PolicyCycle, error)
 }
 
 func DefaultControllerAssembler() ControllerAssembler {
 	return ControllerAssembler{
-		Connect: func(ctx context.Context, cfg config.Config, credentials Credentials) (*SMFConnection, error) {
-			return ConnectBroker0(ctx, cfg.Control.SMFEndpoint, cfg.Control.MessageVPN, credentials.Control.SMFUsername, credentials.Control.SMFPassword, cfg.Runtime.Controller)
+		Connect: func(ctx context.Context, cfg config.Config, credentials Credentials) (*AMQPControlConnection, error) {
+			return ConnectAMQPBroker0(ctx, cfg.Control.AMQPEndpoint, credentials.Control.SMFUsername, credentials.Control.SMFPassword, cfg.Runtime.Controller)
 		},
-		NewPublisher: func(connection *SMFConnection, timeout time.Duration) (NativeControlPublisher, error) {
-			return NewNativePublisher(connection.Service, timeout)
+		NewPublisher: func(connection *AMQPControlConnection, _ time.Duration) (NativeControlPublisher, error) {
+			return NewAMQPNativePublisher(connection)
 		},
-		NewBrowser: newProductionBrowser,
 		NewSEMPClient: func(broker config.DataBroker, credentials BrokerCredentials) (SEMPQueueClient, error) {
 			return semp.NewClient(semp.ClientOptions{BaseURL: broker.SEMPEndpoint, Username: credentials.SEMPUsername, Password: credentials.SEMPPassword})
 		},
-		BindInbox: func(connection *SMFConnection, binding broker0.ParticipantQueue, poll time.Duration) (broker0.DurableReceiver, error) {
-			return BindControllerInbox(connection.Service, binding, poll)
+		BindInbox: func(connection *AMQPControlConnection, binding broker0.ParticipantQueue, _ time.Duration) (broker0.DurableReceiver, error) {
+			return (AMQPDurableReceiverFactory{Session: connection.Session}).BindDurable(context.Background(), binding)
+		},
+		BindSnapshotRequests: func(ctx context.Context, connection *AMQPControlConnection, binding broker0.ParticipantQueue) (broker0.SnapshotRequestReceiver, error) {
+			return BindAMQPSnapshotRequests(ctx, connection.Session, binding)
 		},
 		NewPolicy: newProductionPolicy,
 	}
@@ -69,7 +64,7 @@ func AssembleController(ctx context.Context, cfg config.Config, credentials Cred
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if assembler.Connect == nil || assembler.NewPublisher == nil || assembler.NewBrowser == nil || assembler.NewSEMPClient == nil || assembler.BindInbox == nil || assembler.NewPolicy == nil {
+	if assembler.Connect == nil || assembler.NewPublisher == nil || assembler.NewSEMPClient == nil || assembler.BindInbox == nil || assembler.BindSnapshotRequests == nil || assembler.NewPolicy == nil {
 		return nil, errors.New("runtime: controller assembler dependencies are required")
 	}
 
@@ -170,20 +165,7 @@ func AssembleController(ctx context.Context, cfg config.Config, credentials Cred
 	}
 	commandPublisher.RestoreRequirements(coordinator.Snapshot())
 
-	membershipResolver := broker0.MembershipQueueResolverFunc(func(_ context.Context, group string) (string, error) {
-		if _, ok := configuredGroup(cfg.Groups, group); !ok {
-			return "", fmt.Errorf("runtime: unknown membership group %q", group)
-		}
-		return names.MembershipQueue(group)
-	})
-	browser, err := assembler.NewBrowser(cfg, credentials, membershipResolver)
-	if err != nil {
-		return nil, err
-	}
-	if closer, ok := browser.(interface{ Close() error }); ok {
-		owners.Closers = append(owners.Closers, closer)
-	}
-	if err := BootstrapMembership(ctx, cfg, coordinator.Snapshot(), browser, fanout, catalog, managedResources); err != nil {
+	if err := BootstrapMembership(ctx, cfg, coordinator.Snapshot(), fanout, catalog, managedResources, coordinator); err != nil {
 		return nil, err
 	}
 
@@ -191,7 +173,7 @@ func AssembleController(ctx context.Context, cfg config.Config, credentials Cred
 	if err != nil {
 		return nil, err
 	}
-	components := make([]Component, 0, len(bindings))
+	components := make([]Component, 0, len(bindings)+len(cfg.Groups)*4)
 	for _, binding := range bindings {
 		receiver, bindErr := assembler.BindInbox(connection, binding, 500*time.Millisecond)
 		if bindErr != nil {
@@ -204,6 +186,45 @@ func AssembleController(ctx context.Context, cfg config.Config, credentials Cred
 		}
 		owners.Closers = append(owners.Closers, inbox)
 		components = append(components, inbox)
+	}
+
+	for _, group := range cfg.Groups {
+		for _, scoped := range []struct {
+			role        control.ParticipantRole
+			participant string
+		}{
+			{control.RolePublisher, first(group.RequiredPublishers)},
+			{control.RoleSubscriber, first(group.SubscriberIdentities())},
+		} {
+			if scoped.participant == "" {
+				continue
+			}
+			queue, nameErr := names.SnapshotRequestQueue(group.ID, scoped.role, scoped.participant)
+			if nameErr != nil {
+				return nil, nameErr
+			}
+			topic, nameErr := names.SnapshotRequestTopic(group.ID, scoped.role, scoped.participant)
+			if nameErr != nil {
+				return nil, nameErr
+			}
+			receiver, bindErr := assembler.BindSnapshotRequests(ctx, connection, broker0.ParticipantQueue{Participant: scoped.participant, Principal: scoped.participant, Role: scoped.role, Group: group.ID, Kind: broker0.KindSnapshotRequest, Queue: queue, Topic: topic})
+			if bindErr != nil {
+				return nil, bindErr
+			}
+			server := &broker0.SnapshotRequestServer{Receiver: receiver, Publisher: integration.AMQPSnapshotResponsePublisher{Session: connection.Session}, Source: coordinator,
+				Authorize: func(request control.SnapshotRequest, principal string) error {
+					if request.Namespace != cfg.Namespace || request.Participant != principal {
+						return errors.New("runtime: unauthorized snapshot request")
+					}
+					return nil
+				},
+				Replies: broker0.SnapshotReplyResolverFunc(func(request control.SnapshotRequest) (string, error) {
+					return names.SnapshotReplyQueue(request.Group, request.Role, request.Participant)
+				}),
+			}
+			owners.Closers = append(owners.Closers, server)
+			components = append(components, server)
+		}
 	}
 
 	policyCycle, err := assembler.NewPolicy(cfg, coordinator, catalog, resourceClients, commandPublisher)
@@ -235,7 +256,7 @@ func AssembleController(ctx context.Context, cfg config.Config, credentials Cred
 	}
 	// ControllerProcess now owns its components. Keep only the browser, publisher,
 	// and connection in the outer resource group so receivers close exactly once.
-	owners.Closers = owners.Closers[:len(owners.Closers)-len(bindings)]
+	owners.Closers = owners.Closers[:2]
 	return &OwnedProcess{Process: controllerProcess, Close: owners}, nil
 }
 
@@ -460,20 +481,6 @@ func boundedPolicyInterval(groups []config.ScalingGroup) time.Duration {
 	return interval
 }
 
-func newProductionBrowser(cfg config.Config, credentials Credentials, resolver broker0.MembershipQueueResolver) (broker0.Browser, error) {
-	jar := os.Getenv(JCSMPBrowserJarEnv)
-	if jar == "" {
-		jar = DefaultJCSMPBrowserJar
-	}
-	java := os.Getenv(JCSMPJavaEnv)
-	trustStore := os.Getenv(JCSMPTrustStoreEnv)
-	return broker0.NewJCSMPBrowser(resolver, broker0.JCSMPBrowserOptions{
-		JavaExecutable: java, JarPath: jar, Namespace: cfg.Namespace, Host: cfg.Control.SMFEndpoint,
-		VPN: cfg.Control.MessageVPN, Username: credentials.Control.SMFUsername, Password: credentials.Control.SMFPassword,
-		TrustStorePath: trustStore, Timeout: cfg.Staleness.TelemetryMaxAge.Duration,
-	})
-}
-
 func queueClients(targets map[string]BrokerTarget) map[string]SEMPQueueClient {
 	result := make(map[string]SEMPQueueClient, len(targets))
 	for id, target := range targets {
@@ -528,4 +535,11 @@ func (h *registrationAwareController) Register(registration control.Registration
 		return controller.ErrUnknownParticipant
 	}
 	return nil
+}
+
+func first(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }

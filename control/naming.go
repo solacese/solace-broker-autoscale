@@ -46,6 +46,18 @@ func (n ManagedNames) UpdateTopic(group string) (string, error) {
 	return n.topic(group, "updates")
 }
 
+func (n ManagedNames) SnapshotRequestTopic(group string, role ParticipantRole, participant string) (string, error) {
+	return n.participantTopic(group, "snapshot-requests", role, participant)
+}
+
+func (n ManagedNames) SnapshotRequestQueue(group string, role ParticipantRole, participant string) (string, error) {
+	return n.participantQueue(group, "snapshot-requests", role, participant)
+}
+
+func (n ManagedNames) SnapshotReplyQueue(group string, role ParticipantRole, participant string) (string, error) {
+	return n.participantQueue(group, "snapshot-replies", role, participant)
+}
+
 // UpdateQueue is a durable live-update queue dedicated to one participant.
 // Updates remain hints; participants reconcile them against MembershipQueue.
 func (n ManagedNames) UpdateQueue(group, participant string) (string, error) {

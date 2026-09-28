@@ -1,25 +1,28 @@
 package routing
 
-import "testing"
+import (
+	"testing"
 
-func BenchmarkFlightOperationsHash(b *testing.B) {
+	"github.com/solacese/solace-workload-balancer/customer"
+)
+
+func BenchmarkEntityHash(b *testing.B) {
 	for b.Loop() {
-		_, err := FlightOperationsHash("UA", "123", "2026-09-25", "ORD-LAX")
-		if err != nil {
+		if _, err := customer.EntityHash("events-a", "entity-001"); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
 func BenchmarkBrokerForHash(b *testing.B) {
-	digest, err := FlightOperationsHash("UA", "123", "2026-09-25", "ORD-LAX")
+	digest, err := customer.EntityHash("events-a", "entity-001")
 	if err != nil {
 		b.Fatal(err)
 	}
 	membership := []string{"broker-a", "broker-b", "broker-c"}
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := BrokerForHash(digest, membership); err != nil {
+		if _, err := RendezvousBroker(shaPolicy{}, "benchmark", digest, membership); err != nil {
 			b.Fatal(err)
 		}
 	}

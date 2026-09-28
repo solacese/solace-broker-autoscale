@@ -44,7 +44,7 @@ func TestValidateOnlySkipsCredentialsAndAssembly(t *testing.T) {
 	lookedUp := false
 	assembled := false
 	var stdout bytes.Buffer
-	err := run(context.Background(), []string{"-config", path, "-participant", "flight-subscriber-1", "-validate-only"}, strings.NewReader(""), &stdout, &bytes.Buffer{}, func(string) (string, bool) {
+	err := run(context.Background(), []string{"-config", path, "-participant", "events-a-subscriber-1", "-validate-only"}, strings.NewReader(""), &stdout, &bytes.Buffer{}, func(string) (string, bool) {
 		lookedUp = true
 		return "", false
 	}, func(context.Context, config.Config, swlbruntime.Credentials, string, customer.CustomerLibrary, shimSubscriber.Handler) (process, error) {
@@ -64,7 +64,7 @@ func TestValidateOnlySkipsCredentialsAndAssembly(t *testing.T) {
 
 func TestSubscriberRejectsPublisherIdentity(t *testing.T) {
 	path := writeSubscriberConfig(t)
-	err := run(context.Background(), []string{"-config", path, "-participant", "flight-publisher-1", "-validate-only"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, nil, nil)
+	err := run(context.Background(), []string{"-config", path, "-participant", "events-a-publisher-1", "-validate-only"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "not declared as subscriber") {
 		t.Fatalf("error = %v", err)
 	}

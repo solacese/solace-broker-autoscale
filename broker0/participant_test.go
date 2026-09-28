@@ -14,7 +14,7 @@ import (
 func TestCommandHandlerPublishesRecordsThenAcknowledges(t *testing.T) {
 	issuedAt := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	command := control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "command-1", Namespace: "swlb", Group: "flight-operations",
+		Version: control.ProtocolVersion, MessageID: "command-1", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition-1", Epoch: 2, Phase: control.PhasePaused, Participant: "publisher-1",
 		Role: control.RolePublisher, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Minute),
 	}
@@ -38,7 +38,7 @@ func TestCommandHandlerPublishesRecordsThenAcknowledges(t *testing.T) {
 		return nil
 	})
 	delivery.onAck = func() { mu.Lock(); order = append(order, "ack"); mu.Unlock() }
-	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"flight-operations"}, operations, executor, publisher)
+	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"events-a"}, operations, executor, publisher)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,12 +60,12 @@ func TestCommandHandlerPublishesRecordsThenAcknowledges(t *testing.T) {
 func TestCommandHandlerFailureLeavesDeliveryUnacknowledged(t *testing.T) {
 	issuedAt := time.Now().UTC()
 	command := control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "command-2", Namespace: "swlb", Group: "flight-operations",
+		Version: control.ProtocolVersion, MessageID: "command-2", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition-2", Epoch: 2, Phase: control.PhaseActive, Participant: "subscriber-1",
 		Role: control.RoleSubscriber, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Minute),
 	}
 	delivery := commandDelivery(t, command)
-	handler, err := NewCommandHandler("subscriber-1", control.RoleSubscriber, "swlb", []string{"flight-operations"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { return errors.New("publish failed") }))
+	handler, err := NewCommandHandler("subscriber-1", control.RoleSubscriber, "swlb", []string{"events-a"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { return errors.New("publish failed") }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestCommandHandlerFailureLeavesDeliveryUnacknowledged(t *testing.T) {
 func TestCommandInboxRetriesTransientCommandWithoutRedelivery(t *testing.T) {
 	issuedAt := time.Now().UTC()
 	command := control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "command-retry", Namespace: "swlb", Group: "flight-operations",
+		Version: control.ProtocolVersion, MessageID: "command-retry", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition-retry", Epoch: 2, Phase: control.PhaseActive, Participant: "publisher-1",
 		Role: control.RolePublisher, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Minute),
 	}
@@ -90,7 +90,7 @@ func TestCommandInboxRetriesTransientCommandWithoutRedelivery(t *testing.T) {
 	delivery.onAck = func() { close(acked) }
 	receiver := &singleParticipantReceiver{delivery: delivery}
 	attempts := 0
-	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"flight-operations"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error {
+	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"events-a"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error {
 		attempts++
 		if attempts == 1 {
 			return errors.New("snapshot not ready")
@@ -125,14 +125,14 @@ func TestCommandInboxRejectsMalformedDeliveryAndContinues(t *testing.T) {
 	malformed := &fakeParticipantDelivery{kind: KindCommand, operation: "bad", payload: []byte(`{"unknown":true}`)}
 	issuedAt := time.Now().UTC()
 	valid := commandDelivery(t, control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "good", Namespace: "swlb", Group: "flight-operations",
+		Version: control.ProtocolVersion, MessageID: "good", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition", Epoch: 2, Phase: control.PhaseActive, Participant: "publisher-1",
 		Role: control.RolePublisher, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Minute),
 	})
 	acked := make(chan struct{})
 	valid.onAck = func() { close(acked) }
 	receiver := &sequenceParticipantReceiver{deliveries: []Delivery{malformed, valid}}
-	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"flight-operations"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { return nil }))
+	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"events-a"}, &fakeParticipantOperations{}, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { return nil }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,14 +159,14 @@ func TestCommandInboxRejectsMalformedDeliveryAndContinues(t *testing.T) {
 func TestCommandHandlerReplayOnlyAcknowledges(t *testing.T) {
 	issuedAt := time.Now().UTC()
 	command := control.CommandEnvelope{
-		Version: control.ProtocolVersion, MessageID: "command-3", Namespace: "swlb", Group: "flight-operations",
+		Version: control.ProtocolVersion, MessageID: "command-3", Namespace: "swlb", Group: "events-a",
 		TransitionID: "transition-3", Epoch: 2, Phase: control.PhaseActive, Participant: "publisher-1",
 		Role: control.RolePublisher, IssuedAt: issuedAt, Deadline: issuedAt.Add(time.Minute),
 	}
 	delivery := commandDelivery(t, command)
 	operations := &fakeParticipantOperations{completed: true}
 	called := false
-	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"flight-operations"}, operations, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { called = true; return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { called = true; return nil }))
+	handler, err := NewCommandHandler("publisher-1", control.RolePublisher, "swlb", []string{"events-a"}, operations, commandExecutorFunc(func(context.Context, control.CommandEnvelope) error { called = true; return nil }), acknowledgementPublisherFunc(func(context.Context, control.AcknowledgementEnvelope) error { called = true; return nil }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,17 +185,17 @@ func TestDurableUpdateSubscriberBindsExactQueueAndDefersAck(t *testing.T) {
 	receiver.deliveries <- delivery
 	factory := &fakeParticipantReceiverFactory{receiver: receiver}
 	subscriber := DurableUpdateSubscriber{Factory: factory, Resolver: UpdateQueueResolverFunc(func(_ context.Context, group, participant string) (string, error) {
-		if group != "flight-operations" || participant != "publisher-1" {
+		if group != "events-a" || participant != "publisher-1" {
 			t.Fatalf("resolver scope = %q, %q", group, participant)
 		}
-		return "swlb.membership.publisher-1.flight-operations", nil
+		return "swlb.membership.publisher-1.eventsA", nil
 	})}
-	subscription, err := subscriber.Subscribe(context.Background(), "flight-operations", "publisher-1")
+	subscription, err := subscriber.Subscribe(context.Background(), "events-a", "publisher-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer subscription.Close()
-	if factory.binding.Queue != "swlb.membership.publisher-1.flight-operations" {
+	if factory.binding.Queue != "swlb.membership.publisher-1.eventsA" {
 		t.Fatalf("queue = %q", factory.binding.Queue)
 	}
 	select {

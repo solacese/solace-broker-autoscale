@@ -19,8 +19,8 @@ import (
 
 func TestRunPublisherPreservesPayloadAndReturnsDurableReceipt(t *testing.T) {
 	payload := []byte{0, 1, 2, 255}
-	input := `{"event_id":"event-1","topic":"airline/test","headers":{"scaling-group":"flight-operations"},"payload_base64":"` + base64.StdEncoding.EncodeToString(payload) + `"}` + "\n"
-	fake := &fakePublisher{receipt: shimPublisher.Receipt{EventID: "event-1", State: outbox.StateReady, Group: "flight-operations", Hash: strings.Repeat("a", 64), Epoch: 2, Broker: "broker-a"}}
+	input := `{"event_id":"event-1","topic":"generic/test","headers":{"scaling-group":"events-a"},"payload_base64":"` + base64.StdEncoding.EncodeToString(payload) + `"}` + "\n"
+	fake := &fakePublisher{receipt: shimPublisher.Receipt{EventID: "event-1", State: outbox.StateReady, Group: "events-a", Hash: strings.Repeat("a", 64), Epoch: 2, Broker: "broker-a"}}
 	var output bytes.Buffer
 	if err := RunPublisher(context.Background(), strings.NewReader(input), &output, fake); err != nil {
 		t.Fatal(err)

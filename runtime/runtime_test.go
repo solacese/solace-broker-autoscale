@@ -207,8 +207,9 @@ func TestControllerProcessRetries(t *testing.T) {
 func TestControllerProcessAutomaticallyRollsBackExpiredExactPrecommitState(t *testing.T) {
 	spec := controller.TransitionSpec{
 		ID: "move", Group: "a", Revision: 2, FromEpoch: 1, ToEpoch: 2,
-		Current: []controller.Broker{{ID: "source", Destination: "topic"}}, Proposed: []controller.Broker{{ID: "target", Destination: "topic"}},
-		HashContract: "a-v1", Algorithm: "sha256-unsigned-big-endian-modulo",
+		Current: []controller.Broker{{ID: "source", Destination: "topic"}}, CurrentBrokers: []control.BrokerDescriptor{{ID: "source", Endpoint: "amqps://source.invalid:5671"}}, ProposedBrokers: []control.BrokerDescriptor{{ID: "target", Endpoint: "amqps://target.invalid:5671"}}, Proposed: []controller.Broker{{ID: "target", Destination: "topic"}},
+		HashContract: "a-v1", Algorithm: "swlb-rendezvous-v1",
+		CurrentResources: []control.EpochResourceIdentity{{Epoch: 1, BrokerID: "source", ConsumerSet: "default", QueueName: "q.source", IngressTopic: "topic/>"}}, ProposedResources: []control.EpochResourceIdentity{{Epoch: 2, BrokerID: "target", ConsumerSet: "default", QueueName: "q.target", IngressTopic: "topic/>"}},
 		Queue: control.QueueInfo{Name: "q", Durable: true}, Destination: control.DestinationInfo{Kind: control.DestinationTopic, Name: "topic"},
 	}
 	state := &controller.GroupState{Spec: spec, Phase: controller.PhasePrepare}

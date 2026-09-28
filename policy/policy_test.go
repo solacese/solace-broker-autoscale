@@ -58,16 +58,16 @@ func TestProfileCatalogRejectsDuplicateAndInvalidProfiles(t *testing.T) {
 func TestAggregateSharedBrokerPressureAffectsEveryMemberGroup(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight", "baggage")}
+	inventory := []Broker{testBroker("broker-a", "events-a", "events-b")}
 	groups := []GroupState{
-		testGroup("baggage", []string{"broker-a"}),
-		testGroup("flight", []string{"broker-a"}),
+		testGroup("events-b", []string{"broker-a"}),
+		testGroup("events-a", []string{"broker-a"}),
 	}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase, 10)},
 		[]GroupSample{
-			testGroupSample("flight", "broker-a", testBase, 60, 0, 0),
-			testGroupSample("baggage", "broker-a", testBase, 20, 0, 0),
+			testGroupSample("events-a", "broker-a", testBase, 60, 0, 0),
+			testGroupSample("events-b", "broker-a", testBase, 20, 0, 0),
 		})
 
 	got, err := Aggregate(testBase, snapshot, catalog, inventory, groups)
@@ -90,11 +90,11 @@ func TestAggregateSharedBrokerPressureAffectsEveryMemberGroup(t *testing.T) {
 func TestAggregateUsesWholeBrokerWhenLargerThanGroupSum(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	groups := []GroupState{testGroup("flight", []string{"broker-a"})}
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	groups := []GroupState{testGroup("events-a", []string{"broker-a"})}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase, 90)},
-		[]GroupSample{testGroupSample("flight", "broker-a", testBase, 10, 0, 0)})
+		[]GroupSample{testGroupSample("events-a", "broker-a", testBase, 10, 0, 0)})
 
 	got, err := Aggregate(testBase, snapshot, catalog, inventory, groups)
 	if err != nil {
@@ -111,11 +111,11 @@ func TestAggregateUsesWholeBrokerWhenLargerThanGroupSum(t *testing.T) {
 func TestAggregateDistinguishesDownstreamBacklog(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	groups := []GroupState{testGroup("flight", []string{"broker-a"})}
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	groups := []GroupState{testGroup("events-a", []string{"broker-a"})}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase, 10)},
-		[]GroupSample{testGroupSample("flight", "broker-a", testBase, 10, 500, 4)})
+		[]GroupSample{testGroupSample("events-a", "broker-a", testBase, 10, 500, 4)})
 
 	got, err := Aggregate(testBase, snapshot, catalog, inventory, groups)
 	if err != nil {
@@ -130,11 +130,11 @@ func TestAggregateDistinguishesDownstreamBacklog(t *testing.T) {
 func TestAggregateUnknownIsNotZero(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	groups := []GroupState{testGroup("flight", []string{"broker-a"})}
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	groups := []GroupState{testGroup("events-a", []string{"broker-a"})}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase, 10)},
-		[]GroupSample{testGroupSample("flight", "broker-a", testBase, 10, 0, 0)})
+		[]GroupSample{testGroupSample("events-a", "broker-a", testBase, 10, 0, 0)})
 	snapshot.Groups[0].Backlog.QueuedMessages = UnknownMetric()
 
 	got, err := Aggregate(testBase, snapshot, catalog, inventory, groups)
@@ -152,14 +152,14 @@ func TestAggregateUnknownIsNotZero(t *testing.T) {
 func TestAggregateMissingSharedGroupSampleMakesBrokerAndGroupsUnknown(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight", "baggage")}
+	inventory := []Broker{testBroker("broker-a", "events-a", "events-b")}
 	groups := []GroupState{
-		testGroup("flight", []string{"broker-a"}),
-		testGroup("baggage", []string{"broker-a"}),
+		testGroup("events-a", []string{"broker-a"}),
+		testGroup("events-b", []string{"broker-a"}),
 	}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase, 20)},
-		[]GroupSample{testGroupSample("flight", "broker-a", testBase, 20, 0, 0)})
+		[]GroupSample{testGroupSample("events-a", "broker-a", testBase, 20, 0, 0)})
 
 	got, err := Aggregate(testBase, snapshot, catalog, inventory, groups)
 	if err != nil {
@@ -178,8 +178,8 @@ func TestAggregateMissingSharedGroupSampleMakesBrokerAndGroupsUnknown(t *testing
 func TestAggregateStaleTakesPrecedenceOverUnknown(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	groups := []GroupState{testGroup("flight", []string{"broker-a"})}
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	groups := []GroupState{testGroup("events-a", []string{"broker-a"})}
 	snapshot := testSnapshot(testBase,
 		[]BrokerSample{testBrokerSample("broker-a", testBase.Add(-2*time.Minute), 10)}, nil)
 
@@ -195,8 +195,8 @@ func TestAggregateStaleTakesPrecedenceOverUnknown(t *testing.T) {
 func TestAggregateRejectsProfileIdentityMismatch(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	groups := []GroupState{testGroup("flight", []string{"broker-a"})}
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	groups := []GroupState{testGroup("events-a", []string{"broker-a"})}
 	sample := testBrokerSample("broker-a", testBase, 10)
 	sample.BrokerVersion = "10.4.2"
 	_, err := Aggregate(testBase, testSnapshot(testBase, []BrokerSample{sample}, nil), catalog, inventory, groups)
@@ -209,15 +209,15 @@ func TestAggregateCalculatesWarmShortfall(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t)
 	inventory := []Broker{
-		testBroker("broker-a", "flight"),
-		testBroker("broker-b", "flight"),
+		testBroker("broker-a", "events-a"),
+		testBroker("broker-b", "events-a"),
 	}
 	inventory[1].Ready = false
-	group := testGroup("flight", []string{"broker-a"})
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.WarmBrokers = 1
 	group.Policy.MaximumBrokers = 3
 	got, err := Aggregate(testBase,
-		testSnapshot(testBase, []BrokerSample{testBrokerSample("broker-a", testBase, 10)}, []GroupSample{testGroupSample("flight", "broker-a", testBase, 10, 0, 0)}),
+		testSnapshot(testBase, []BrokerSample{testBrokerSample("broker-a", testBase, 10)}, []GroupSample{testGroupSample("events-a", "broker-a", testBase, 10, 0, 0)}),
 		catalog, inventory, []GroupState{group})
 	if err != nil {
 		t.Fatal(err)
@@ -230,26 +230,26 @@ func TestAggregateCalculatesWarmShortfall(t *testing.T) {
 func TestEngineRequiresContinuousSustainedPressure(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 2
 	group.Policy.WarmBrokers = 0
 
 	first := testBase
 	decision := evaluate(t, engine, first, inventory, []GroupState{group}, 80, 0)
-	assertNoAction(t, decision, "flight", "not been sustained")
+	assertNoAction(t, decision, "events-a", "not been sustained")
 	decision = evaluate(t, engine, first.Add(4*time.Minute), inventory, []GroupState{group}, 80, 0)
-	assertNoAction(t, decision, "flight", "not been sustained")
+	assertNoAction(t, decision, "events-a", "not been sustained")
 	decision = evaluate(t, engine, first.Add(5*time.Minute), inventory, []GroupState{group}, 80, 0)
-	assertAction(t, decision, "flight", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
+	assertAction(t, decision, "events-a", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
 }
 
 func TestEngineStartsPressureWindowAtFirstEvaluation(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MaximumBrokers = 2
 	group.Policy.TelemetryMaxAge = 10 * time.Minute
 
@@ -262,8 +262,8 @@ func TestEngineStartsPressureWindowAtFirstEvaluation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertNoAction(t, decision, "flight", "not been sustained")
-	if got := engine.State().PressureSince["flight"]; !got.Equal(first) {
+	assertNoAction(t, decision, "events-a", "not been sustained")
+	if got := engine.State().PressureSince["events-a"]; !got.Equal(first) {
 		t.Fatalf("pressure since = %v, want first evaluation %v", got, first)
 	}
 }
@@ -271,8 +271,8 @@ func TestEngineStartsPressureWindowAtFirstEvaluation(t *testing.T) {
 func TestEngineReplayedSamplesCannotSatisfyPressureWindow(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MaximumBrokers = 2
 	group.Policy.TelemetryMaxAge = 10 * time.Minute
 
@@ -284,24 +284,24 @@ func TestEngineReplayedSamplesCannotSatisfyPressureWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertNoAction(t, decision, "flight", "not been sustained")
+		assertNoAction(t, decision, "events-a", "not been sustained")
 	}
-	if _, exists := engine.State().PressureSince["flight"]; exists {
+	if _, exists := engine.State().PressureSince["events-a"]; exists {
 		t.Fatal("replayed sample started a pressure window")
 	}
 
 	freshAt := first.Add(7 * time.Minute)
 	decision := evaluate(t, engine, freshAt, inventory, []GroupState{group}, 80, 0)
-	assertNoAction(t, decision, "flight", "not been sustained")
+	assertNoAction(t, decision, "events-a", "not been sustained")
 	decision = evaluate(t, engine, freshAt.Add(group.Policy.PressureWindow), inventory, []GroupState{group}, 80, 0)
-	assertAction(t, decision, "flight", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
+	assertAction(t, decision, "events-a", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
 }
 
 func TestEngineOlderSamplesCannotSatisfyPressureWindow(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MaximumBrokers = 2
 	group.Policy.TelemetryMaxAge = 10 * time.Minute
 
@@ -316,9 +316,9 @@ func TestEngineOlderSamplesCannotSatisfyPressureWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertNoAction(t, decision, "flight", "not been sustained")
+		assertNoAction(t, decision, "events-a", "not been sustained")
 	}
-	if _, exists := engine.State().PressureSince["flight"]; exists {
+	if _, exists := engine.State().PressureSince["events-a"]; exists {
 		t.Fatal("older samples started a pressure window")
 	}
 }
@@ -326,8 +326,8 @@ func TestEngineOlderSamplesCannotSatisfyPressureWindow(t *testing.T) {
 func TestEngineUnknownCycleResetsPressureWindow(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 2
 
@@ -339,32 +339,32 @@ func TestEngineUnknownCycleResetsPressureWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertNoAction(t, decision, "flight", "telemetry is unknown")
+	assertNoAction(t, decision, "events-a", "telemetry is unknown")
 
 	decision = evaluate(t, engine, testBase.Add(5*time.Minute), inventory, []GroupState{group}, 80, 0)
-	assertNoAction(t, decision, "flight", "not been sustained")
+	assertNoAction(t, decision, "events-a", "not been sustained")
 	decision = evaluate(t, engine, testBase.Add(10*time.Minute), inventory, []GroupState{group}, 80, 0)
-	assertAction(t, decision, "flight", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
+	assertAction(t, decision, "events-a", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
 }
 
 func TestEngineBacklogDoesNotScaleOut(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 2
 
 	decision := evaluate(t, engine, testBase, inventory, []GroupState{group}, 10, 50)
-	assertNoAction(t, decision, "flight", "downstream backlog")
+	assertNoAction(t, decision, "events-a", "downstream backlog")
 	decision = evaluate(t, engine, testBase.Add(10*time.Minute), inventory, []GroupState{group}, 10, 50)
-	assertNoAction(t, decision, "flight", "downstream backlog")
+	assertNoAction(t, decision, "events-a", "downstream backlog")
 }
 
 func TestEngineHeadroomThreshold(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 2
 	for _, test := range []struct {
@@ -377,7 +377,7 @@ func TestEngineHeadroomThreshold(t *testing.T) {
 		engine := mustEngine(t, catalog, 1)
 		evaluate(t, engine, testBase, inventory, []GroupState{group}, test.usage, 0)
 		decision := evaluate(t, engine, testBase.Add(5*time.Minute), inventory, []GroupState{group}, test.usage, 0)
-		gotAction := findRecommendation(t, decision, "flight").Action == ActionScaleOut
+		gotAction := findRecommendation(t, decision, "events-a").Action == ActionScaleOut
 		if gotAction != test.wantAction {
 			t.Fatalf("usage %v action=%v, want %v", test.usage, gotAction, test.wantAction)
 		}
@@ -388,89 +388,89 @@ func TestEngineDeterministicScaleOutAppendsLexicalEligibleBroker(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
 	inventory := []Broker{
-		testBroker("broker-z", "flight"),
-		testBroker("broker-c", "flight"),
-		testBroker("broker-a", "flight"),
+		testBroker("broker-z", "events-a"),
+		testBroker("broker-c", "events-a"),
+		testBroker("broker-a", "events-a"),
 		testBroker("broker-b", "other"),
 	}
-	group := testGroup("flight", []string{"broker-z"})
+	group := testGroup("events-a", []string{"broker-z"})
 	group.Policy.MinimumBrokers = 2
 	group.Policy.MaximumBrokers = 3
 	decision := evaluate(t, engine, testBase, inventory, []GroupState{group}, 10, 0)
-	assertAction(t, decision, "flight", ActionScaleOut, "broker-a", []string{"broker-z", "broker-a"})
+	assertAction(t, decision, "events-a", ActionScaleOut, "broker-a", []string{"broker-z", "broker-a"})
 }
 
 func TestEngineSafelyRefusesWhenNoEligibleScaleOutBroker(t *testing.T) {
 	catalog := mustCatalog(t)
 	engine := mustEngine(t, catalog, 1)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "other")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "other")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 2
 	group.Policy.MaximumBrokers = 3
 	decision := evaluate(t, engine, testBase, inventory, []GroupState{group}, 10, 0)
-	assertNoAction(t, decision, "flight", "no ready broker")
+	assertNoAction(t, decision, "events-a", "no ready broker")
 }
 
 func TestEngineScaleInRequiresExplicitSafeChoiceAndPreservesOrder(t *testing.T) {
 	catalog := mustCatalog(t)
 	inventory := []Broker{
-		testBroker("broker-c", "flight"),
-		testBroker("broker-a", "flight"),
-		testBroker("broker-b", "flight"),
+		testBroker("broker-c", "events-a"),
+		testBroker("broker-a", "events-a"),
+		testBroker("broker-b", "events-a"),
 	}
-	group := testGroup("flight", []string{"broker-c", "broker-a", "broker-b"})
+	group := testGroup("events-a", []string{"broker-c", "broker-a", "broker-b"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 3
 	group.Policy.WarmBrokers = 1
 
 	decision := evaluate(t, mustEngine(t, catalog, 1), testBase, inventory, []GroupState{group}, 10, 0)
-	assertNoAction(t, decision, "flight", "explicit safe")
+	assertNoAction(t, decision, "events-a", "explicit safe")
 
 	unsafe := group
 	unsafe.ScaleInChoice = &ScaleInChoice{BrokerID: "broker-a", Safe: false}
 	decision = evaluate(t, mustEngine(t, catalog, 1), testBase, inventory, []GroupState{unsafe}, 10, 0)
-	assertNoAction(t, decision, "flight", "not proven safe")
+	assertNoAction(t, decision, "events-a", "not proven safe")
 
 	group.ScaleInChoice = &ScaleInChoice{BrokerID: "broker-a", Safe: true, Evidence: "drained and no other ownership"}
 	decision = evaluate(t, mustEngine(t, catalog, 1), testBase, inventory, []GroupState{group}, 10, 0)
-	assertAction(t, decision, "flight", ActionScaleIn, "broker-a", []string{"broker-c", "broker-b"})
-	if findRecommendation(t, decision, "flight").Evidence != group.ScaleInChoice.Evidence {
+	assertAction(t, decision, "events-a", ActionScaleIn, "broker-a", []string{"broker-c", "broker-b"})
+	if findRecommendation(t, decision, "events-a").Evidence != group.ScaleInChoice.Evidence {
 		t.Fatal("scale-in evidence not retained")
 	}
 }
 
 func TestEngineWarmCountRaisesScaleInFloor(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a", "broker-b"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a", "broker-b"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.WarmBrokers = 1
 	group.Policy.MaximumBrokers = 3
 	group.ScaleInChoice = &ScaleInChoice{BrokerID: "broker-b", Safe: true, Evidence: "safe"}
 	decision := evaluate(t, mustEngine(t, catalog, 1), testBase, inventory, []GroupState{group}, 10, 0)
-	assertNoAction(t, decision, "flight", "minimum plus warm")
+	assertNoAction(t, decision, "events-a", "minimum plus warm")
 }
 
 func TestEngineHonorsCooldown(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 2
 	group.Policy.MaximumBrokers = 3
 	group.LastTransitionAt = testBase.Add(-10 * time.Minute)
 	decision := evaluate(t, mustEngine(t, catalog, 1), testBase, inventory, []GroupState{group}, 10, 0)
-	assertNoAction(t, decision, "flight", "cooldown")
+	assertNoAction(t, decision, "events-a", "cooldown")
 }
 
 func TestEngineHonorsPerGroupTransitionLimit(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 2
 	group.Policy.MaximumBrokers = 3
 	group.ActiveTransitions = 1
 	decision := evaluate(t, mustEngine(t, catalog, 2), testBase, inventory, []GroupState{group}, 10, 0)
-	assertNoAction(t, decision, "flight", "group transition limit")
+	assertNoAction(t, decision, "events-a", "group transition limit")
 }
 
 func TestEngineGloballyBoundsTransitionsDeterministically(t *testing.T) {
@@ -512,8 +512,8 @@ func TestEngineCountsActiveTransitionsAgainstGlobalLimit(t *testing.T) {
 
 func TestEngineStateRoundTripPreservesPressureWindow(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight"), testBroker("broker-b", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a"), testBroker("broker-b", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	group.Policy.MinimumBrokers = 1
 	group.Policy.MaximumBrokers = 2
 	original := mustEngine(t, catalog, 1)
@@ -524,13 +524,13 @@ func TestEngineStateRoundTripPreservesPressureWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := evaluate(t, restored, testBase.Add(5*time.Minute), inventory, []GroupState{group}, 80, 0)
-	assertAction(t, decision, "flight", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
+	assertAction(t, decision, "events-a", ActionScaleOut, "broker-b", []string{"broker-a", "broker-b"})
 }
 
 func TestEngineRejectsNonMonotonicEvaluationWithoutMutation(t *testing.T) {
 	catalog := mustCatalog(t)
-	inventory := []Broker{testBroker("broker-a", "flight")}
-	group := testGroup("flight", []string{"broker-a"})
+	inventory := []Broker{testBroker("broker-a", "events-a")}
+	group := testGroup("events-a", []string{"broker-a"})
 	engine := mustEngine(t, catalog, 1)
 	evaluate(t, engine, testBase, inventory, []GroupState{group}, 10, 0)
 	before := engine.State()

@@ -31,6 +31,7 @@ var (
 type Binding struct {
 	Group       string `json:"group"`
 	BrokerID    string `json:"broker_id"`
+	Endpoint    string `json:"endpoint"`
 	Epoch       uint64 `json:"epoch"`
 	Destination string `json:"destination"`
 }
@@ -43,7 +44,7 @@ func (b Binding) Validate() error {
 }
 
 func (b Binding) key() string {
-	return fmt.Sprintf("%s\x00%s\x00%d\x00%s", b.Group, b.BrokerID, b.Epoch, b.Destination)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%s", b.Group, b.BrokerID, b.Endpoint, b.Epoch, b.Destination)
 }
 
 // Transition describes only the bindings relevant to this subscriber. Source
@@ -82,14 +83,22 @@ func TransitionFromSnapshot(snapshot control.MembershipSnapshot, destination fun
 		if err != nil {
 			return Transition{}, fmt.Errorf("subscriber: resolve source broker %q: %w", broker, err)
 		}
-		transition.Source = append(transition.Source, Binding{Group: transition.Group, BrokerID: broker, Epoch: transition.SourceEpoch, Destination: name})
+		endpoint, ok := snapshot.BrokerEndpoint(broker, false)
+		if !ok {
+			return Transition{}, fmt.Errorf("subscriber: no endpoint for source broker %q", broker)
+		}
+		transition.Source = append(transition.Source, Binding{Group: transition.Group, BrokerID: broker, Endpoint: endpoint, Epoch: transition.SourceEpoch, Destination: name})
 	}
 	for _, broker := range snapshot.ProposedMembership {
 		name, err := destination(broker, transition.ProposedEpoch, snapshot.Destination)
 		if err != nil {
 			return Transition{}, fmt.Errorf("subscriber: resolve proposed broker %q: %w", broker, err)
 		}
-		transition.Proposed = append(transition.Proposed, Binding{Group: transition.Group, BrokerID: broker, Epoch: transition.ProposedEpoch, Destination: name})
+		endpoint, ok := snapshot.BrokerEndpoint(broker, true)
+		if !ok {
+			return Transition{}, fmt.Errorf("subscriber: no endpoint for proposed broker %q", broker)
+		}
+		transition.Proposed = append(transition.Proposed, Binding{Group: transition.Group, BrokerID: broker, Endpoint: endpoint, Epoch: transition.ProposedEpoch, Destination: name})
 	}
 	return transition, transition.Validate()
 }
@@ -304,6 +313,9 @@ func New(config Config) (*Shim, error) {
 		return nil, errors.New("subscriber: participant, customer library, handler, factory, reporter and contracts are required")
 	}
 	contracts := maps.Clone(config.Contracts)
+	if _, err := customer.RoutingPolicy(config.Library); err != nil {
+		return nil, fmt.Errorf("subscriber: %w", err)
+	}
 	for group, contract := range contracts {
 		if group == "" || contract.HashContract == "" || contract.LibraryVersion == "" {
 			return nil, errors.New("subscriber: contract map cannot contain an empty group, hash contract, or library version")
@@ -382,6 +394,13 @@ func (s *Shim) ApplySnapshot(ctx context.Context, snapshot control.MembershipSna
 	if destination == nil {
 		return errors.New("subscriber: destination resolver is required")
 	}
+	policy, policyErr := customer.RoutingPolicy(s.library)
+	if policyErr != nil {
+		return fmt.Errorf("subscriber: %w", policyErr)
+	}
+	if snapshot.Algorithm != policy.RoutingAlgorithm() {
+		return fmt.Errorf("subscriber: snapshot routing algorithm %q does not match customer library algorithm %q", snapshot.Algorithm, policy.RoutingAlgorithm())
+	}
 	if err := s.validateContract(snapshot.ScalingGroup, snapshot.HashContract, snapshot.LibraryVersion); err != nil {
 		return fmt.Errorf("subscriber: apply snapshot: %w", err)
 	}
@@ -425,7 +444,11 @@ func (s *Shim) ApplySnapshot(ctx context.Context, snapshot control.MembershipSna
 			if err != nil {
 				return fmt.Errorf("subscriber: resolve active broker %q: %w", broker, err)
 			}
-			binding := Binding{Group: snapshot.ScalingGroup, BrokerID: broker, Epoch: snapshot.Epoch, Destination: name}
+			endpoint, ok := snapshot.BrokerEndpoint(broker, false)
+			if !ok {
+				return fmt.Errorf("subscriber: no endpoint for active broker %q", broker)
+			}
+			binding := Binding{Group: snapshot.ScalingGroup, BrokerID: broker, Endpoint: endpoint, Epoch: snapshot.Epoch, Destination: name}
 			current[binding.key()] = struct{}{}
 			if err := s.addActive(ctx, binding); err != nil {
 				return err

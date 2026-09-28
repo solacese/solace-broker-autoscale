@@ -22,9 +22,6 @@ func (p *SnapshotFanoutPublisher) Publish(ctx context.Context, update controller
 	if p == nil || p.Publisher == nil {
 		return errors.New("runtime: snapshot fanout publisher is not initialized")
 	}
-	if err := p.Publisher.Publish(ctx, update); err != nil {
-		return err
-	}
 	return p.publishUpdate(ctx, update.OperationID, update.Snapshot)
 }
 
@@ -33,9 +30,6 @@ func (p *SnapshotFanoutPublisher) PublishSnapshot(ctx context.Context, snapshot 
 		return errors.New("runtime: snapshot fanout publisher is not initialized")
 	}
 	operationID := fmt.Sprintf("%s/snapshot/%d/%d/%s", snapshot.ScalingGroup, snapshot.Revision, snapshot.Epoch, snapshot.Phase)
-	if err := p.Publisher.PublishSnapshotOperation(ctx, operationID, snapshot); err != nil {
-		return err
-	}
 	return p.publishUpdate(ctx, operationID, snapshot)
 }
 
@@ -49,4 +43,10 @@ func (p *SnapshotFanoutPublisher) publishUpdate(ctx context.Context, operationID
 
 func (p *SnapshotFanoutPublisher) PublishCommand(ctx context.Context, command control.CommandEnvelope) error {
 	return p.Publisher.PublishCommand(ctx, command)
+}
+
+// SnapshotForGroup exposes only the controller's validated in-memory projection
+// of durable state. It never reconstructs authority from Broker 0 messages.
+func (c *MembershipCatalog) SnapshotForGroup(group string) (control.MembershipSnapshot, bool) {
+	return c.Get(group)
 }

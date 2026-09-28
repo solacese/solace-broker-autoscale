@@ -10,6 +10,7 @@ import (
 
 	"github.com/solacese/solace-workload-balancer/broker0"
 	"github.com/solacese/solace-workload-balancer/config"
+	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/controller"
 	"github.com/solacese/solace-workload-balancer/policy"
 	"github.com/solacese/solace-workload-balancer/semp"
@@ -312,11 +313,12 @@ func (r *PolicyRuntime) Close() error { return nil }
 
 // NewParticipant assembles existing Broker 0 group orchestrators into one
 // participant lifecycle without depending on a concrete native client.
-func NewParticipant(subscriber broker0.UpdateSubscriber, browser broker0.Browser, applier broker0.SnapshotApplier, operations broker0.OperationStore, groups []config.ScalingGroup, participant string, rebrowseInterval, maxStaleness, shutdownTimeout time.Duration) (*ParticipantProcess, error) {
+func NewParticipant(subscriber broker0.UpdateSubscriber, requester broker0.SnapshotRequester, applier broker0.SnapshotApplier, operations broker0.OperationStore, namespace string, groups []config.ScalingGroup, participant string, role control.ParticipantRole, refreshInterval, maxStaleness, shutdownTimeout time.Duration) (*ParticipantProcess, error) {
 	components := make(map[string]Component, len(groups))
 	for _, group := range groups {
-		orchestrator, err := broker0.NewGroupOrchestrator(subscriber, browser, applier, operations, broker0.OrchestratorOptions{
-			Group: group.ID, Participant: participant, RebrowseInterval: rebrowseInterval, MaxStaleness: maxStaleness,
+		orchestrator, err := broker0.NewGroupOrchestrator(subscriber, requester, applier, operations, broker0.OrchestratorOptions{
+			Namespace: namespace, Group: group.ID, Participant: participant, Role: role,
+			RefreshInterval: refreshInterval, MaxStaleness: maxStaleness,
 		})
 		if err != nil {
 			return nil, err

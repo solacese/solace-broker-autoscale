@@ -8,12 +8,12 @@ import (
 )
 
 var (
-	// ErrNotSubscribed means browse or update processing was attempted before
+	// ErrNotSubscribed means snapshot or update processing was attempted before
 	// the caller established its update subscription.
-	ErrNotSubscribed = errors.New("control: update subscription must be established before browsing")
-	// ErrBrowseRequired means bootstrap cannot finish without a browsed
-	// authoritative snapshot.
-	ErrBrowseRequired = errors.New("control: an authoritative browsed snapshot is required")
+	ErrNotSubscribed = errors.New("control: update subscription must be established before requesting a snapshot")
+	// ErrSnapshotRequired means bootstrap cannot finish without an authoritative
+	// snapshot response from the controller.
+	ErrSnapshotRequired = errors.New("control: an authoritative controller snapshot is required")
 	// ErrStaleUpdate means an update cannot advance both monotonic revision and
 	// nondecreasing epoch state.
 	ErrStaleUpdate = errors.New("control: stale membership update")
@@ -27,9 +27,9 @@ var (
 // Reconciler implements subscribe-first bootstrap:
 //
 //  1. establish the update subscription and call BeginSubscribe;
-//  2. browse the retained snapshot and pass it to ApplyBrowse;
+//  2. request the authoritative controller snapshot and pass it to ApplyBaseline;
 //  3. concurrently pass subscription deliveries to ApplyUpdate (they buffer);
-//  4. call FinishBrowse to atomically install the browse result and reconcile
+//  4. call FinishBootstrap to atomically install the response and reconcile
 //     buffered updates in revision order.
 //
 // Thereafter ApplyUpdate installs fresh full snapshots immediately. Reconciler
@@ -38,7 +38,7 @@ type Reconciler struct {
 	mu       sync.RWMutex
 	started  bool
 	ready    bool
-	browse   *MembershipSnapshot
+	baseline *MembershipSnapshot
 	buffered []MembershipSnapshot
 	current  *MembershipSnapshot
 	group    string
@@ -50,7 +50,7 @@ func NewReconciler() *Reconciler {
 }
 
 // BeginSubscribe records that the caller established the live update
-// subscription. It intentionally precedes browse to close the snapshot/update
+// subscription. It intentionally precedes baseline to close the snapshot/update
 // race.
 func (r *Reconciler) BeginSubscribe() error {
 	r.mu.Lock()
@@ -62,10 +62,9 @@ func (r *Reconciler) BeginSubscribe() error {
 	return nil
 }
 
-// ApplyBrowse offers an authoritative snapshot found by browsing. If a broker
-// returns more than one retained value, the highest revision is selected; an
-// epoch regression or conflicting duplicate is rejected.
-func (r *Reconciler) ApplyBrowse(snapshot MembershipSnapshot) error {
+// ApplyBaseline offers the authoritative snapshot returned by the controller.
+// Duplicate responses are allowed only when their state is identical.
+func (r *Reconciler) ApplyBaseline(snapshot MembershipSnapshot) error {
 	if err := snapshot.Validate(); err != nil {
 		return err
 	}
@@ -83,28 +82,28 @@ func (r *Reconciler) ApplyBrowse(snapshot MembershipSnapshot) error {
 		r.group = snapshot.ScalingGroup
 	}
 	if r.ready {
-		return errors.New("control: browse already finished")
+		return errors.New("control: baseline already finished")
 	}
-	if r.browse == nil {
-		r.browse = &snapshot
+	if r.baseline == nil {
+		r.baseline = &snapshot
 		return nil
 	}
 
-	comparison, err := compareSnapshots(*r.browse, snapshot)
+	comparison, err := compareSnapshots(*r.baseline, snapshot)
 	if err != nil {
 		return err
 	}
 	if comparison < 0 {
-		r.browse = &snapshot
+		r.baseline = &snapshot
 		return nil
 	}
-	if comparison > 0 && snapshot.Revision > r.browse.Revision {
-		return fmt.Errorf("%w: browsed epoch regressed from %d to %d", ErrStaleUpdate, r.browse.Epoch, snapshot.Epoch)
+	if comparison > 0 && snapshot.Revision > r.baseline.Revision {
+		return fmt.Errorf("%w: baselined epoch regressed from %d to %d", ErrStaleUpdate, r.baseline.Epoch, snapshot.Epoch)
 	}
 	return nil
 }
 
-// ApplyUpdate buffers a valid update until FinishBrowse, then applies valid
+// ApplyUpdate buffers a valid update until FinishBootstrap, then applies valid
 // fresh updates immediately. The returned bool reports whether the installed
 // snapshot changed; it is false while buffering or for an exact replay.
 func (r *Reconciler) ApplyUpdate(snapshot MembershipSnapshot) (bool, error) {
@@ -131,11 +130,10 @@ func (r *Reconciler) ApplyUpdate(snapshot MembershipSnapshot) (bool, error) {
 	return r.applyLocked(snapshot)
 }
 
-// FinishBrowse atomically installs the browsed baseline, reconciles buffered
-// updates in ascending revision/epoch order, and returns the resulting state.
-// Buffered updates older than the browsed baseline are expected race artifacts
-// and are discarded. Conflicts and non-monotonic epoch changes fail closed.
-func (r *Reconciler) FinishBrowse() (MembershipSnapshot, error) {
+// FinishBootstrap atomically installs the controller baseline, reconciles
+// buffered updates in ascending revision/epoch order, and returns the result.
+// Updates older than the response are expected race artifacts and are discarded.
+func (r *Reconciler) FinishBootstrap() (MembershipSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.started {
@@ -144,11 +142,11 @@ func (r *Reconciler) FinishBrowse() (MembershipSnapshot, error) {
 	if r.ready {
 		return r.current.Clone(), nil
 	}
-	if r.browse == nil {
-		return MembershipSnapshot{}, ErrBrowseRequired
+	if r.baseline == nil {
+		return MembershipSnapshot{}, ErrSnapshotRequired
 	}
 
-	current := r.browse.Clone()
+	current := r.baseline.Clone()
 	r.current = &current
 	sort.SliceStable(r.buffered, func(i, j int) bool {
 		if r.buffered[i].Revision != r.buffered[j].Revision {
@@ -167,8 +165,8 @@ func (r *Reconciler) FinishBrowse() (MembershipSnapshot, error) {
 				r.current = nil
 				return MembershipSnapshot{}, fmt.Errorf("%w: buffered epoch regressed from %d to %d at revision %d", ErrStaleUpdate, current.Epoch, update.Epoch, update.Revision)
 			}
-			// An older-revision buffered delivery is the normal consequence of
-			// browsing a retained snapshot after subscribing.
+			// An older buffered delivery is the normal consequence of requesting
+			// a controller snapshot after subscribing.
 			continue
 		}
 		if comparison == 0 {
@@ -178,13 +176,13 @@ func (r *Reconciler) FinishBrowse() (MembershipSnapshot, error) {
 		r.current = &updated
 	}
 	r.buffered = nil
-	r.browse = nil
+	r.baseline = nil
 	r.ready = true
 	return r.current.Clone(), nil
 }
 
 // Snapshot returns an independent copy of the installed state. No snapshot is
-// visible until FinishBrowse has reconciled the buffer.
+// visible until FinishBootstrap has reconciled the buffer.
 func (r *Reconciler) Snapshot() (MembershipSnapshot, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

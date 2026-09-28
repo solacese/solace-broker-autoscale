@@ -2,8 +2,8 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,18 +12,10 @@ import (
 	"github.com/solacese/solace-workload-balancer/config"
 	"github.com/solacese/solace-workload-balancer/control"
 	"github.com/solacese/solace-workload-balancer/controller"
+	"github.com/solacese/solace-workload-balancer/integration"
 	"github.com/solacese/solace-workload-balancer/policy"
 	"github.com/solacese/solace-workload-balancer/semp"
 )
-
-type staticBrowser struct {
-	messages []broker0.BrowsedMessage
-	err      error
-}
-
-func (b staticBrowser) Browse(context.Context, string) ([]broker0.BrowsedMessage, error) {
-	return b.messages, b.err
-}
 
 type captureMembershipPublisher struct {
 	snapshots []control.MembershipSnapshot
@@ -76,179 +68,96 @@ func TestMaximumConcurrentTransitionsAllowsOnePerGroup(t *testing.T) {
 	}
 }
 
-func TestBootstrapMembershipSeedsOnlyExplicitEmptyState(t *testing.T) {
-	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{productionGroup()}}
+func bootstrapTestDependencies(t *testing.T, cfg config.Config, durable controller.PersistentState) (*captureMembershipPublisher, *MembershipCatalog, *ManagedEpochResources, *controller.Controller) {
+	t.Helper()
+	clients := make(map[string]SEMPQueueClient, len(cfg.DataBrokers))
+	for _, broker := range cfg.DataBrokers {
+		clients[broker.ID] = &fakeQueueClient{}
+	}
 	publisher := &captureMembershipPublisher{}
-	catalog := NewMembershipCatalog()
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{err: broker0.ErrNoAuthoritativeState}, publisher, catalog); err != nil {
+	authority, err := controller.Open(controller.JSONStore{Path: filepath.Join(t.TempDir(), "controller.json")}, passthroughFence{}, publisher, controller.Options{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(publisher.snapshots) != 1 {
-		t.Fatalf("published %d genesis snapshots", len(publisher.snapshots))
+	for _, snapshot := range durable.Membership {
+		if err := authority.SaveMembership(snapshot); err != nil {
+			t.Fatal(err)
+		}
 	}
-	got, ok := catalog.Get("orders")
-	if !ok || !got.CurrentMembership.Equal(control.Membership{"broker-b", "broker-a"}) || got.Revision != 1 || got.Epoch != 1 || got.Phase != control.PhaseActive {
-		t.Fatalf("genesis = %#v, present=%t", got, ok)
-	}
+	return publisher, NewMembershipCatalog(), &ManagedEpochResources{Config: cfg, Clients: clients}, authority
+}
 
-	publisher.snapshots = nil
-	want := errors.New("transport failed")
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{err: want}, publisher, NewMembershipCatalog()); !errors.Is(err, want) {
-		t.Fatalf("bootstrap error = %v, want %v", err, want)
+func TestCustomRoutingAlgorithmFlowsThroughGenesisAndTransition(t *testing.T) {
+	group := productionGroup()
+	group.RoutingAlgorithm = "customer-xxhash-score-v2"
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: testBrokerInventory([]string{"broker-a", "broker-b", "broker-c"})}
+	genesis, err := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(publisher.snapshots) != 0 {
-		t.Fatal("arbitrary browser failure seeded membership")
+	if genesis.Algorithm != group.RoutingAlgorithm {
+		t.Fatalf("genesis algorithm = %q", genesis.Algorithm)
+	}
+	spec, err := transitionSpec(cfg.Namespace, group, genesis, policy.Recommendation{CurrentMembership: group.OrderedBrokerIDs, ProposedMembership: []string{"broker-a", "broker-b", "broker-c"}}, time.Unix(30, 0), cfg.DataBrokers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Algorithm != group.RoutingAlgorithm {
+		t.Fatalf("transition algorithm = %q", spec.Algorithm)
+	}
+	mismatch := genesis.Clone()
+	mismatch.Algorithm = "other-score-v1"
+	if err := validateConfiguredSnapshot(group, mismatch); err == nil {
+		t.Fatal("retained snapshot algorithm mismatch was accepted")
 	}
 }
 
-func TestBootstrapMembershipPreservesRetainedOrder(t *testing.T) {
+func TestBootstrapMembershipPersistsGenesisBeforePublishing(t *testing.T) {
 	group := productionGroup()
-	snapshot, err := GenesisSnapshot("swlb", group)
-	if err != nil {
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: []config.DataBroker{{ID: "broker-b", AMQPEndpoint: "amqps://broker-b.invalid:5671", MessageVPN: "data"}, {ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data"}}}
+	durable := controller.PersistentState{Membership: map[string]control.MembershipSnapshot{}, Groups: map[string]*controller.GroupState{}}
+	publisher, catalog, resources, authority := bootstrapTestDependencies(t, cfg, durable)
+	if err := BootstrapMembership(context.Background(), cfg, durable, publisher, catalog, resources, authority); err != nil {
 		t.Fatal(err)
 	}
+	persisted, ok := authority.SnapshotForGroup(group.ID)
+	if !ok || persisted.Revision != 1 || len(publisher.snapshots) != 1 {
+		t.Fatalf("persisted=%#v published=%d", persisted, len(publisher.snapshots))
+	}
+}
+
+func TestBootstrapMembershipRestoresOnlyDurableAuthority(t *testing.T) {
+	group := productionGroup()
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: []config.DataBroker{{ID: "broker-b", AMQPEndpoint: "amqps://broker-b.invalid:5671", MessageVPN: "data"}, {ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data"}}}
+	snapshot, _ := GenesisSnapshot(cfg.Namespace, group, cfg.DataBrokers)
 	snapshot.Revision = 17
-	payload, err := json.Marshal(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := NewMembershipCatalog()
-	publisher := &captureMembershipPublisher{}
-	if err := BootstrapMembership(context.Background(), config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{messages: []broker0.BrowsedMessage{{Kind: broker0.KindMembershipSnapshot, OperationID: "retained", Payload: payload}}}, publisher, catalog); err != nil {
+	durable := controller.PersistentState{Membership: map[string]control.MembershipSnapshot{group.ID: snapshot}, Groups: map[string]*controller.GroupState{}}
+	publisher, catalog, resources, authority := bootstrapTestDependencies(t, cfg, durable)
+	if err := BootstrapMembership(context.Background(), cfg, durable, publisher, catalog, resources, authority); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := catalog.Get(group.ID)
-	if !reflect.DeepEqual(got.CurrentMembership, snapshot.CurrentMembership) || len(publisher.snapshots) != 0 {
-		t.Fatalf("retained membership changed or was republished: %#v", got)
+	if !membershipSnapshotsEqual(got, snapshot) || len(publisher.snapshots) != 0 {
+		t.Fatalf("restored=%#v published=%d", got, len(publisher.snapshots))
 	}
 }
 
-func TestBootstrapMembershipRejectsTransitionWithoutDurableState(t *testing.T) {
+func TestBootstrapMembershipRejectsTransitionHistoryWithoutMembership(t *testing.T) {
 	group := productionGroup()
-	snapshot, err := GenesisSnapshot("swlb", group)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot.Phase = control.PhasePrepare
-	snapshot.ProposedMembership = control.Membership{"broker-b", "broker-a", "broker-c"}
-	snapshot.Transition = &control.Transition{ID: "move-1", FromEpoch: 1, ToEpoch: 2}
-	snapshot.ProposedResources, err = epochResources(mustNames(t, "swlb"), group.ID, snapshot.ProposedMembership, group.EffectiveConsumerSets(), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, _ := json.Marshal(snapshot)
-	err = BootstrapMembership(context.Background(), config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}, controller.PersistentState{Groups: map[string]*controller.GroupState{}}, staticBrowser{messages: []broker0.BrowsedMessage{{Kind: broker0.KindMembershipSnapshot, OperationID: "move", Payload: payload}}}, &captureMembershipPublisher{}, NewMembershipCatalog())
-	if err == nil {
-		t.Fatal("bootstrap accepted retained transition without durable state")
-	}
-}
-
-func TestBootstrapMembershipRecoversUnpublishedPrepareFromSourceActive(t *testing.T) {
-	group := productionGroup()
-	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}
-	baseline, _ := GenesisSnapshot(cfg.Namespace, group)
-	spec, err := transitionSpec(cfg.Namespace, group, baseline, policy.Recommendation{
-		CurrentMembership: []string{"broker-b", "broker-a"}, ProposedMembership: []string{"broker-b", "broker-a", "broker-c"},
-	}, time.Unix(20, 0).UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := &controller.GroupState{Spec: spec, Phase: controller.PhasePrepare}
-	payload, _ := json.Marshal(baseline)
-	catalog := NewMembershipCatalog()
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{group.ID: state}}, staticBrowser{messages: []broker0.BrowsedMessage{{Kind: broker0.KindMembershipSnapshot, Payload: payload}}}, &captureMembershipPublisher{}, catalog); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := catalog.Get(group.ID)
-	if !ok || !membershipSnapshotsEqual(got, baseline) {
-		t.Fatalf("recovered source snapshot = %#v, present=%t", got, ok)
-	}
-}
-
-func TestBootstrapMembershipRecoversPublishedTargetActiveBeforeLocalPersistence(t *testing.T) {
-	group := productionGroup()
-	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}
-	baseline, _ := GenesisSnapshot(cfg.Namespace, group)
-	spec, err := transitionSpec(cfg.Namespace, group, baseline, policy.Recommendation{
-		CurrentMembership: []string{"broker-b", "broker-a"}, ProposedMembership: []string{"broker-b", "broker-a", "broker-c"},
-	}, time.Unix(20, 0).UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(30, 0).UTC()
-	state := &controller.GroupState{
-		Spec: spec, Phase: controller.PhaseActivate, FenceAttempted: true, Fenced: true, FenceVerifiedAt: &now,
-		CommitPublished: true, TargetIngressEnabled: true, TargetIngressVerified: true, TargetIngressVerifiedAt: &now,
-		IssuedCommandIDs: map[controller.Phase]map[string]string{controller.PhaseActivate: {}},
-	}
-	for _, requirement := range spec.RoleRequirements[controller.PhaseActivate] {
-		state.IssuedCommandIDs[controller.PhaseActivate][requirement.Participant] = spec.Group + "/" + spec.ID + "/forward/command/ACTIVATE/" + string(requirement.Role) + "/" + requirement.Participant
-	}
-	snapshot := targetActiveSnapshot(spec)
-	payload, _ := json.Marshal(snapshot)
-	catalog := NewMembershipCatalog()
-	if err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{group.ID: state}}, staticBrowser{messages: []broker0.BrowsedMessage{{Kind: broker0.KindMembershipSnapshot, Payload: payload}}}, &captureMembershipPublisher{}, catalog); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := catalog.Get(group.ID)
-	if !ok || !membershipSnapshotsEqual(got, snapshot) {
-		t.Fatalf("recovered snapshot = %#v, present=%t", got, ok)
-	}
-}
-
-func TestBootstrapMembershipRejectsTargetActiveMismatchAndPreCommitState(t *testing.T) {
-	group := productionGroup()
-	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}
-	baseline, _ := GenesisSnapshot(cfg.Namespace, group)
-	spec, err := transitionSpec(cfg.Namespace, group, baseline, policy.Recommendation{
-		CurrentMembership: []string{"broker-b", "broker-a"}, ProposedMembership: []string{"broker-b", "broker-a", "broker-c"},
-	}, time.Unix(20, 0).UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(30, 0).UTC()
-	validState := controller.GroupState{
-		Spec: spec, Phase: controller.PhaseActivate, FenceAttempted: true, Fenced: true, FenceVerifiedAt: &now,
-		CommitPublished: true, TargetIngressEnabled: true, TargetIngressVerified: true, TargetIngressVerifiedAt: &now,
-		IssuedCommandIDs: map[controller.Phase]map[string]string{controller.PhaseActivate: {}},
-	}
-	for _, requirement := range spec.RoleRequirements[controller.PhaseActivate] {
-		validState.IssuedCommandIDs[controller.PhaseActivate][requirement.Participant] = spec.Group + "/" + spec.ID + "/forward/command/ACTIVATE/" + string(requirement.Role) + "/" + requirement.Participant
-	}
-	for _, test := range []struct {
-		name     string
-		snapshot control.MembershipSnapshot
-		state    controller.GroupState
-	}{
-		{name: "revision mismatch", snapshot: func() control.MembershipSnapshot {
-			snapshot := targetActiveSnapshot(spec)
-			snapshot.Revision++
-			return snapshot
-		}(), state: validState},
-		{name: "pre-commit phase", snapshot: targetActiveSnapshot(spec), state: func() controller.GroupState {
-			state := validState
-			state.Phase = controller.PhaseCommit
-			state.CommitPublished = false
-			return state
-		}()},
-		{name: "missing durable command intent", snapshot: targetActiveSnapshot(spec), state: func() controller.GroupState { state := validState; state.IssuedCommandIDs = nil; return state }()},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			payload, _ := json.Marshal(test.snapshot)
-			err := BootstrapMembership(context.Background(), cfg, controller.PersistentState{Groups: map[string]*controller.GroupState{group.ID: &test.state}}, staticBrowser{messages: []broker0.BrowsedMessage{{Kind: broker0.KindMembershipSnapshot, Payload: payload}}}, &captureMembershipPublisher{}, NewMembershipCatalog())
-			if err == nil {
-				t.Fatal("bootstrap accepted conflicting retained ACTIVE snapshot")
-			}
-		})
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: []config.DataBroker{{ID: "broker-b", AMQPEndpoint: "amqps://broker-b.invalid:5671", MessageVPN: "data"}, {ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data"}}}
+	durable := controller.PersistentState{Membership: map[string]control.MembershipSnapshot{}, Groups: map[string]*controller.GroupState{group.ID: {}}}
+	publisher, catalog, resources, authority := bootstrapTestDependencies(t, cfg, controller.PersistentState{Membership: map[string]control.MembershipSnapshot{}, Groups: map[string]*controller.GroupState{}})
+	if err := BootstrapMembership(context.Background(), cfg, durable, publisher, catalog, resources, authority); err == nil {
+		t.Fatal("accepted transition history without membership")
 	}
 }
 
 func TestResolveManagedFenceQueueUsesDurableSourceAtCommittedRestart(t *testing.T) {
 	group := productionGroup()
-	baseline, _ := GenesisSnapshot("swlb", group)
+	baseline, _ := GenesisSnapshot("swlb", group, testBrokerInventory(group.OrderedBrokerIDs))
 	spec, err := transitionSpec("swlb", group, baseline, policy.Recommendation{
 		CurrentMembership: []string{"broker-b", "broker-a"}, ProposedMembership: []string{"broker-c"},
-	}, time.Unix(20, 0).UTC())
+	}, time.Unix(20, 0).UTC(), testBrokerInventory([]string{"broker-a", "broker-b", "broker-c"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,16 +202,17 @@ func TestCommandPublisherEmitsTypedCommandsWithStableIDs(t *testing.T) {
 	publisher := &CommandPublisher{Publisher: base, Catalog: catalog, Deadlines: map[string]time.Duration{"orders": time.Minute}, Now: func() time.Time { return time.Unix(10, 0).UTC() }}
 	requirements := typedRequirements(productionGroup())
 	publisher.SetRequirements("orders", requirements)
-	snapshot, err := GenesisSnapshot("swlb", productionGroup())
+	snapshot, err := GenesisSnapshot("swlb", productionGroup(), testBrokerInventory(productionGroup().OrderedBrokerIDs))
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Phase = control.PhasePrepare
 	snapshot.ProposedMembership = control.Membership{"broker-b", "broker-a", "broker-c"}
+	snapshot.ProposedBrokers = configuredBrokerDescriptors(snapshot.ProposedMembership, testBrokerInventory(snapshot.ProposedMembership))
 	snapshot.Transition = &control.Transition{ID: "move-1", FromEpoch: 1, ToEpoch: 2}
-	snapshot.ProposedResources = append([]control.EpochResourceIdentity(nil), snapshot.CurrentResources...)
-	for index := range snapshot.ProposedResources {
-		snapshot.ProposedResources[index].Epoch = 2
+	snapshot.ProposedResources, err = epochResources(mustNames(t, "swlb"), snapshot.ScalingGroup, snapshot.ProposedMembership, productionGroup().EffectiveConsumerSets(), 2)
+	if err != nil {
+		t.Fatal(err)
 	}
 	update := controller.ControlUpdate{OperationID: "orders/move-1/forward/PREPARE", Group: "orders", TransitionID: "move-1", ToEpoch: 2, Phase: controller.PhasePrepare, Snapshot: snapshot, IssuedCommandIDs: map[string]string{"subscriber-1": "orders/move-1/forward/command/PREPARE/subscriber/subscriber-1"}}
 	if err := publisher.Publish(context.Background(), update); err != nil {
@@ -321,12 +231,13 @@ func TestCommandPublisherRequiresDurableIssuanceIntent(t *testing.T) {
 	base := &captureMembershipPublisher{}
 	publisher := &CommandPublisher{Publisher: base, Catalog: NewMembershipCatalog(), Deadlines: map[string]time.Duration{"orders": time.Minute}}
 	publisher.SetRequirements("orders", typedRequirements(productionGroup()))
-	snapshot, err := GenesisSnapshot("swlb", productionGroup())
+	snapshot, err := GenesisSnapshot("swlb", productionGroup(), testBrokerInventory(productionGroup().OrderedBrokerIDs))
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Phase = control.PhasePrepare
 	snapshot.ProposedMembership = control.Membership{"broker-b", "broker-a", "broker-c"}
+	snapshot.ProposedBrokers = configuredBrokerDescriptors(snapshot.ProposedMembership, testBrokerInventory(snapshot.ProposedMembership))
 	snapshot.Transition = &control.Transition{ID: "move-1", FromEpoch: 1, ToEpoch: 2}
 	snapshot.ProposedResources, _ = epochResources(mustNames(t, "swlb"), "orders", snapshot.ProposedMembership, productionGroup().EffectiveConsumerSets(), 2)
 	update := controller.ControlUpdate{
@@ -344,12 +255,13 @@ func TestCommandPublisherRequiresDurableIssuanceIntent(t *testing.T) {
 func TestCommandPublisherDoesNotPublishSnapshotWithoutRequirements(t *testing.T) {
 	base := &captureMembershipPublisher{}
 	publisher := &CommandPublisher{Publisher: base, Catalog: NewMembershipCatalog(), Deadlines: map[string]time.Duration{"orders": time.Minute}}
-	snapshot, err := GenesisSnapshot("swlb", productionGroup())
+	snapshot, err := GenesisSnapshot("swlb", productionGroup(), testBrokerInventory(productionGroup().OrderedBrokerIDs))
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Phase = control.PhasePrepare
 	snapshot.ProposedMembership = control.Membership{"broker-b", "broker-a", "broker-c"}
+	snapshot.ProposedBrokers = configuredBrokerDescriptors(snapshot.ProposedMembership, testBrokerInventory(snapshot.ProposedMembership))
 	snapshot.Transition = &control.Transition{ID: "move-1", FromEpoch: 1, ToEpoch: 2}
 	snapshot.ProposedResources, _ = epochResources(mustNames(t, "swlb"), "orders", snapshot.ProposedMembership, productionGroup().EffectiveConsumerSets(), 2)
 	update := controller.ControlUpdate{
@@ -379,7 +291,7 @@ func TestControllerPolicyStateReadinessIsScopedToCurrentTelemetryCycle(t *testin
 		Staleness: config.StalenessPolicy{TelemetryMaxAge: config.Duration{Duration: 15 * time.Second}},
 	}
 	membership := NewMembershipCatalog()
-	retained, err := GenesisSnapshot("swlb", group)
+	retained, err := GenesisSnapshot("swlb", group, testBrokerInventory(group.OrderedBrokerIDs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,9 +380,9 @@ func TestControllerPolicyStateReadinessIsScopedToCurrentTelemetryCycle(t *testin
 
 func TestRecommendationControllerBeginsTypedTransition(t *testing.T) {
 	group := productionGroup()
-	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}}
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: testBrokerInventory([]string{"broker-a", "broker-b", "broker-c"})}
 	catalog := NewMembershipCatalog()
-	baseline, err := GenesisSnapshot("swlb", group)
+	baseline, err := GenesisSnapshot("swlb", group, testBrokerInventory(group.OrderedBrokerIDs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,12 +460,12 @@ func TestSEMPBrokerFenceUsesObservationAfterMonitor(t *testing.T) {
 func TestOwnedProcessClosesResourcesInReverseOrder(t *testing.T) {
 	var order []string
 	process := &OwnedProcess{Process: immediateProcess{}, Close: &CloseGroup{Closers: []interface{ Close() error }{
-		closeRecorder{name: "connection", order: &order}, closeRecorder{name: "publisher", order: &order}, closeRecorder{name: "browser", order: &order},
+		closeRecorder{name: "connection", order: &order}, closeRecorder{name: "publisher", order: &order}, closeRecorder{name: "snapshot-server", order: &order},
 	}}}
 	if err := process.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(order, []string{"browser", "publisher", "connection"}) {
+	if !reflect.DeepEqual(order, []string{"snapshot-server", "publisher", "connection"}) {
 		t.Fatalf("close order = %v", order)
 	}
 }
@@ -564,14 +476,16 @@ func (*assemblyNativePublisher) PublishPersistent(context.Context, broker0.Publi
 	return nil
 }
 
-type assemblyBrowser struct {
-	staticBrowser
-	closeRecorder
-}
-
 type assemblyReceiver struct{ closeRecorder }
 
 func (*assemblyReceiver) Receive(ctx context.Context) (broker0.Delivery, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type assemblySnapshotReceiver struct{ closeRecorder }
+
+func (*assemblySnapshotReceiver) ReceiveSnapshotRequest(ctx context.Context) (broker0.SnapshotRequestDelivery, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -585,24 +499,25 @@ func TestAssembleControllerClosesPartialResourcesOnPolicyFailure(t *testing.T) {
 		Control: config.ControlBroker{ParticipantCredentials: []config.ParticipantControlCredential{
 			{Participant: "publisher-1", Principal: "publisher-1"}, {Participant: "subscriber-1", Principal: "subscriber-1"}, {Participant: "observer-1", Principal: "observer-1"},
 		}, Resources: config.Broker0Resources{MembershipQueuePrefix: "swlb.membership", RegistrationQueue: "swlb.registration", ReadinessQueue: "swlb.readiness", TelemetryQueue: "swlb.telemetry"}},
-		DataBrokers: []config.DataBroker{{ID: "broker-a", MessageVPN: "data"}},
+		DataBrokers: []config.DataBroker{{ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data"}},
 		Publisher:   config.AsyncPublisher{PublishTimeout: config.Duration{Duration: time.Second}, ShutdownTimeout: config.Duration{Duration: time.Second}},
 		Staleness:   config.StalenessPolicy{ParticipantMaxAge: config.Duration{Duration: time.Second}, TelemetryMaxAge: config.Duration{Duration: time.Second}},
 		Persistence: config.Persistence{ControllerState: t.TempDir() + "/controller.json"},
 	}
 	var order []string
-	connection := &SMFConnection{}
+	connection := &AMQPControlConnection{AMQPConnection: &integration.AMQPConnection{}}
 	publisher := &assemblyNativePublisher{closeRecorder{name: "publisher", order: &order}}
-	browser := &assemblyBrowser{staticBrowser: staticBrowser{err: broker0.ErrNoAuthoritativeState}, closeRecorder: closeRecorder{name: "browser", order: &order}}
 	assembler := ControllerAssembler{
-		Connect:      func(context.Context, config.Config, Credentials) (*SMFConnection, error) { return connection, nil },
-		NewPublisher: func(*SMFConnection, time.Duration) (NativeControlPublisher, error) { return publisher, nil },
-		NewBrowser: func(config.Config, Credentials, broker0.MembershipQueueResolver) (broker0.Browser, error) {
-			return browser, nil
+		Connect: func(context.Context, config.Config, Credentials) (*AMQPControlConnection, error) {
+			return connection, nil
 		},
+		NewPublisher:  func(*AMQPControlConnection, time.Duration) (NativeControlPublisher, error) { return publisher, nil },
 		NewSEMPClient: func(config.DataBroker, BrokerCredentials) (SEMPQueueClient, error) { return &fakeQueueClient{}, nil },
-		BindInbox: func(*SMFConnection, broker0.ParticipantQueue, time.Duration) (broker0.DurableReceiver, error) {
+		BindInbox: func(*AMQPControlConnection, broker0.ParticipantQueue, time.Duration) (broker0.DurableReceiver, error) {
 			return &assemblyReceiver{closeRecorder: closeRecorder{name: "receiver", order: &order}}, nil
+		},
+		BindSnapshotRequests: func(context.Context, *AMQPControlConnection, broker0.ParticipantQueue) (broker0.SnapshotRequestReceiver, error) {
+			return &assemblySnapshotReceiver{closeRecorder: closeRecorder{name: "snapshot", order: &order}}, nil
 		},
 		NewPolicy: func(config.Config, *controller.Controller, *MembershipCatalog, map[string]SEMPQueueClient, *CommandPublisher) (PolicyCycle, error) {
 			return nil, ErrCapacityPolicyUnavailable
@@ -612,7 +527,7 @@ func TestAssembleControllerClosesPartialResourcesOnPolicyFailure(t *testing.T) {
 	if !errors.Is(err, ErrCapacityPolicyUnavailable) {
 		t.Fatalf("assembly error = %v", err)
 	}
-	if !reflect.DeepEqual(order, []string{"receiver", "receiver", "receiver", "receiver", "receiver", "browser", "publisher"}) {
+	if !reflect.DeepEqual(order, []string{"snapshot", "snapshot", "receiver", "receiver", "receiver", "receiver", "receiver", "publisher"}) {
 		t.Fatalf("partial assembly close order = %v", order)
 	}
 }
@@ -634,7 +549,7 @@ func TestAssembleControllerSuccessBindsInboxesAndRunsPolicy(t *testing.T) {
 		Control: config.ControlBroker{ParticipantCredentials: []config.ParticipantControlCredential{
 			{Participant: "publisher-1", Principal: "publisher-1"}, {Participant: "subscriber-1", Principal: "subscriber-1"}, {Participant: "observer-1", Principal: "observer-1"},
 		}, Resources: config.Broker0Resources{MembershipQueuePrefix: "swlb.membership", RegistrationQueue: "swlb.registration", ReadinessQueue: "swlb.readiness", TelemetryQueue: "swlb.telemetry"}},
-		DataBrokers: []config.DataBroker{{ID: "broker-a", MessageVPN: "data"}},
+		DataBrokers: []config.DataBroker{{ID: "broker-a", AMQPEndpoint: "amqps://broker-a.invalid:5671", MessageVPN: "data"}},
 		Publisher:   config.AsyncPublisher{PublishTimeout: config.Duration{Duration: time.Second}, ShutdownTimeout: config.Duration{Duration: time.Second}},
 		Staleness:   config.StalenessPolicy{ParticipantMaxAge: config.Duration{Duration: time.Second}, TelemetryMaxAge: config.Duration{Duration: time.Second}},
 		Persistence: config.Persistence{ControllerState: t.TempDir() + "/controller.json"},
@@ -642,20 +557,19 @@ func TestAssembleControllerSuccessBindsInboxesAndRunsPolicy(t *testing.T) {
 	var order []string
 	var bindings []broker0.ParticipantQueue
 	publisher := &assemblyNativePublisher{closeRecorder{name: "publisher", order: &order}}
-	browser := &assemblyBrowser{staticBrowser: staticBrowser{err: broker0.ErrNoAuthoritativeState}, closeRecorder: closeRecorder{name: "browser", order: &order}}
 	policyCycle := &blockingPolicyCycle{started: make(chan struct{})}
 	assembler := ControllerAssembler{
-		Connect: func(context.Context, config.Config, Credentials) (*SMFConnection, error) {
-			return &SMFConnection{}, nil
+		Connect: func(context.Context, config.Config, Credentials) (*AMQPControlConnection, error) {
+			return &AMQPControlConnection{AMQPConnection: &integration.AMQPConnection{}}, nil
 		},
-		NewPublisher: func(*SMFConnection, time.Duration) (NativeControlPublisher, error) { return publisher, nil },
-		NewBrowser: func(config.Config, Credentials, broker0.MembershipQueueResolver) (broker0.Browser, error) {
-			return browser, nil
-		},
+		NewPublisher:  func(*AMQPControlConnection, time.Duration) (NativeControlPublisher, error) { return publisher, nil },
 		NewSEMPClient: func(config.DataBroker, BrokerCredentials) (SEMPQueueClient, error) { return &fakeQueueClient{}, nil },
-		BindInbox: func(_ *SMFConnection, binding broker0.ParticipantQueue, _ time.Duration) (broker0.DurableReceiver, error) {
+		BindInbox: func(_ *AMQPControlConnection, binding broker0.ParticipantQueue, _ time.Duration) (broker0.DurableReceiver, error) {
 			bindings = append(bindings, binding)
 			return &assemblyReceiver{closeRecorder: closeRecorder{name: binding.Queue, order: &order}}, nil
+		},
+		BindSnapshotRequests: func(context.Context, *AMQPControlConnection, broker0.ParticipantQueue) (broker0.SnapshotRequestReceiver, error) {
+			return &assemblySnapshotReceiver{closeRecorder: closeRecorder{name: "snapshot", order: &order}}, nil
 		},
 		NewPolicy: func(config.Config, *controller.Controller, *MembershipCatalog, map[string]SEMPQueueClient, *CommandPublisher) (PolicyCycle, error) {
 			return policyCycle, nil
@@ -695,10 +609,10 @@ func TestAssembleControllerSuccessBindsInboxesAndRunsPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantOrder := []string{
-		"swlb.ctl.orders.tel.observer.observer-1",
+		"snapshot", "snapshot", "swlb.ctl.orders.tel.observer.observer-1",
 		"swlb.ctl.orders.ack.subscriber.subscriber-1", "swlb.ctl.orders.reg.subscriber.subscriber-1",
 		"swlb.ctl.orders.ack.publisher.publisher-1", "swlb.ctl.orders.reg.publisher.publisher-1",
-		"browser", "publisher",
+		"publisher",
 	}
 	if !reflect.DeepEqual(order, wantOrder) {
 		t.Fatalf("successful assembly close order = %v, want %v", order, wantOrder)
@@ -724,4 +638,16 @@ func (passthroughFence) VerifyFence(context.Context, controller.FenceRequest) (c
 }
 func (passthroughFence) VerifyIngress(context.Context, controller.FenceRequest) (controller.IngressStatus, error) {
 	return controller.IngressStatus{Enabled: true, ObservedAt: time.Now()}, nil
+}
+
+func TestBootstrapMissingBrokerEndpointFailsBeforeProvisionOrPublish(t *testing.T) {
+	group := productionGroup()
+	cfg := config.Config{Namespace: "swlb", Groups: []config.ScalingGroup{group}, DataBrokers: []config.DataBroker{{ID: "broker-a", AMQPEndpoint: "amqps://a.example:5671", MessageVPN: "data"}, {ID: "broker-b", MessageVPN: "data"}}}
+	publisher, catalog, resources, authority := bootstrapTestDependencies(t, cfg, controller.PersistentState{Membership: map[string]control.MembershipSnapshot{}, Groups: map[string]*controller.GroupState{}})
+	if err := BootstrapMembership(context.Background(), cfg, authority.Snapshot(), publisher, catalog, resources, authority); err == nil {
+		t.Fatal("bootstrap accepted missing broker endpoint")
+	}
+	if len(publisher.snapshots) != 0 {
+		t.Fatal("published before validating complete broker inventory")
+	}
 }
