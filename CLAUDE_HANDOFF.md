@@ -27,28 +27,14 @@ No claims of production readiness, exactly-once, global ordering, autonomous Clo
 |---|---|
 | Local repo | `/Users/raphaelcaillon/Documents/github/solace-workload-balancer` |
 | GitHub remote (name differs) | `https://github.com/solacese/solace-broker-autoscale.git` |
-| Branch | `feat/customer-ready-implementation` |
-| HEAD / local main / observed origin/main | `7a5499d871dfee0c72058737ebd9abbce4957be4` |
-| HEAD title | `Fix live SDKPerf guidance and shutdown drain` |
-| Previous | `424c73c6c25ef27a007a06f33c121ada2aabacb1` — AMQP architecture/test tooling |
-| Last verified CI | success, run `36433289967`, SHA `7a5499d`, https://github.com/solacese/solace-broker-autoscale/actions/runs/36433289967 |
+| Branch used for implementation | `feat/customer-ready-implementation` |
+| Implementation baseline before the README/recovery design update | `25b0db0e3db0ac49e6cc722c3a9d5aaae6e552d4` |
+| Baseline title | `Finish live workload dashboard and SDKPerf controls` |
+| Previous | `7a5499d871dfee0c72058737ebd9abbce4957be4` — shutdown drain and SDKPerf guidance |
+| Last verified baseline CI | success, run `36445372656`, SHA `25b0db0`, https://github.com/solacese/solace-broker-autoscale/actions/runs/36445372656 |
 | Date observed | 2026-09-28 |
 
-Current WIP is intentionally uncommitted/unpushed and **known unfinished**:
-
-```text
- M Makefile
- M tools/live_dashboard.py
- M tools/sdkperf_harness.py
-?? CLAUDE_HANDOFF.md
-?? tools/dashboard.css
-?? tools/dashboard.html
-?? tools/dashboard.js
-?? tools/sdkperf_control.py
-?? tools/sdkperf_control_test.py
-```
-
-Preserve all of it. `origin/feat/customer-ready-implementation` is older; final destination is `origin/main` after completion.
+The implementation/dashboard WIP described later in this handoff was completed, committed, live-tested, and pushed before the current README/recovery design update began. Do not expect the old uncommitted file list. Use `git status`, `git log`, and GitHub Actions for current state; the publication target remains `origin/main`.
 
 Optional historical transcript (handoff is self-contained):
 
@@ -167,7 +153,7 @@ Use the operations guide for SSH/config/journals. Never print private files. No 
 
 At `2026-09-28T14:27:26Z`: target 100/s; accepted 136,539; unique delivered 136,539; unresolved 1 ordinary in-flight; current backlog 1; duplicates 0; ordering diagnostic 1; all five supervised processes running with zero dashboard-process restarts; both groups ACTIVE epoch 1 on A+B+C; persisted SDKPerf proof 100/100/100.
 
-This HTTP snapshot supports current demo behavior only; it does **not independently prove which commit/binary is deployed**. Last known deployment record was committed baseline `7a5499d`; current WIP assets were not deployed. `state`/`state_detail` were null because they exist only in WIP.
+This HTTP snapshot supports current demo behavior only; it does **not independently prove which commit/binary is deployed**. The completed dashboard/SDKPerf assets were later committed in `25b0db0`, deployed, and live-tested as recorded in section 8.
 
 The one ordering diagnostic’s cause is **unconfirmed**. Restart/metric namespace interaction is a hypothesis, not established evidence. Keep it visible and investigate; do not reset counters to explain it away. SDKPerf-versus-synthetic metric namespaces remain a task.
 
@@ -280,8 +266,6 @@ Verified live results:
 
 The UI uses the current public Solace logo asset and brand green on a compact white technical header. This is branding for the demo, not a production-readiness claim.
 
-| File | Current intent/status |
-|---|---|
 | File | Completed role |
 |---|---|
 | `tools/dashboard.html` / `.css` / `.js` | responsive technical UI, explanations, four templates, restricted console, direct examples |
@@ -339,7 +323,7 @@ Then update README briefly, scan staged files (exclude `.local`, keys, credentia
 | Subscriber | `shim/subscriber`, `runtime/{participant,participant_assembly}.go` |
 | Commands | `cmd/controller`, `cmd/publisher`, `cmd/subscriber`, `cmd/internal/participantio` |
 | SDKPerf baseline | `tools/live_dashboard.py`, `live_state.py`, `sdkperf_harness.py`, `sdkperf-adapter`, `sdkperf-provision` |
-| Current WIP | `dashboard.{html,css,js}`, `sdkperf_control.py`, control tests, modified dashboard/harness/Makefile |
+| Completed dashboard/SDKPerf work | `dashboard.{html,css,js}`, `sdkperf_control.py`, control tests, dashboard/harness/Makefile |
 
 After this task only: live fault-injected handover qualification; stale-client/readiness/drain proof; explicit uncertain-record operator workflow; restart/durability stress; multi-publisher ordering characterization; DR/transaction semantics; exact service-class capacity benchmarks and unrelated-traffic sensitivity; bounded durable observability/recovery runbook. No new feature expansion or ML claims before these fundamentals.
 

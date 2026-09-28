@@ -1,18 +1,36 @@
 # Solace Workload Balancer
 
-A Go implementation that routes related application messages directly to one of several Solace PubSub+ data brokers. A separate Solace service, **Broker 0**, carries control traffic between the controller and publisher/subscriber shims.
+A Go workload-balancing layer that routes related application messages directly to one of several Solace PubSub+ data brokers. A separate logical Solace service, **Broker 0**, carries control traffic between the controller and publisher/subscriber shims; business payloads never pass through the controller.
 
-> **Status:** AMQP 1.0 is the implemented v1 data and control transport. Local unit, race, adapter, vet, and build checks are provided. The system is not production-qualified, exactly-once, or an uninterrupted-handover solution. A live three-service separate-process run remains required.
+> **Status:** The AMQP 1.0 data and control paths, durable publisher outbox, asynchronous dispatcher, exclusive-queue subscribers, rendezvous placement, and pause/fence/drain transition state machine are implemented. Local CI and a live three-service plumbing demo have passed, including all four managed SDKPerf presets. The optional live membership-transition harness and fault-injected recovery qualification have **not** run. This is not a production-readiness, exactly-once, uninterrupted-failover, or 100,000-message/second claim.
 
-## Architecture
+## What is implemented
 
 ```text
-application -> publisher shim -> selected data broker -> subscriber shim -> application
-                         controller <-> Broker 0
-                         controller -> data-broker SEMP
+application --NDJSON--> Go publisher shim --AMQP 1.0--> selected data broker
+                                                            |
+application <--NDJSON-- Go subscriber shim <--AMQP 1.0------+
+
+                     controller <--> Broker 0 (AMQP 1.0 control)
+                     controller ----> data-broker SEMP
 ```
 
-Business payloads never pass through the controller. The customer library remains infrastructure-independent:
+- The Go publisher and subscriber use `github.com/Azure/go-amqp` to publish and consume persistent AMQP 1.0 messages. Positive settlement removes a publisher outbox record; rejected/released settlement is retryable; timeout, disconnect, or an unknown disposition becomes `ack_uncertain`.
+- The `cmd/publisher` and `cmd/subscriber` application interface is strict newline-delimited JSON over standard input/output. It is **not** an AMQP server, a Solace API implementation, or a drop-in replacement for a Solace SDK.
+- The publisher durably records messages in bbolt before dispatch. The production dispatcher concurrently submits independent ordering-lane heads, bounds unresolved native sends, and batches durable in-progress and completion mutations. `AcceptBatch` is available in Go, but the command interface accepts one NDJSON record at a time.
+- Each durable data queue is exclusive, with one serialized AMQP consumer for each broker/group/consumer-set/epoch binding. Native Solace partitioned queues are not used and are rejected by v1 configuration validation.
+- Connections and sender links are opened lazily and reused through bounded pools. Active leases prevent idle eviction while a native operation is outstanding.
+- The controller persists authoritative snapshots and transition checkpoints before publishing control actions. SEMP manages exact queue/topic resources, applies ingress fences, and supplies current drain telemetry.
+
+### Broker 0
+
+Broker 0 is a **logical control service**, not a data-routing hop. It carries durable, identity-scoped snapshot requests/replies, membership updates, commands, acknowledgements, registrations, readiness, and telemetry. Bootstrap uses correlated request/reply with participant-exclusive durable reply queues; it does not use an LVQ and the controller is not called for each business message.
+
+The current demo cohosts Broker 0 resources on data broker A. That is economical plumbing evidence, not failure isolation. A real deployment should place the logical control service on an appropriately HA Solace service and, where practical, in a failure domain independent from the data brokers. Broker 0 HA protects control availability; it does not make arbitrary data queues on independent brokers interchangeable.
+
+## Customer routing contract
+
+The infrastructure-independent customer boundary is:
 
 ```go
 type CustomerLibrary interface {
@@ -26,14 +44,12 @@ type RoutingHashPolicy interface {
 }
 ```
 
-The customer library owns both hash choices and their algorithm identifier. `BusinessHash` and `RoutingScore` are neutral 32-byte wire containers: a custom implementation may canonically expand or pad MurmurHash, xxHash, or another deterministic value into that container. The generic router only requests and compares scores. Changing a hash implementation or identifier is a coordinated migration after old durable records are drained, never a live hot-swap.
+The customer library owns the scaling group, business hash, rendezvous score function, and algorithm identifier. `BusinessHash` and `RoutingScore` are neutral 32-byte wire containers; a custom implementation may canonically expand or pad another deterministic hash into those containers.
 
-## Routing contract
-
-The v1 algorithm identifier is `swlb-rendezvous-v1`. For every immutable logical broker ID in the current membership:
+The default `swlb-rendezvous-v1` score for each immutable logical broker ID in the current membership is:
 
 ```text
-score = SHA256(
+SHA256(
   u32be(len("swlb-rendezvous-v1")) || "swlb-rendezvous-v1" ||
   u32be(len(group_utf8))            || group_utf8            ||
   u32be(32)                         || raw_business_hash      ||
@@ -41,51 +57,58 @@ score = SHA256(
 )
 ```
 
-The broker with the highest full unsigned 256-bit score wins; equal scores use the lexicographically smaller broker ID. Endpoint, membership order, and epoch are not score inputs. Broker IDs must therefore be stable across endpoint changes.
+The highest unsigned 256-bit score wins; ties select the lexicographically smaller broker ID. Membership order, endpoint, and epoch are not score inputs, so logical broker IDs must remain stable when an endpoint changes. Shims cache the authoritative membership and route locally; there is no per-message controller decision.
 
-Snapshots carry algorithm, customer hash contract, library version, revision, epoch, phase, ordered membership, credential-free broker ID/AMQP endpoint descriptors, and exact managed resources. Endpoints select connections but are not score inputs; endpoint updates preserve broker placement and create a new connection generation while existing in-events-a leases finish. Credentials stay local and are resolved by stable broker ID. Unsupported or changed contracts fail closed. Durable outbox records persist the algorithm and exact endpoint/epoch/broker/destination. An ACK-uncertain record is never silently rerouted; an operator retry is allowed only while that exact route remains current.
+Changing hash semantics or reusing an identifier with new meaning is unsafe. A new implementation/identifier requires a coordinated migration after old durable records are resolved and the previous epoch is drained.
 
-### Migration from modulo routing
+### Affinity and ordering boundaries
 
-Snapshot schema v3 requires a non-empty, bounded routing-algorithm identifier and complete broker descriptors. The default library uses `swlb-rendezvous-v1`; custom identifiers remain opaque to the controller and must match the publisher/subscriber library handshake. Existing modulo snapshots and legacy outbox records without a matching algorithm are rejected rather than reinterpreted. Upgrade requires pausing publishers, resolving all ACK-uncertain sends, draining and fencing the old epoch, deploying the controller and shims together, then activating a newly persisted snapshot. This is a coordinated migration, not an in-place algorithm flag change.
+The durable ordering key is `scaling group + customer business hash`, not a dashboard label or event family. The live demo intentionally assigns one stable `entity_id` to each visual family, so each displayed family is one ordering key; a different application may place many keys in one family.
 
-## Startup and reconnect
+Only one head per local ordering lane is submitted at a time. This preserves local same-key sequencing while independent keys can progress concurrently. Consequences:
+
+- one hot key maps to one broker and one serialized lane, so it cannot usefully consume all broker capacity without splitting the key and changing the ordering contract;
+- rendezvous placement reduces movement when stable membership changes, but does not replace fencing and draining;
+- ordering is not global across keys, publisher processes, failover, or restarts, and concurrent producers do not gain a total order merely because they compute the same broker;
+- retrying an uncertain publish or redelivering after an application failure can produce duplicates.
+
+## Authority, startup, and reconnect
 
 Each shim:
 
 1. attaches its durable update receiver and participant-exclusive reply receiver;
-2. sends a durable, uniquely correlated snapshot request on Broker 0;
-3. validates transport and JSON correlation, namespace, group, role, participant, algorithm, revision, and resource scope;
+2. sends a uniquely correlated snapshot request through Broker 0;
+3. validates transport and JSON correlation, namespace, group, role, participant, algorithm, revision, epoch, and resource scope;
 4. reconciles complete updates buffered during request/reply;
 5. enables routing only after authoritative state is installed.
 
-The controller's atomic local state is authoritative and is persisted before control publication. Request topics, request queues, and reply queues are participant/group/role scoped; arbitrary reply-to addresses are rejected. Timeouts use bounded exponential backoff. Late responses from timed-out attempts are accepted and discarded from the participant-exclusive reply queue rather than endlessly released. Reconnect revokes local authority until a fresh response succeeds.
+The controller's atomic local JSON file is the current durable authority. It is persisted with file and directory synchronization before state becomes visible or control publication proceeds. Reconnect revokes local authority until bootstrap succeeds again. Revision/epoch regression, conflicting equal revisions, changed contracts, stale replies, and incorrectly scoped control messages fail closed.
+
+This is restartable **single-controller** state, not replicated consensus and not a stale-leader fence. The proposed HA control design below is not implemented.
 
 ## Membership changes
 
-Rendezvous reduces key movement but does not remove the safety protocol. v1 pauses the whole affected group:
+The implemented per-group sequence is:
 
 ```text
 PREPARE -> PAUSE -> FENCE -> DRAIN -> COMMIT -> ACTIVATE
 ```
 
-The controller prepares target exclusive queues, waits for subscriber readiness, pauses and quiesces publishers, fences all source-epoch ingress (including brokers retained in the target membership), and requires continuously zero queued plus unacknowledged/in-progress work for the configured grace period. Missing metrics are unknown, never zero. Pre-commit recovery may roll back; after commit recovery only moves forward. Other groups remain independent.
+1. Prepare target queues/consumers and obtain readiness.
+2. Pause publishers and wait until native attempts, durable in-progress records, and `ack_uncertain` records are resolved.
+3. Fence source-epoch ingress, including retained brokers where required.
+4. Require continuously known zero queued, stored, unacknowledged, and in-progress work for the configured grace period. Missing or stale telemetry is unknown, never zero.
+5. Persist the commit point, re-verify the fence, enable and verify target ingress, publish ACTIVE, and collect participant acknowledgements.
 
-## AMQP v1 limits
+Controller operations use deterministic IDs and durable intent so restart replay is idempotent. Pre-commit rollback is permitted only with proof that source membership is intact, the target was not activated, and any attempted fence is reversible. Once COMMIT is durably reached, recovery moves forward only.
 
-- Data and Broker 0 control use AMQP 1.0 with durable messages and explicit settlement.
-- Data queues are durable **exclusive** queues with one serialized consumer per broker/group/consumer-set/epoch binding.
-- Native Solace partitioned queues are not supported by this AMQP v1 runtime and are rejected by configuration validation.
-- Publisher connections are opened lazily through a bounded pool. Connection generations and sender links are reused while valid; active leases prevent idle eviction.
-- Publisher outboxes are bbolt-backed and bounded by message count and bytes. Full outboxes apply backpressure.
-- SEMP monitoring and retry loops are bounded by configured intervals, freshness, transition deadlines, and exponential retry caps.
-- Native SMF and MQTT adapters are future work. MQTT acknowledgement and recovery semantics must be designed and qualified separately rather than mapped to AMQP settlement.
+These mechanisms are implemented and covered by broker-free tests. A real membership transition under active live traffic, process crashes, stale publishers, and network partitions remains unqualified.
 
-## Configure and run
+## Application interface
 
-Requirements: Go `1.26.4`, three existing broker services with logical Broker 0 cohosted on data broker A, AMQPS connectivity, SEMP access for the controller, and pre-provisioned queues/topics/ACLs. No Java helper is required.
+Requirements: Go `1.26.4`, existing broker services, AMQPS connectivity, SEMP access for the controller, and pre-provisioned Broker 0 resources and ACLs. No Java helper is required for normal operation.
 
-Start from [`config.example.yaml`](config.example.yaml). It uses exclusive queues only and environment-variable names rather than secrets.
+Start from [`config.example.yaml`](config.example.yaml); it contains generic endpoints and environment-variable names, not credentials.
 
 ```bash
 make validate
@@ -96,76 +119,120 @@ make build
 ./bin/publisher -config config.example.yaml -participant events-a-publisher-1
 ```
 
-The publisher and subscriber command protocols are newline-delimited JSON. Example input:
+Publisher input is one NDJSON object per line:
 
 ```json
-{"event_id":"events-a-event-1","topic":"synthetic/events","headers":{"scaling-group":"events-a","entity_id":"UA","event_type":"123","timestamp":"2026-09-25","sequence":"ORD-LAX"},"payload_base64":"e30="}
+{"event_id":"events-a-event-1","topic":"synthetic/events","headers":{"scaling-group":"events-a","entity_id":"entity-001","event_type":"updated","sequence":"1"},"payload_base64":"e30="}
 ```
 
-A publisher receipt confirms only local durable outbox acceptance, not broker acknowledgement. Subscriber `ack` means application processing completed and AMQP acceptance succeeded; retry/reject paths do not provide exactly-once processing.
+A publisher receipt confirms only local durable outbox acceptance, not broker acknowledgement. The subscriber emits an NDJSON delivery and waits for a matching `ack`, `retry`, `reject`, or `release` directive. In the current command adapter, `reject` and the legacy-named `release` directive both call AMQP `RejectMessage` and, after successful settlement, unblock the local key; neither emits an AMQP `Released` outcome. `ack` means application handling returned success and AMQP acceptance succeeded; this still does not provide exactly-once processing.
 
-## Verification
+## Verification and evidence boundaries
 
 ```bash
 make test
+make test-python
 make test-race
 make vet
 make build
 make integration
-# or all local checks:
+# all local CI checks:
 make ci
 ```
 
-The local tests cover fixed rendezvous vectors, order/endpoint invariance, add/remove movement, distribution, a 100,000-key 200→201 simulation, request/reply bootstrap races, correlation/scope rejection, reconnect fail-closed behavior, controller persistence ordering, transition safety, AMQP settlement mapping, durable outbox behavior, and bounded pool concurrency.
+Local tests cover fixed rendezvous vectors, order/endpoint invariance, membership add/remove movement, distribution, a **100,000-key placement simulation**, request/reply races, correlation/scope rejection, reconnect fail-closed behavior, persistence ordering, transition checkpoints, AMQP settlement mapping, durable outbox behavior, async dispatch concurrency/batching, and bounded pools. The 100,000-key test checks placement behavior; it is not 100,000 msg/s performance proof.
 
-## Live smoke harness and qualification gap
+### Live plumbing evidence
 
-`integration/separate_process_test.go` is an opt-in repository-owned smoke harness that launches one controller plus Events A and Events B publisher/subscriber processes. It requires already-provisioned resources and does not create or delete infrastructure. The opt-in repository-owned smoke harness needs exactly:
+The public read-only dashboard is <https://workload.sol-se-emea.com>.
 
-- three AMQP broker services (`A`, `B`, `C`), with logical Broker 0 cohosted on service `A` under separate namespaced control resources;
-- SEMP access to those three data brokers;
-- participant-scoped durable request, reply, update, command, registration, acknowledgement, and telemetry queues/topics;
-- exclusive epoch data queues for Events A and Events B;
-- distinct controller, publisher, subscriber, and observer credentials/ACLs.
+On 2026-09-28, the live demo used three Solace Cloud Enterprise 1K Standalone services, with logical Broker 0 cohosted on data broker A. Five stable event-family keys were routed through the real customer hash and rendezvous implementation at a combined synthetic target of 100 messages/second. The four managed SDKPerf presets passed:
 
-The smoke scenario requires an authorized policy stimulus to drive Events A `A -> A+B -> A+B+C -> A+B`. It validates exact ACTIVE memberships, stable Events B membership plus completion of the initial 20 Events B deliveries, durable publisher receipts, submitted event-ID completeness, per-group ordering, application ACK commands written to subscriber stdin, and separately reports at-least-once duplicates. It has **not** been run in this change. Traffic is submitted only once before transition observation, not continuously throughout every phase, and an ACK command written to subscriber stdin is not independent broker-observed settlement proof. It does not force process restarts or prove stale-publisher rejection, fence NACKs, readiness timing, or continuous-zero drain evidence; those remain full live qualification gates. No paid infrastructure was provisioned and no prior spending authorization was reused.
+| Preset | Messages | Rate | Payload |
+|---|---:|---:|---:|
+| Quick check | 100 | 25/s | 256 B |
+| Steady | 1,000 | 50/s | 256 B |
+| Burst | 1,000 | 100/s | 256 B |
+| Larger messages | 100 | 25/s | 8,192 B |
 
-## Non-goals and limitations
+The final larger-message run independently recorded producer/native-publish/native-delivery/sink counts of `100/100/100/100`. Rate controls are bounded to 0–500 synthetic messages/second, and the demo circuit breaker pauses submissions at 1,000 current queued/unacknowledged messages.
 
-No global ordering across publisher processes, exactly-once delivery, automatic weight adjustment, selective per-key draining, infinite scaling, uninterrupted publication during handover, automatic cloud provisioning, or production-readiness claim is made.
+This proves interoperability and the currently deployed plumbing at demo scale. It does **not** prove 100K throughput, a broker or controller failover, a membership change, recovery from uncertain acknowledgements, or production capacity.
 
-## Running live demo
+### SDKPerf is test-only
 
-Public read-only dashboard: **https://workload.sol-se-emea.com**
-
-The demo uses three Solace Cloud Enterprise 1K Standalone services. Logical Broker 0 control resources are cohosted on data broker A. The generator sends five ordered families in `events-a` at a combined target of 100 messages/second; `events-b` remains ACTIVE and idle for this view. Stable keys map through the real customer hash and rendezvous contract in a 2–2–1 family placement, producing an honest 40/40/20 split at equal family rates. The broker-depth circuit breaker pauses submissions at 1,000 current queued/unacknowledged messages.
-
-Private operational files are ignored under `.local/live-neutral-20260928/`. The dashboard admin password remains only in `.local/live-20260928-121042/admin-token`.
-
-```bash
-# AWS host status
-ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
-  'systemctl status swlb caddy --no-pager'
-
-# Stop or start the complete workload
-ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
-  'sudo systemctl stop swlb'
-ssh -i .local/live-20260928-121042/lightsail-default.pem ubuntu@3.93.230.1 \
-  'sudo systemctl start swlb'
-```
-
-Rate controls are available on the same HTTPS page after login and are bounded to 0–500 messages/second total. Current queue depth comes from SEMP queue-message collection `meta.count`; lifetime `spooledMsgCount` is not used as backlog. AWS baseline is $24/month for the Lightsail instance, excluding Solace Cloud contract costs. This remains a live plumbing demo, not production qualification; no real membership transition has been exercised.
-
-### Optional SDKPerf test path
-
-SDKPerf is **test-environment tooling only**. The normal controller, publisher, subscriber, and customer library remain native Go and have no JVM, SDKPerf, adapter, or extra-ingress dependency. The official SDKPerf Java 10.30.2 package is JCSMP/SMF, not AMQP. The optional test path is therefore:
+SDKPerf Java 10.30.2 uses JCSMP/SMF, not AMQP. The optional managed test path is:
 
 ```text
 SDKPerf producer (SMF) -> dedicated Broker A test queue -> Go test adapter
-  -> already-running native publisher shim -> AMQP data brokers -> already-running native subscriber shim
+  -> existing Go publisher shim -> AMQP 1.0 data brokers -> existing Go subscriber shim
   -> Go test adapter -> dedicated durable result queue -> SDKPerf consumer (SMF)
 ```
 
-`tools/sdkperf_harness.py` bounds message count, rate, and duration; verifies the real SDKPerf producer exit status, native shim counts, and unique run-correlated messages printed by the real SDKPerf consumer; redacts credentials; and terminates complete child process groups. `tools/sdkperf-adapter` preserves source payload bytes and is intentionally absent from default builds and startup. Its generated test IDs and in-memory sequence do not provide exactly-once or restart-stable ordering guarantees.
+The adapter preserves source payload bytes and verifies run-correlated results. This demonstrates SMF-to-existing-Go-shims-to-SMF interoperability. It does **not** make the NDJSON command interface an SMF/AMQP server, establish Solace SDK API compatibility, or add Java/SDKPerf to the production path. Direct SDKPerf examples shown by the dashboard bypass the shims and are labeled accordingly.
 
-After authentication, the dashboard provides four editable managed templates and a restricted SDKPerf command terminal. The terminal accepts normal SDKPerf syntax only through an explicit allowlist, injects fixed private connection and destination settings, runs without a shell, and exposes bounded redacted output. One SDKPerf execution may run at a time; managed runs pause synthetic traffic and restore its prior rate on pass, failure, or cancellation. Expandable fixed direct-broker examples are labeled as bypassing the shims. Test credentials remain in the private service environment and never appear in public status, HTML, or persisted evidence. Official download: <https://products.solace.com/download/SDKPERF_JAVA>.
+### Optional transition harness still unrun
+
+`integration/separate_process_test.go` is an opt-in harness that launches separate controller, publisher, and subscriber processes against existing, pre-provisioned services. It does not create or delete infrastructure. Its planned scenario observes `A -> A+B -> A+B+C -> A+B` for one group while another remains stable.
+
+It has **not** been run for the current implementation. Its current traffic submission also does not cover every transition phase continuously, and application-written ACK commands are not independent broker-observed settlement evidence. Full qualification must add the failure cases listed below.
+
+## Proposed fail-safe failover and automatic recovery — not implemented
+
+The safe design separates two fundamentally different events:
+
+1. **Broker-service HA under one logical broker ID.** An HA Solace service can fail over its active node while retaining the same logical service, durable queues, and identity. Shims reconnect to the same logical broker and resume from durable state. This should be the primary automatic data-plane recovery mechanism.
+2. **Reassignment to an independent broker.** This creates a new queue and routing membership. If the source broker is unreachable, its queue depth, unacknowledged deliveries, and publisher outcomes are unknown. The system cannot safely assume that source is drained. Strict zero-loss plus per-key ordering therefore requires waiting for source recovery. An operator may explicitly choose a documented business RPO/RTO compromise, but the system must never invisibly purge, replay, or reroute unknown work.
+
+### Proposed control-plane architecture
+
+- Run multiple controller replicas but permit exactly one active leader. Store a replicated transition journal in a quorum system that supports linearizable compare-and-swap. Every mutation includes a monotonically increasing controller **term** and group **epoch**.
+- Acquire leadership by CAS, durably append intent before side effects, then append observed broker/participant proof. Replays use deterministic operation IDs and resume from the journal.
+- Enforce stale-leader exclusion at a proposed management guard in front of SEMP; stock SEMP is not claimed to understand this system's terms. The guard must be the only network/credential path to managed SEMP resources, reject stale terms, serialize and drain every admitted prior-term operation (including asynchronously forwarded requests), then re-observe broker state before granting a new term. A term check before asynchronous forwarding is not atomic fencing, and direct SEMP access would bypass it. Term-scoped credentials are an alternative only if qualification proves revocation closes existing authenticated sessions and prevents or drains every already-admitted prior-term operation. A lease value, request header, or simple credential rotation is insufficient. If this fence cannot be proven, automatic promotion must stop and require an operator.
+- Place Broker 0 on an HA logical control service. Do not use an arbitrary data broker failover as a substitute for control-plane consensus, and do not infer leadership from Broker 0 connectivity alone.
+- Give participants a signed or otherwise authenticated authority record containing term, epoch, revision, and expiry. The current and default behavior remains fail closed after authority expires. Any proposed cached-authority continuation must also prove stale-controller exclusion, broker-enforced source-ingress fencing, and coordinated participant pause/readiness before a membership change; otherwise cached state may route only under the unchanged membership and no availability exception is safe.
+- Replicate controller state and define backup/restore objectives. Existing bbolt publisher outboxes are durable only on their local disk. Node loss can therefore lose accepted-but-unacknowledged records unless that disk is synchronously replicated or the application retains its own source of truth; document the resulting RPO explicitly.
+
+### Proposed recovery rules
+
+- **Before COMMIT:** rollback only when the journal and fresh broker proof establish that source membership is intact, target ingress was never active, and every attempted source fence can be reversed. Otherwise remain paused and escalate.
+- **At or after COMMIT:** move forward only. Re-verify the source fence under the current controller term, enable/verify target ingress, republish idempotent commands, and wait for exact participant acknowledgements.
+- **ACK uncertain:** never blindly retry or route to another broker. A scoped operator/API action may retry only the exact still-current broker/endpoint/epoch/destination; it can duplicate. Applications needing stronger outcomes require a business event ID plus an idempotent or transactional consumer/deduplication store.
+- **Backpressure:** bound reconnect and publish retries with exponential delay/jitter, cap outboxes by count/bytes, stop admissions before disk exhaustion, and apply per-group cooldown after recovery. Slow consumers remain a capacity/poison-message issue, not a reason to bypass ordering.
+- **Retry/release versus quarantine:** AMQP `Released` makes a delivery eligible for redelivery; it is not discard or DLQ placement and does not guarantee that the key progresses. Keep the lane blocked while retry/redelivery remains possible. Only a business-authorized terminal reject, quarantine/DLQ move, or explicit skip may unblock the key, and each changes that key's business-order semantics. Record that decision as an explicit policy and audit event.
+
+### Proposed fault decision matrix
+
+| Fault/evidence | Automatic action | Stop or escalate when |
+|---|---|---|
+| HA node loss, same logical broker/service and durable queue | reconnect with bounded backoff; bootstrap fresh authority; resume exact outbox routes | service identity, queue durability, or ACK state cannot be verified |
+| Broker 0 unavailable | retain durable local state; fail closed when authority expires | no fresh authenticated authority or control service loses quorum |
+| Controller process crash | elected leader loads replicated journal and resumes the idempotent phase | leadership term cannot be broker-side fenced or journal quorum is unavailable |
+| Stale controller or controller network partition | management guard rejects stale terms, drains admitted prior-term operations, re-observes broker state, then grants the new term | direct SEMP bypass exists, existing sessions/prior operations are not fenced, both sides can mutate brokers, or clocks/leases are the only protection |
+| Data broker unreachable before drain proof | pause affected group and wait for recovery | queue/unacked state remains unknown; independent-broker promotion needs explicit RPO approval |
+| Failure after durable COMMIT | current leader proceeds forward and re-verifies each side effect | source fence or target ingress cannot be freshly verified |
+| Publisher crash with durable disk intact | reopen outbox; resolve exact-route records; do not reroute uncertain sends | disk is lost/corrupt/full or route is no longer current |
+| ACK timeout/disconnect | mark `ack_uncertain`; block that ordering lane | no authoritative late result; operator decides exact-route retry versus business reconciliation |
+| Slow/poisoned consumer | backpressure group; bounded retry; explicit reject/DLQ policy | drain deadline expires, backlog grows, or preserving order conflicts with DLQ action |
+| Disk full on controller/outbox | stop new admissions and control mutations; alert before reserve is exhausted | durable journal/outbox write or fsync cannot complete |
+
+### Proposed implementation and acceptance phases
+
+1. **Define invariants and policy:** choose RPO/RTO per fault class; specify logical broker identity, queue durability, term/epoch rules, cached-authority policy, exact-route uncertain-ACK workflow, DLQ ordering impact, retry ceilings, cooldown, and operator approvals.
+2. **Replicate control state:** replace the single local JSON authority with a quorum journal/CAS store; add snapshots, compaction, backups, schema migration, and deterministic replay tests.
+3. **Add real fencing and leadership:** implement term acquisition plus the exclusive SEMP management guard described above. Test already-admitted asynchronous requests and existing sessions, prove the prior term is drained and broker state re-observed before promotion, and prove that a partitioned old leader cannot change ingress or publish an accepted newer-revision command. Fail closed if any bypass or fencing gap remains.
+4. **Harden participants and durability:** authenticate authority records, add bounded reconnect state machines, expose `ack_uncertain` reconciliation, define local-disk replication/RPO, reserve disk space, and add explicit operator/audit APIs. Keep the current default fail-closed behavior; allow cached authority only for unchanged membership unless source-ingress fencing and participant coordination for a change have been proven.
+5. **Implement broker recovery policy:** automatically reconnect only within the same HA logical broker. For independent-broker reassignment, require fresh source drain/fence evidence or an explicit recorded business-RPO override.
+6. **Qualify under active traffic:** inject controller crashes before/after every persisted phase checkpoint, stale leaders, Broker 0 partitions, publisher/subscriber restarts, data-broker loss, slow consumers, disk-full conditions, and uncertain ACKs. Run traffic continuously throughout transitions; verify no stale ingress, bounded backpressure/retries, expected duplicate bounds, per-key order under the declared policy, journal replay, and operator stop conditions.
+7. **Promote cautiously:** canary one group, retain manual abort, measure recovery against the declared RTO/RPO, and qualify the exact Solace service class, client version, network, payload mix, and multipublisher topology before any production claim.
+
+## Current non-goals and limitations
+
+No claim is made for exactly-once delivery, global ordering, automatic independent-broker failover, controller HA, zero-loss recovery from an unreachable source, selective per-key draining, unlimited hot-key scaling, native SMF/MQTT adapters, autonomous Solace Cloud provisioning, ML-based scaling, 100K msg/s, or production readiness.
+
+## Solace references
+
+- [Using AMQP 1.0](https://docs.solace.com/API/AMQP/Using-AMQP.htm)
+- [AMQP 1.0 messaging management](https://docs.solace.com/Services/Managing-AMQP-Messaging.htm)
+- [Guaranteed messages and durable endpoints](https://docs.solace.com/Messaging/Guaranteed-Msg/Guaranteed-Messages.htm)
+- [SDKPerf downloads](https://products.solace.com/download/SDKPERF_JAVA)
