@@ -12,6 +12,10 @@ class DashboardSDKPerfControlTest(unittest.TestCase):
   self.assertIn('Direct broker smoke test — bypasses the shims',source)
   self.assertIn('"$SDKPERF_CMD" "-cip=$SMF_URL"',source)
   self.assertIn("copyText('directConsumer')",source)
+ def test_persisted_sdkperf_evidence_is_restored(self):
+  source=Path(__file__).with_name("live_dashboard.py").read_text()
+  self.assertIn("def latest_sdkperf_status()",source)
+  self.assertIn('"consumer_received":int(data["sdkperf_consumer_unique"])',source)
  def test_shutdown_has_bounded_publisher_drain(self):
   source=Path(__file__).with_name("live_dashboard.py").read_text()
   self.assertIn("deadline=time.monotonic()+15",source)
