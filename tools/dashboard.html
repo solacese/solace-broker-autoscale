@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Solace Workload Balancer</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body data-palette="#1D4ED8,#C2410C,#047857,#7E22CE,#A16207">
+<header>
+  <div class="brand"><img src="/solace-logo.svg" alt="Solace"><div><h1>Solace Workload Balancer</h1><div class="header-subtitle">Technical status and test controls for ordered event-family routing across three brokers.</div></div></div>
+  <div id="auth"></div>
+</header>
+<main>
+  <section id="systemState" class="state-banner" aria-live="polite"></section>
+  <details class="panel guide">
+    <summary>How to read this page</summary>
+    <div class="guide-grid">
+      <p><b>Rates</b> are recent messages/second. Target is requested generation; accepted and delivered are observed.</p>
+      <p><b>Accepted</b> means the publisher wrote a durable local outbox receipt. It is not a broker ACK.</p>
+      <p><b>Backlog</b> is current queue message depth from SEMP <code>meta.count</code>, never the cumulative lifetime spool counter.</p>
+      <p><b>Latency</b> is the recent dashboard-observed submit-to-delivery interval. It is not a full distributed trace or SLA.</p>
+      <p><b>Order / duplicate</b> checks use a bounded in-memory observation window per run, group, and entity. They do not prove exactly-once delivery.</p>
+      <p><b>Assignments</b> are cumulative publisher choices since this dashboard process started; queue rates show current broker activity.</p>
+      <p><b>Membership</b> is authoritative control state. ACTIVE serves traffic; epoch identifies the routing generation.</p>
+      <p><b>SDKPerf</b> is optional test-only SMF/JCSMP source and sink tooling bridged through the native Go AMQP shims.</p>
+    </div>
+  </details>
+
+  <section class="stats" id="stats"></section>
+
+  <section class="graph" aria-label="Workload balancer architecture">
+    <div class="graph-title"><h2>Routing topology</h2><span>Current process observations</span></div>
+    <div class="shim"><div class="component-label">Ingress</div><h3>Publisher shim</h3><div>One stable ordering key per family · customer hash and rendezvous selection</div></div>
+    <div class="family-legend" id="familyLegend"></div>
+    <div class="connector" aria-hidden="true"></div>
+    <div class="broker-row" id="brokerNodes"></div>
+    <div class="family-routes" id="familyRoutes"></div>
+    <div class="connector" aria-hidden="true"></div>
+    <div class="shim"><div class="component-label">Egress</div><h3>Subscriber shim</h3><div>Family-local sequence is observed before application ACK</div></div>
+  </section>
+
+  <section class="panel family-panel"><div class="section-heading"><div><h2>Event-family routing</h2></div><p>All five use scaling group <code>events-a</code>. The real rendezvous contract maps the selected keys 2–2–1 across Brokers 1/2/3. Equal 20/s family rates produce a measured 40/40/20 split.</p></div><div id="familyCards" class="family-cards"></div></section>
+
+  <section class="brokers" id="brokers"></section>
+  <section class="groups" id="groups"></section>
+  <section class="groups">
+    <div class="panel"><h2>Process health</h2><p class="hint">Current supervised Go processes and process-lifetime restart counts.</p><div id="processes"></div></div>
+    <div class="panel"><h2>Membership</h2><p class="hint">Controller-authoritative phase, epoch, and active broker IDs.</p><div id="membership"></div></div>
+  </section>
+
+  <section class="panel sdkperf-panel">
+    <h2>SDKPerf test environment</h2>
+    <p class="hint">Optional test tooling only. Managed tests use SDKPerf as the SMF source and sink, with the existing Go publisher/subscriber shims carrying the workload across all active brokers.</p>
+    <div id="sdkperfStatus"></div>
+    <div id="sdkperfLocked" class="locked-note">Unlock controls to edit and run SDKPerf tests.</div>
+    <div id="sdkperfWorkspace" hidden>
+      <h3>Four managed templates</h3>
+      <div id="templates" class="templates"></div>
+      <div class="test-form">
+        <label>Group<select id="testGroup"><option value="events-a">Events A</option><option value="events-b">Events B</option></select></label>
+        <label>Messages<input id="testMessages" type="number" min="1" max="1000"></label>
+        <label>Rate / second<input id="testRate" type="number" min="1" max="100"></label>
+        <label>Payload bytes<input id="testPayload" type="number" min="1" max="8192"></label>
+        <label>Entity keys<input id="testEntities" type="number" min="1" max="1000"></label>
+        <label>Timeout seconds<input id="testDuration" type="number" min="10" max="300"></label>
+      </div>
+      <p class="hint">Limits: 1–1,000 messages, 1–100 msg/s, 1–8,192 payload bytes, 1–1,000 entity keys, 10–300 seconds. The prior synthetic rate is restored after pass, failure, or stop.</p>
+      <pre id="managedPreview" class="command-preview"></pre>
+      <div class="button-row"><button id="runTemplate">Run managed test</button><button id="stopTest" class="secondary">Stop</button></div>
+
+      <details class="console-details">
+        <summary>Restricted SDKPerf command terminal</summary>
+        <p class="hint">This is not an operating-system shell. It executes only the configured SDKPerf binary with validated arguments and <code>shell=False</code>. Pipes, redirects, substitutions, arbitrary hosts, credentials, files, JVM options, and profile options are rejected.</p>
+        <p class="hint"><b>Managed mode</b> traverses the Go shims. Type normal SDKPerf arguments; group, entity count, and timeout come from the editable fields above. Supported: <code>-mn</code>, <code>-mr</code>, <code>-msa</code>, plus bounded <code>-ped</code>, <code>-lb</code>, <code>-lg</code>, <code>-psv</code>, <code>-l</code>, <code>-psm</code>, and <code>-soe</code>. Info mode supports <code>-v</code>, <code>-h</code>, <code>-hm</code>, and <code>-he</code>.</p>
+        <label>Execution mode<select id="consoleMode"><option value="managed">Managed through Go shims</option><option value="direct">Direct broker (fixed examples only)</option></select></label>
+        <textarea id="consoleCommand" rows="3" spellcheck="false">sdkperf_java.sh -mn=100 -mr=25 -msa=256 -l</textarea>
+        <div class="button-row"><button id="runConsole">Run command</button><button id="stopConsole" class="secondary">Stop</button><button id="copyConsole" class="secondary">Copy command</button><button id="clearConsole" class="secondary">Clear output</button><button id="helpConsole" class="secondary">Help</button></div>
+        <div id="consoleMeta" class="hint"></div>
+        <pre id="consoleOutput" class="terminal" aria-live="polite"></pre>
+      </details>
+    </div>
+
+    <details>
+      <summary>Direct SDKPerf CLI examples</summary>
+      <p>Prerequisites: Java, the <a href="https://products.solace.com/download/SDKPERF_JAVA" rel="noreferrer">official SDKPerf Java package</a>, and private values exported as <code>SDKPERF_CMD</code>, <code>SMF_URL</code>, <code>SDKPERF_USERNAME</code>, <code>VPN</code>, and <code>SDKPERF_PASSWORD</code>. Start the subscriber first.</p>
+      <p><b>Direct broker smoke test — bypasses the shims.</b> It uses a dedicated topic and does not test Broker 0 discovery or rendezvous placement.</p>
+      <pre id="directConsumer">"$SDKPERF_CMD" "-cip=$SMF_URL" "-cu=$SDKPERF_USERNAME@$VPN" "-cp=$SDKPERF_PASSWORD" -mt=persistent -stl=swlb-sdkperf/direct-smoke -md</pre><button data-copy="directConsumer">Copy subscriber</button>
+      <pre id="directProducer">"$SDKPERF_CMD" "-cip=$SMF_URL" "-cu=$SDKPERF_USERNAME@$VPN" "-cp=$SDKPERF_PASSWORD" -mt=persistent -ptl=swlb-sdkperf/direct-smoke -mn=100 -mr=25 -msa=256 -ped=2</pre><button data-copy="directProducer">Copy producer</button>
+    </details>
+  </section>
+
+  <section class="panel"><h2>Recent generic events</h2><p class="hint">A bounded, sanitized display window—not an audit log. Event IDs are replaced before publication.</p><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>Group</th><th>Event ID</th><th>Entity</th><th>Duplicate</th></tr></thead><tbody id="events"></tbody></table></div></section>
+</main>
+<script type="module" src="/dashboard.js"></script>
+</body>
+</html>

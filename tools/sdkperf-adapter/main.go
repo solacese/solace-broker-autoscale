@@ -38,6 +38,11 @@ type bridgeInput struct {
 	Error         string `json:"error,omitempty"`
 }
 
+func belongsToRun(eventID, runID string) bool {
+	prefix := "sdkperf-" + runID + "-"
+	return len(eventID) > len(prefix) && eventID[:len(prefix)] == prefix
+}
+
 type bridgeOutput struct {
 	Kind       string          `json:"kind"`
 	Publish    *publisherInput `json:"publish,omitempty"`
@@ -194,6 +199,9 @@ func (b *bridge) readDashboard(ctx context.Context, scanner *bufio.Scanner) erro
 				}
 			}
 		case "delivery":
+			if !belongsToRun(input.EventID, b.options.runID) {
+				return fmt.Errorf("sdkperf-adapter: delivery event %q is outside run %q", input.EventID, b.options.runID)
+			}
 			payload, err := base64.StdEncoding.DecodeString(input.PayloadBase64)
 			if err == nil {
 				sender, senderErr := b.conn.Session.NewSender(ctx, integration.TopicAddress(b.options.resultTopic+"/"+input.EventID), nil)

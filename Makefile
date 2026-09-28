@@ -30,7 +30,7 @@ test:
 	$(GO) test ./...
 
 test-python:
-	cd tools && python3 -m unittest live_state_test.py sdkperf_harness_test.py live_dashboard_test.py
+	cd tools && python3 -m unittest live_state_test.py sdkperf_control_test.py sdkperf_harness_test.py live_dashboard_test.py
 
 test-race:
 	$(GO) test -race ./...
