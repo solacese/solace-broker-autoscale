@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" role="img" aria-labelledby="title desc">
+  <title id="title">Solace workload balancer architecture</title>
+  <desc id="desc">The controller exchanges control messages through Broker 0 and manages data brokers through SEMP. A customer library supplies routing decisions to the publisher and subscriber shims. Business messages travel directly from the publisher shim through one selected data broker to the subscriber shim. Animated dots illustrate that messages with the same business key choose the same broker while membership is stable.</desc>
+  <style>
+    :root { color-scheme: light dark; }
+    .surface { fill: #fcfcfb; }
+    .box { fill: #ffffff; stroke: #c3c2b7; stroke-width: 1.5; }
+    .control-box { fill: #edf5ff; stroke: #2a78d6; stroke-width: 1.5; }
+    .broker { fill: #f4f3ef; stroke: #898781; stroke-width: 1.5; }
+    .ink { fill: #0b0b0b; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .secondary { fill: #52514e; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .label { font-size: 15px; font-weight: 650; }
+    .small { font-size: 12px; }
+    .control { fill: none; stroke: #2a78d6; stroke-width: 2; stroke-dasharray: 6 5; marker-end: url(#arrow-blue); }
+    .semp { fill: none; stroke: #4a3aa7; stroke-width: 2; stroke-dasharray: 2 5; marker-end: url(#arrow-violet); }
+    .data { fill: none; stroke: #52514e; stroke-width: 2.2; marker-end: url(#arrow-gray); }
+    .policy { fill: none; stroke: #1baf7a; stroke-width: 2; marker-end: url(#arrow-green); }
+    .moving { stroke: #fcfcfb; stroke-width: 2; }
+    .static-dot { display: none; stroke: #fcfcfb; stroke-width: 2; }
+    .key-a { fill: #2a78d6; }
+    .key-b { fill: #eb6834; }
+    .key-c { fill: #1baf7a; }
+    @media (prefers-color-scheme: dark) {
+      .surface { fill: #1a1a19; }
+      .box { fill: #232321; stroke: #52514e; }
+      .control-box { fill: #17283d; stroke: #3987e5; }
+      .broker { fill: #2c2c2a; stroke: #898781; }
+      .ink { fill: #ffffff; }
+      .secondary { fill: #c3c2b7; }
+      .data { stroke: #c3c2b7; }
+      .moving, .static-dot { stroke: #1a1a19; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .moving { display: none; }
+      .static-dot { display: inline; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/></marker>
+    <marker id="arrow-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4a3aa7"/></marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#898781"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1baf7a"/></marker>
+    <path id="to-a" d="M 220 290 C 250 290 260 265 300 265"/>
+    <path id="from-a" d="M 400 265 C 620 265 655 290 710 290"/>
+    <path id="to-b" d="M 220 300 C 300 300 340 315 420 315"/>
+    <path id="from-b" d="M 520 315 C 600 315 630 300 710 300"/>
+    <path id="to-c" d="M 220 310 C 360 310 430 365 540 365"/>
+    <path id="from-c" d="M 640 365 C 675 365 685 310 710 310"/>
+  </defs>
+
+  <rect class="surface" width="900" height="430" rx="14"/>
+  <text class="secondary small" x="20" y="24">Illustrative architecture — animation is not live telemetry</text>
+
+  <rect class="control-box" x="360" y="38" width="180" height="54" rx="9"/>
+  <text class="ink label" x="450" y="61" text-anchor="middle">Controller</text>
+  <text class="secondary small" x="450" y="79" text-anchor="middle">membership + transitions</text>
+
+  <rect class="control-box" x="360" y="126" width="180" height="54" rx="9"/>
+  <text class="ink label" x="450" y="149" text-anchor="middle">Broker 0</text>
+  <text class="secondary small" x="450" y="167" text-anchor="middle">AMQP request/reply + updates</text>
+
+  <rect class="box" x="35" y="132" width="190" height="58" rx="9"/>
+  <text class="ink label" x="130" y="156" text-anchor="middle">Customer library</text>
+  <text class="secondary small" x="130" y="175" text-anchor="middle">group · business hash · score</text>
+
+  <path class="control" d="M 450 92 L 450 126" marker-start="url(#arrow-blue)"/>
+  <path class="control" d="M 360 153 L 260 153 L 260 212 L 145 212 L 145 252" marker-start="url(#arrow-blue)"/>
+  <path class="control" d="M 540 153 L 650 153 L 650 212 L 785 212 L 785 252" marker-start="url(#arrow-blue)"/>
+  <text class="secondary small" x="255" y="174">control</text>
+  <text class="secondary small" x="627" y="174">control</text>
+
+  <path class="semp" d="M 540 65 L 665 65 L 665 225 L 350 225 L 350 247"/>
+  <path class="semp" d="M 665 225 L 470 225 L 470 297"/>
+  <path class="semp" d="M 665 225 L 590 225 L 590 347"/>
+  <text class="secondary small" x="676" y="118">SEMP</text>
+
+  <rect class="box" x="40" y="252" width="180" height="76" rx="10"/>
+  <text class="ink label" x="130" y="281" text-anchor="middle">Publisher shim</text>
+  <text class="secondary small" x="130" y="302" text-anchor="middle">cached membership</text>
+  <text class="secondary small" x="130" y="318" text-anchor="middle">local rendezvous routing</text>
+  <path class="policy" d="M 130 190 L 130 252"/>
+
+  <rect class="broker" x="300" y="247" width="100" height="52" rx="9"/>
+  <text class="ink label" x="350" y="278" text-anchor="middle">Broker A</text>
+  <rect class="broker" x="420" y="297" width="100" height="52" rx="9"/>
+  <text class="ink label" x="470" y="328" text-anchor="middle">Broker B</text>
+  <rect class="broker" x="540" y="347" width="100" height="42" rx="9"/>
+  <text class="ink label" x="590" y="373" text-anchor="middle">Broker C</text>
+
+  <rect class="box" x="710" y="252" width="160" height="76" rx="10"/>
+  <text class="ink label" x="790" y="281" text-anchor="middle">Subscriber shim</text>
+  <text class="secondary small" x="790" y="302" text-anchor="middle">direct AMQP delivery</text>
+  <text class="secondary small" x="790" y="318" text-anchor="middle">application settlement</text>
+
+  <use href="#to-a" class="data"/><use href="#from-a" class="data"/>
+  <use href="#to-b" class="data"/><use href="#from-b" class="data"/>
+  <use href="#to-c" class="data"/><use href="#from-c" class="data"/>
+
+  <circle class="moving" r="6" fill="#2a78d6"><animateMotion dur="3.6s" repeatCount="indefinite"><mpath href="#to-a"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#2a78d6"><animateMotion dur="3.6s" begin="1.8s" repeatCount="indefinite"><mpath href="#from-a"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#eb6834"><animateMotion dur="3.2s" repeatCount="indefinite"><mpath href="#to-b"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#eb6834"><animateMotion dur="3.2s" begin="0.8s" repeatCount="indefinite"><mpath href="#to-b"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#eb6834"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite"><mpath href="#from-b"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#1baf7a"><animateMotion dur="4s" repeatCount="indefinite"><mpath href="#to-c"/></animateMotion></circle>
+  <circle class="moving" r="6" fill="#1baf7a"><animateMotion dur="4s" begin="2s" repeatCount="indefinite"><mpath href="#from-c"/></animateMotion></circle>
+
+  <circle class="static-dot" cx="272" cy="278" r="6" fill="#2a78d6"/>
+  <circle class="static-dot" cx="335" cy="307" r="6" fill="#eb6834"/>
+  <circle class="static-dot" cx="375" cy="310" r="6" fill="#eb6834"/>
+  <circle class="static-dot" cx="446" cy="344" r="6" fill="#1baf7a"/>
+
+  <circle class="key-b" cx="320" cy="414" r="5"/><circle class="key-b" cx="335" cy="414" r="5"/>
+  <text class="secondary small" x="350" y="418">same key → same broker while membership is stable</text>
+</svg>
